@@ -40,7 +40,7 @@ object CsqttConstants {
 
         const val WORKERS_PER_GROUP = 10
         const val GROUPS_PER_VK_HASH = 1
-        const val MAX_VK_HASHES = 7
+        const val MAX_VK_HASHES = 6
         const val DEFAULT_MAX_WORKERS = 100
         const val MAX_WORKERS = 100
     }

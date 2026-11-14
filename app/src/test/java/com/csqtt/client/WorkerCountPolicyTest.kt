@@ -26,7 +26,7 @@ class WorkerCountPolicyTest {
         assertEquals(40, WorkerCountPolicy.maximumForHashes(4))
         assertEquals(50, WorkerCountPolicy.maximumForHashes(5))
         assertEquals(60, WorkerCountPolicy.maximumForHashes(6))
-        assertEquals(70, WorkerCountPolicy.maximumForHashes(7))
+        assertEquals(60, WorkerCountPolicy.maximumForHashes(7))
     }
 
     @Test
@@ -78,7 +78,7 @@ class WorkerCountPolicyTest {
         assertEquals(40, WorkerCountPolicy.normalizeForHashes(Int.MAX_VALUE, 4))
         assertEquals(50, WorkerCountPolicy.normalizeForHashes(Int.MAX_VALUE, 5))
         assertEquals(60, WorkerCountPolicy.normalizeForHashes(Int.MAX_VALUE, 6))
-        assertEquals(70, WorkerCountPolicy.normalizeForHashes(Int.MAX_VALUE, 7))
+        assertEquals(60, WorkerCountPolicy.normalizeForHashes(Int.MAX_VALUE, 7))
     }
 
     @Test
@@ -117,13 +117,13 @@ class WorkerCountPolicyTest {
     }
 
     @Test
-    fun automaticCallCountScalesToSevenHashes() {
+    fun automaticCallCountScalesToSupportedHashes() {
         assertEquals(1, VkAutoCallsManager.callCountForWorkers(10))
         assertEquals(2, VkAutoCallsManager.callCountForWorkers(20))
         assertEquals(3, VkAutoCallsManager.callCountForWorkers(30))
         assertEquals(5, VkAutoCallsManager.callCountForWorkers(45))
         assertEquals(6, VkAutoCallsManager.callCountForWorkers(60))
-        assertEquals(7, VkAutoCallsManager.callCountForWorkers(100))
+        assertEquals(6, VkAutoCallsManager.callCountForWorkers(100))
         assertEquals(CsqttConstants.VkAutoHash.AUTO_CALL_SMALL_DELAY_MS, VkAutoCallsManager.requestDelayForCallCount(1))
         assertEquals(CsqttConstants.VkAutoHash.AUTO_CALL_SMALL_DELAY_MS, VkAutoCallsManager.requestDelayForCallCount(4))
         assertEquals(CsqttConstants.VkAutoHash.AUTO_CALL_LARGE_DELAY_MS, VkAutoCallsManager.requestDelayForCallCount(5))

@@ -617,7 +617,9 @@ fn classify_vk_hash_error(response: &Value) -> Result<Option<VkHashCheck>> {
         return Ok(Some(VkHashCheck::Invalid { code, message }));
     }
     if code == 14 {
-        return Ok(Some(VkHashCheck::Valid));
+        // Captcha is an anti-bot gate, not a verdict about the link: treating
+        // it as Valid resurrected hashes that had been proven dead.
+        return Ok(Some(VkHashCheck::Unavailable { message }));
     }
     if is_vk_flood_control(code, &message) {
         return Err(VkRateLimitError {
@@ -1128,17 +1130,17 @@ mod tests {
     }
 
     #[test]
-    fn hash_check_accepts_captcha_without_solving_it() {
+    fn hash_check_treats_captcha_as_unknown() {
         let response = serde_json::json!({
             "error": {
                 "error_code": 14,
                 "error_msg": "Captcha needed"
             }
         });
-        assert_eq!(
+        assert!(matches!(
             classify_vk_hash_error(&response).unwrap(),
-            Some(VkHashCheck::Valid)
-        );
+            Some(VkHashCheck::Unavailable { .. })
+        ));
     }
 
     #[test]

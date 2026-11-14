@@ -777,6 +777,14 @@ object TunnelManager {
             level = LogLevel.OK,
         )
         activeScope.launch {
+            if (shouldPersistUnavailableVkHash(params.vkHashMode, isNewUnavailableHash)) {
+                activeContext()?.let { ctx ->
+                    val store = activeSettingsStore ?: SettingsStore(ctx).also {
+                        activeSettingsStore = it
+                    }
+                    store.invalidateVkHash(event.hash)
+                }
+            }
             val remaining = params.vkHashes
                 .split(Regex("[,\\s\\n]+"))
                 .map(String::trim)

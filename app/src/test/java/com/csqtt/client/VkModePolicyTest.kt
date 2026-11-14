@@ -5,6 +5,30 @@ import org.junit.Test
 
 class VkModePolicyTest {
     @Test
+    fun manualUnavailableHashIsPersistedAsInvalid() {
+        assertEquals(
+            true,
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_MANUAL, newlyUnavailable = true),
+        )
+        assertEquals(
+            false,
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_MANUAL, newlyUnavailable = false),
+        )
+    }
+
+    @Test
+    fun autoUnavailableHashIsReplacedInsteadOfPersisted() {
+        assertEquals(
+            false,
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_AUTO_API, newlyUnavailable = true),
+        )
+        assertEquals(
+            false,
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_AUTO_JS, newlyUnavailable = true),
+        )
+    }
+
+    @Test
     fun autoVkHashSelectsAutoVkWorkMode() {
         assertEquals(
             CsqttConstants.VkAuth.MODE_AUTO_JS,

@@ -59,6 +59,11 @@ internal fun vkAuthModeForHashMode(requestedHashMode: String, currentAuthMode: S
 internal fun shouldReplaceUnavailableVkHash(hashMode: String): Boolean =
     hashMode != CsqttConstants.VkAutoHash.MODE_MANUAL
 
+internal fun shouldPersistUnavailableVkHash(
+    hashMode: String,
+    newlyUnavailable: Boolean,
+): Boolean = newlyUnavailable && !shouldReplaceUnavailableVkHash(hashMode)
+
 internal fun shouldConfirmAutoJsMode(
     currentMode: String,
     requestedMode: String,
