@@ -15,6 +15,7 @@
 # app/build/, build/ и документация сюда не входят.
 
 rust-client/native-inputs.txt
+rust-client/abis.txt
 rust-client/*.rs
 rust-client/*.sh
 rust-client/Cargo.toml
@@ -23,4 +24,5 @@ rust-client/rust-toolchain.toml
 rust-client/vendor/**
 shared/*.rs
 scripts/android_env.sh
+scripts/toolchain.env
 scripts/native_client_provenance.sh

@@ -85,7 +85,7 @@ jobs:
       # git rev-parse HEAD на этом checkout'е — ровно пушнутый коммит; этот sha
       # уходит в build.yml как ref. version-code — то же значение, что прочитал
       # beta-version.sh, и уходит как expected-version-code: build.yml сверяет
-      # своё представление об app/build.gradle.kts с представлением этой job'ы.
+      # своё представление о version.properties с представлением этой job'ы.
       - name: Resolve beta version
         id: version
         env:

@@ -24,11 +24,19 @@ write_fixture() {
     local root="$1"
     mkdir -p "$root/app" "$root/rust-client" "$root/rust-server" "$root/scripts" "$root/docker"
 
+    cat >"$root/version.properties" <<'EOF'
+versionName=2.5.2
+versionCode=232
+EOF
+
     cat >"$root/app/build.gradle.kts" <<'EOF'
+val versionPropertiesFile = rootProject.layout.projectDirectory.file("version.properties")
+val baseVersionName = versionProperty("versionName")
+val versionCodeFromProperties = versionProperty("versionCode")
 android {
     defaultConfig {
-        versionCode = 232
-        versionName = "2.5.2" +
+        versionCode = versionCodeFromProperties
+        versionName = baseVersionName +
             (providers.gradleProperty("csqtt.versionSuffix").orNull ?: "")
     }
 }
@@ -179,5 +187,119 @@ expect_failure_naming "тег образа в docker/.env.example с чужой 
 write_fixture "$TMP_ROOT"
 rm -f "$TMP_ROOT/docker/compose.yml"
 expect_failure_naming "отсутствующий docker/compose.yml" "docker/compose.yml"
+
+# 12. Литерал versionName в Gradle вместо чтения version.properties.
+write_fixture "$TMP_ROOT"
+cat >"$TMP_ROOT/app/build.gradle.kts" <<'EOF'
+val versionPropertiesFile = rootProject.layout.projectDirectory.file("version.properties")
+val baseVersionName = versionProperty("versionName")
+val versionCodeFromProperties = versionProperty("versionCode")
+android {
+    defaultConfig {
+        versionCode = versionCodeFromProperties
+        versionName = "2.5.2"
+    }
+}
+EOF
+expect_failure_naming "литерал versionName в app/build.gradle.kts" "app/build.gradle.kts"
+
+# 13. Gradle не ссылается на version.properties.
+write_fixture "$TMP_ROOT"
+cat >"$TMP_ROOT/app/build.gradle.kts" <<'EOF'
+val baseVersionName = versionProperty("versionName")
+val versionCodeFromProperties = versionProperty("versionCode")
+android {
+    defaultConfig {
+        versionCode = versionCodeFromProperties
+        versionName = baseVersionName
+    }
+}
+EOF
+expect_failure_naming "Gradle без ссылки на version.properties" "app/build.gradle.kts"
+
+# 14. Gradle перестал читать ключи через versionProperty().
+write_fixture "$TMP_ROOT"
+cat >"$TMP_ROOT/app/build.gradle.kts" <<'EOF'
+val versionPropertiesFile = rootProject.layout.projectDirectory.file("version.properties")
+val baseVersionName = "2.5.2"
+android {
+    defaultConfig {
+        versionName = baseVersionName
+    }
+}
+EOF
+expect_failure_naming "Gradle без чтения ключей version.properties" "app/build.gradle.kts"
+
+# 15. Многострочный литерал внутри defaultConfig.
+write_fixture "$TMP_ROOT"
+cat >"$TMP_ROOT/app/build.gradle.kts" <<'EOF'
+val versionPropertiesFile = rootProject.layout.projectDirectory.file("version.properties")
+val baseVersionName = versionProperty("versionName")
+val versionCodeFromProperties = versionProperty("versionCode")
+android {
+    defaultConfig {
+        versionCode = versionCodeFromProperties
+        versionName =
+            "2.5.2" +
+            (providers.gradleProperty("csqtt.versionSuffix").orNull ?: "")
+    }
+}
+EOF
+expect_failure_naming "многострочный литерал versionName" "app/build.gradle.kts"
+
+# 16. Литерал версии спрятан в val рядом с чтением ключей.
+write_fixture "$TMP_ROOT"
+cat >"$TMP_ROOT/app/build.gradle.kts" <<'EOF'
+val versionPropertiesFile = rootProject.layout.projectDirectory.file("version.properties")
+val baseVersionName = versionProperty("versionName")
+val versionCodeFromProperties = versionProperty("versionCode")
+val hardcodedVersion = "2.5.2"
+android {
+    defaultConfig {
+        versionCode = versionCodeFromProperties
+        versionName = hardcodedVersion
+    }
+}
+EOF
+expect_failure_naming "литерал версии в val" "app/build.gradle.kts"
+
+# 16b. Пин зависимости в val не является литералом версии.
+write_fixture "$TMP_ROOT"
+cat >"$TMP_ROOT/app/build.gradle.kts" <<'EOF'
+val versionPropertiesFile = rootProject.layout.projectDirectory.file("version.properties")
+val baseVersionName = versionProperty("versionName")
+val versionCodeFromProperties = versionProperty("versionCode")
+val composeBom = "2026.08.00"
+android {
+    defaultConfig {
+        versionCode = versionCodeFromProperties
+        versionName = baseVersionName
+    }
+}
+EOF
+if ! bash "$CHECKER" --root "$TMP_ROOT" >/dev/null 2>"$TMP_ROOT/stderr.txt"; then
+    cat "$TMP_ROOT/stderr.txt" >&2
+    fail "пин зависимости в val не должен валить проверку"
+fi
+
+# 16c. Ссылка на version.properties только в комментарии не проходит.
+write_fixture "$TMP_ROOT"
+cat >"$TMP_ROOT/app/build.gradle.kts" <<'EOF'
+// reads version.properties
+val baseVersionName = versionProperty("versionName")
+val versionCodeFromProperties = versionProperty("versionCode")
+android {
+    defaultConfig {
+        versionCode = versionCodeFromProperties
+        versionName = baseVersionName
+    }
+}
+EOF
+expect_failure_naming "version.properties только в комментарии" "app/build.gradle.kts"
+
+# 17. Отсутствующий version.properties.
+write_fixture "$TMP_ROOT"
+rm -f "$TMP_ROOT/version.properties"
+expect_failure_naming "отсутствующий version.properties" "version.properties"
 
 echo "check_versions fixture: OK"

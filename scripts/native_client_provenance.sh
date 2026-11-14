@@ -13,13 +13,17 @@ set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE=""
-ALL_ABIS=(arm64-v8a armeabi-v7a x86_64)
-ABIS=("${ALL_ABIS[@]}")
+ABI_MANIFEST="$ROOT/rust-client/abis.txt"
+ALL_ABIS=()
+ABIS=()
+ABIS_SELECTED=0
 VARIANT="release"
 JNILIBS_DIR=""
 MANIFEST=""
+TOOLCHAIN_ENV="$ROOT/scripts/toolchain.env"
+STRICT_TOOLCHAIN="${CSQTT_STRICT_TOOLCHAIN:-}"
 
-SCHEMA="csqtt.native-client-provenance.v6"
+SCHEMA="csqtt.native-client-provenance.v7"
 MARKER="CSQTT_RUST_NATIVE_PRODUCTION_V1"
 PRODUCER="rust-client/build_so.sh"
 TRANSPORT="rust-turn-sans-io-rfc8656-channeldata"
@@ -27,14 +31,36 @@ TRANSPORT_MARKER="CSQTT_RUST_TURN_SANS_IO_V1"
 NATIVE_CORE_ABI=1
 
 usage() {
-    printf 'Usage: %s <write|verify> [--root DIR] [--abis %s] [--variant debug|release]\n' \
-        "$(basename "$0")" "${ALL_ABIS[*]}" >&2
-    printf '       [--jni-libs-dir DIR] [--manifest FILE]\n' >&2
+    printf 'Usage: %s <write|verify> [--root DIR] [--abis LIST] [--variant debug|release]\n' \
+        "$(basename "$0")" >&2
+    printf '       [--jni-libs-dir DIR] [--manifest FILE] [--strict-toolchain]\n' >&2
+    printf '       --abis is a comma-separated subset of rust-client/abis.txt.\n' >&2
+    printf '       --strict-toolchain (or CSQTT_STRICT_TOOLCHAIN=1) turns a mismatch\n' >&2
+    printf '       between the recorded toolchain and scripts/toolchain.env pins into\n' >&2
+    printf '       an error; by default verify only warns.\n' >&2
 }
 
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
+}
+
+warn() {
+    printf 'warning: %s\n' "$*" >&2
+}
+
+# ALL_ABIS is derived from the shared manifest, never from a second copy.
+load_all_abis() {
+    local manifest="$1" line
+    [[ -f "$manifest" ]] || die "ABI manifest not found: $manifest"
+    ALL_ABIS=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line//[[:space:]]/}"
+        [[ -n "$line" ]] || continue
+        ALL_ABIS+=("$line")
+    done <"$manifest"
+    ((${#ALL_ABIS[@]} > 0)) || die "ABI manifest lists no ABIs: $manifest"
 }
 
 require_cmd() {
@@ -52,11 +78,14 @@ while (($#)); do
         --abis)
             (($# >= 2)) || die "--abis requires a value"
             IFS=',' read -r -a ABIS <<<"$2"
+            ABIS_SELECTED=1
             shift
             ;;
         --abis=*)
             IFS=',' read -r -a ABIS <<<"${1#--abis=}"
+            ABIS_SELECTED=1
             ;;
+        --strict-toolchain) STRICT_TOOLCHAIN=1 ;;
         --variant)
             (($# >= 2)) || die "--variant requires a value"
             VARIANT="$2"
@@ -90,6 +119,10 @@ done
 }
 ROOT="$(cd -- "$ROOT" && pwd)"
 NATIVE_INPUTS_MANIFEST="$ROOT/rust-client/native-inputs.txt"
+ABI_MANIFEST="$ROOT/rust-client/abis.txt"
+TOOLCHAIN_ENV="$ROOT/scripts/toolchain.env"
+load_all_abis "$ABI_MANIFEST"
+((ABIS_SELECTED)) || ABIS=("${ALL_ABIS[@]}")
 
 valid_variant() {
     case "$1" in
@@ -126,13 +159,16 @@ abi_target() {
         arm64-v8a) printf 'aarch64-linux-android\n' ;;
         armeabi-v7a) printf 'armv7-linux-androideabi\n' ;;
         x86_64) printf 'x86_64-linux-android\n' ;;
+        *) return 1 ;;
     esac
 }
 
 abi_elf_class() {
     case "$1" in
+        arm64-v8a) printf '2\n' ;;
         armeabi-v7a) printf '1\n' ;;
-        *) printf '2\n' ;;
+        x86_64) printf '2\n' ;;
+        *) return 1 ;;
     esac
 }
 
@@ -141,6 +177,7 @@ abi_elf_machine() {
         arm64-v8a) printf '183\n' ;;
         armeabi-v7a) printf '40\n' ;;
         x86_64) printf '62\n' ;;
+        *) return 1 ;;
     esac
 }
 
@@ -151,6 +188,7 @@ abi_target_dir() {
         arm64-v8a) printf 'rust-client-android-%s-arm64\n' "$VARIANT" ;;
         armeabi-v7a) printf 'rust-client-android-%s-armv7\n' "$VARIANT" ;;
         x86_64) printf 'rust-client-android-%s-x86_64\n' "$VARIANT" ;;
+        *) return 1 ;;
     esac
 }
 
@@ -160,6 +198,168 @@ production_path() {
 
 cargo_path() {
     printf '%s/build/%s/%s/%s/client\n' "$ROOT" "$(abi_target_dir "$1")" "$(abi_target "$1")" "$PROFILE_DIR"
+}
+
+# --- Toolchain provenance (informational) ------------------------------------
+#
+# The recorded toolchain never gates the write: a build machine may lack rustc,
+# cargo-ndk or NDK environment variables, and a missing value is recorded as
+# "unknown" with a warning. verify compares the record to the live probe and
+# warns; --strict-toolchain / CSQTT_STRICT_TOOLCHAIN=1 compare it to the pins
+# in scripts/toolchain.env and fail on mismatch. rustc is probed through the
+# pinned channel (`rustc +<RUST_TOOLCHAIN>`) first, so a newer machine default
+# does not change what strict mode sees.
+probe_rustc_version() {
+    local out="" toolchain
+    # Prefer the pinned channel: CI installs the pin, but the machine's default
+    # rustc may be another version. `rustc +<channel>` keeps strict provenance
+    # deterministic; fall back to the default only when toolchain.env has no
+    # RUST_TOOLCHAIN or the pinned toolchain is not installed.
+    toolchain="$(pin_value RUST_TOOLCHAIN 2>/dev/null)" || toolchain=""
+    if [[ -n "$toolchain" ]]; then
+        out="$(rustc "+$toolchain" --version 2>/dev/null)" || out=""
+    fi
+    if [[ -z "$out" ]]; then
+        out="$(rustc --version 2>/dev/null)" || return 1
+    fi
+    [[ -n "$out" ]] || return 1
+    out="${out#rustc }"
+    printf '%s\n' "${out%% *}"
+}
+
+probe_cargo_ndk_version() {
+    local out
+    out="$(cargo ndk --version 2>/dev/null)" || return 1
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$(awk '{print $NF}' <<<"$out")"
+}
+
+probe_ndk_version() {
+    local var path
+    for var in CSQTT_NDK_PATH ANDROID_NDK_HOME ANDROID_NDK_ROOT; do
+        path="${!var:-}"
+        if [[ -n "$path" ]]; then
+            printf '%s\n' "$(basename -- "$path")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+probe_toolchain() {
+    # 1 = emit warnings for failed probes (write path); 0 = stay quiet
+    # (verify path, where a missing probe is already reported by the caller).
+    local emit_warnings="${1:-0}" missing=0
+    if ! TOOLCHAIN_RUSTC="$(probe_rustc_version)"; then
+        TOOLCHAIN_RUSTC="unknown"
+        if ((emit_warnings)); then
+            warn "could not probe rustc; recording toolchain.rustc=unknown"
+        fi
+        missing=1
+    fi
+    if ! TOOLCHAIN_CARGO_NDK="$(probe_cargo_ndk_version)"; then
+        TOOLCHAIN_CARGO_NDK="unknown"
+        if ((emit_warnings)); then
+            warn "could not probe cargo-ndk; recording toolchain.cargoNdk=unknown"
+        fi
+        missing=1
+    fi
+    if ! TOOLCHAIN_NDK="$(probe_ndk_version)"; then
+        TOOLCHAIN_NDK="unknown"
+        if ((emit_warnings)); then
+            warn "could not probe the NDK (CSQTT_NDK_PATH/ANDROID_NDK_HOME/ANDROID_NDK_ROOT unset); recording toolchain.ndk=unknown"
+        fi
+        missing=1
+    fi
+    if ((missing)); then
+        TOOLCHAIN_SOURCE="probe-partial"
+    else
+        TOOLCHAIN_SOURCE="probe"
+    fi
+}
+
+# Reads one KEY=VALUE pin from toolchain.env in an isolated shell, so the file
+# cannot leak variables or shell options into this script.
+pin_value() {
+    local key="$1"
+    [[ -f "$TOOLCHAIN_ENV" ]] || return 1
+    (
+        set +eu
+        # shellcheck disable=SC1090
+        . "$TOOLCHAIN_ENV" >/dev/null 2>&1 || exit 1
+        printf '%s\n' "${!key:-}"
+    )
+}
+
+# The parallel toolchain lane owns the exact pin names; accept the common
+# aliases so a rename in toolchain.env does not make strict mode silently
+# unverifiable.
+pin_for_field() {
+    local field="$1" key value
+    local -a keys
+    case "$field" in
+        rustc) keys=(RUST_VERSION RUSTC_VERSION RUST_TOOLCHAIN_VERSION TOOLCHAIN_VERSION RUST_TOOLCHAIN RUSTC) ;;
+        cargoNdk) keys=(CARGO_NDK_VERSION CARGO_NDK CARGO_NDK_VER) ;;
+        ndk) keys=(NDK_VERSION ANDROID_NDK_VERSION CSQTT_NDK_VERSION NDK ANDROID_NDK) ;;
+        *) return 1 ;;
+    esac
+    for key in "${keys[@]}"; do
+        value="$(pin_value "$key")" || return 1
+        if [[ -n "$value" ]]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+toolchain_recorded() {
+    jq -r --arg field "$1" '.toolchain[$field] // "unknown"' "$MANIFEST"
+}
+
+verify_toolchain() {
+    local recorded current field pin
+
+    if [[ "$(jq -r 'has("toolchain")' "$MANIFEST")" != "true" ]]; then
+        if [[ "$STRICT_TOOLCHAIN" == "1" ]]; then
+            die "strict toolchain verification requires a toolchain block in $MANIFEST"
+        fi
+        warn "provenance has no toolchain block; the toolchain is not verified"
+        return 0
+    fi
+
+    if [[ "$STRICT_TOOLCHAIN" == "1" ]]; then
+        [[ -f "$TOOLCHAIN_ENV" ]] ||
+            die "strict toolchain verification requires $TOOLCHAIN_ENV"
+        for field in rustc cargoNdk ndk; do
+            recorded="$(toolchain_recorded "$field")"
+            [[ -n "$recorded" && "$recorded" != "unknown" ]] ||
+                die "strict toolchain verification: manifest has no recorded $field"
+            pin="$(pin_for_field "$field")" ||
+                die "strict toolchain verification: $TOOLCHAIN_ENV has no pin for $field"
+            [[ "$recorded" == "$pin" ]] ||
+                die "toolchain mismatch for $field: manifest=$recorded, pin=$pin ($TOOLCHAIN_ENV)"
+        done
+        printf 'Toolchain matches pins: %s\n' "$TOOLCHAIN_ENV"
+        return 0
+    fi
+
+    probe_toolchain 0
+    for field in rustc cargoNdk ndk; do
+        recorded="$(toolchain_recorded "$field")"
+        case "$field" in
+            rustc) current="$TOOLCHAIN_RUSTC" ;;
+            cargoNdk) current="$TOOLCHAIN_CARGO_NDK" ;;
+            ndk) current="$TOOLCHAIN_NDK" ;;
+        esac
+        if [[ -z "$recorded" || "$recorded" == "unknown" ]]; then
+            warn "toolchain.$field was not recorded at build time; nothing to compare"
+        elif [[ "$current" == "unknown" ]]; then
+            warn "cannot probe the current $field; toolchain.$field is not verified"
+        elif [[ "$recorded" != "$current" ]]; then
+            warn "toolchain.$field changed since the build: recorded=$recorded, current=$current"
+        fi
+    done
 }
 
 sha256_file() {
@@ -229,6 +429,9 @@ canonical_build_input_hash() {
     local list tmp rel
     list="$(mktemp)"
     tmp="$(mktemp)"
+    # Intentional early expansion: list/tmp are function-local and no longer in
+    # scope when the EXIT trap runs.
+    # shellcheck disable=SC2064
     trap "rm -f '$list' '$tmp'" EXIT
     build_input_files | LC_ALL=C sort -u >"$list"
     [[ -s "$list" ]] || die "native build input list is empty"
@@ -305,6 +508,7 @@ write_manifest() {
     package_version="$(cargo_package_field version)"
     [[ -n "$package_name" && -n "$package_version" ]] || die "Unable to read Rust package identity from $CARGO_TOML"
     build_input_hash="$(canonical_build_input_hash)"
+    probe_toolchain 1
 
     artifacts='[]'
     for abi in "${ABIS[@]}"; do
@@ -337,6 +541,10 @@ write_manifest() {
         --arg cargoLockSha256 "$(sha256_file "$CARGO_LOCK")" \
         --arg generatedAtUtc "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
         --argjson artifacts "$artifacts" \
+        --arg toolchainRustc "$TOOLCHAIN_RUSTC" \
+        --arg toolchainCargoNdk "$TOOLCHAIN_CARGO_NDK" \
+        --arg toolchainNdk "$TOOLCHAIN_NDK" \
+        --arg toolchainSource "$TOOLCHAIN_SOURCE" \
         --arg variant "$VARIANT" \
         --arg cargoProfile "$CARGO_PROFILE" \
         '{
@@ -356,7 +564,13 @@ write_manifest() {
             cargoTomlSha256: $cargoTomlSha256,
             cargoLockSha256: $cargoLockSha256,
             generatedAtUtc: $generatedAtUtc,
-            artifacts: $artifacts
+            artifacts: $artifacts,
+            toolchain: {
+                rustc: $toolchainRustc,
+                cargoNdk: $toolchainCargoNdk,
+                ndk: $toolchainNdk,
+                source: $toolchainSource
+            }
         }' >"$tmp"
     mv "$tmp" "$MANIFEST"
     printf 'Wrote Rust native provenance: %s\n' "$MANIFEST"
@@ -434,6 +648,8 @@ verify_manifest() {
     )"
     [[ "$expected_abis" == "$actual_abis" ]] ||
         die "Native payload ABIs do not match the requested set: expected [${expected_abis% }], found [${actual_abis% }] in $JNILIBS_DIR"
+
+    verify_toolchain
 
     printf 'Rust native provenance verified: %s (%s variant, cargo %s)\n' "$MARKER" "$VARIANT" "$CARGO_PROFILE"
 }

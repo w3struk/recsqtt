@@ -16,6 +16,7 @@ make_server_root() {
         rust-server/data/domains_ru.txt
         rust-server/data/ips_ru.txt
         scripts/server_asset_provenance.sh
+        scripts/toolchain.env
     )
 
     for path in "$REPO_ROOT"/rust-server/*.rs "$REPO_ROOT"/rust-server/data/*.txt "$REPO_ROOT"/shared/*.rs; do

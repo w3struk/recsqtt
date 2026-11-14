@@ -23,7 +23,7 @@ provenance next to them. Nothing is written into the source tree.
   --tests      Run the pre-build checks (default when stdin is not a terminal)
   --no-tests   Skip the pre-build checks
   --abis=LIST  Comma-separated subset of arm64-v8a,armeabi-v7a,x86_64
-  --jobs=N     Parallel cargo jobs per ABI (default: max(1, nproc/3))
+  --jobs=N     Parallel cargo jobs per ABI (default: max(1, min(nproc, RAM GiB) / ABI count))
   --variant=V  Android build variant: "debug" uses the Cargo "android-debug"
                profile (inherits dev: opt-level = 1, debuginfo stripped - the
                debug APK carries three ABIs), "release" uses --release
@@ -32,7 +32,33 @@ EOF
 }
 
 RUN_TESTS=""
-ABIS_CSV="arm64-v8a,armeabi-v7a,x86_64"
+# ABI list: rust-client/abis.txt
+ABI_MANIFEST="$ROOT/rust-client/abis.txt"
+
+read_default_abis() {
+    local line out=""
+    if [ ! -f "$ABI_MANIFEST" ]; then
+        printf 'error: ABI manifest not found: %s\n' "$ABI_MANIFEST" >&2
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line="${line//[[:space:]]/}"
+        [ -n "$line" ] || continue
+        if [ -n "$out" ]; then
+            out="$out,$line"
+        else
+            out="$line"
+        fi
+    done <"$ABI_MANIFEST"
+    if [ -z "$out" ]; then
+        printf 'error: ABI manifest lists no ABIs: %s\n' "$ABI_MANIFEST" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+ABIS_CSV="$(read_default_abis)" || exit 1
 JOBS=""
 VARIANT="release"
 OUTPUT_DIR=""

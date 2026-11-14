@@ -89,7 +89,7 @@ ssh-add -d ~/.ssh/id_ed25519              # убрать только этот �
 | `rust-client/` | Крейт `csqtt-client`. cargo-ndk → `app/build/generated/jniLibs/<variant>/<abi>/libclient.so`. **Не JNI-библиотека** — это исполняемый файл, запускаемый как дочерний процесс через `ProcessBuilder`. |
 | `rust-server/` | Крейт `csqtt`. cargo-zigbuild (статический musl, только amd64) → `app/build/generated/assets/` и `rust-server/dist/`. В APK не пакуется: release CI публикует бинарь отдельным ассетом. |
 | `shared/` | 3 файла `.rs`, компилируемых в **оба** крейта через `#[path = "../shared/..."] mod ...;` в каждом `main.rs`. Не cargo workspace и не path-зависимость. `dtls.rs` и `wire_protocol.rs` общие; `spsc_ring.rs` только для клиента. |
-| `scripts/` | `android_env.sh`, `device_abi.sh` (определяет ABI подключённого устройства), два скрипта provenance, `build_apk.sh`, `install_apk.sh`, `run_system_checks.sh`. Пути артефактов настраиваются флагами `--variant`, `--jni-libs-dir`, `--assets-dir`, `--manifest`; значения по умолчанию — `app/build/generated/`. |
+| `scripts/` | `android_env.sh`, `device_abi.sh` (определяет ABI подключённого устройства по манифесту), `toolchain.env` (единственный источник пинов тулчейна), `check_toolchain.sh`, `check_abi_list.sh`, `bump_version.sh`, два скрипта provenance, `build_apk.sh`, `install_apk.sh`, `run_system_checks.sh`. Пути артефактов настраиваются флагами `--variant`, `--jni-libs-dir`, `--assets-dir`, `--manifest`; значения по умолчанию — `app/build/generated/`. |
 | `scripts/install.sh` | Публичный установщик на ~5.7k строк: скачивает серверный релиз и ставится на сервер вручную или one-liner'ом (режим systemd или docker). |
 | `scripts/bootstrap.sh` | Тонкий вход one-liner'а: резолвит тег (`releases/latest`), скачивает `install.sh` и `SHA256SUMS`, сверяет SHA-256 и запускает установщик с проброшенными аргументами. Публикуется ассетом рядом с `install.sh`. |
 | `rust-server/data/` | Фиксированные ассеты маршрутизации: `domains_ru.txt` (515 доменов) и `ips_ru.txt` (6 710 CIDR) + `SOURCES.md` с источниками. Подключены `include_str!` в `rust-server/routing_assets.rs`; клиент и приложение своих копий не содержат. |
@@ -212,16 +212,21 @@ sudo csqttctl status
    и корне нет. Манифест `csqtt-server.json` проверяется при `rust-server/build_linux.sh`
    и в CI; Gradle эти файлы не отслеживает и сервер не собирает. Ассет другого формата
    нужно добавить в `build_input_files` в `scripts/server_asset_provenance.sh`.
-6. **ABI устройства для install-задач.** `installCsqtt*` читают ABI подключённого устройства **на этапе
-   конфигурации Gradle**: `providers.exec` запускает `scripts/device_abi.sh`, который печатает
-   `abi=<abi>` и `serial=<serial>`. Список поддерживаемых ABI продублирован в `scripts/device_abi.sh`
-   и в `supportedAbis` в `app/build.gradle.kts` — при расхождении Gradle отвергнет значение сам.
-   Добавляя ABI, правьте оба места.
+6. **ABI-манифест — источник списка.** `rust-client/abis.txt` — единственный список ABI клиента.
+   Из него выводят значения `app/build.gradle.kts` (`supportedAbis`, split-суффиксы, cargo-таргеты),
+   `scripts/device_abi.sh`, `rust-client/build_so.sh`, `rust-client/build_android_abis.sh` и
+   `scripts/native_client_provenance.sh`. Добавление ABI — это строка в манифесте **и** запись во
+   всех per-ABI картах (cargo-таргет, суффикс target-dir, ELF-класс/машина, `valid_abi()`,
+   `install_lib`);
+   `scripts/check_abi_list.sh --root .` падает, пока хотя бы одна карта не знает новый ABI.
+   Tier-2 упаковщики (`build_apk.sh`, `collect-release-assets.sh`, входы `abis:` workflow) могут
+   добавлять только `universal`. Манифест входит в `rust-client/native-inputs.txt`, поэтому его
+   правка меняет Gradle-входы и provenance-хеш.
 7. **Имя выходного APK.** Имя задаёт Gradle: в `app/build.gradle.kts` каждый output получает
    `outputFileName = app-<version>-<abi>-<variant>.apk` (для universal — `app-<version>-universal-<variant>.apk`).
    Версия в имени — это `versionName` из `defaultConfig` **без** суффикса build type: вариант в имени
    уже назван. Оба скрипта собирают то же имя из той же версии, но читают её из
-   `app/build.gradle.kts` через `sed` (`apk_version()`), а не держат вторую копию числа.
+   `version.properties` через общий `scripts/version_properties.sh`, а не держат вторую копию числа.
    `scripts/install_apk.sh` ищет APK по точному имени, `scripts/build_apk.sh` копирует их в
    `app/release/` как `recsqtt-<version>-<abi>.apk`. Меняя формат имени — правьте Gradle и оба скрипта.
 8. **Ожидаемый отпечаток подписи.** Лежит в `scripts/release_signing_fingerprint.txt` (одна строка,
@@ -232,11 +237,11 @@ sudo csqttctl status
    передавать выходом job'а**: оно равно значению секрета, и GitHub такой выход не передаёт
    («Skip output 'fingerprint' since it may contain secret») — вызывающий получит пустое
    значение без всякой ошибки. Для описания релиза отпечаток читается из файла в репозитории.
-9. **Суффикс версии для беты.** `beta-version.sh` считает `-beta.<short-sha>`, а `versionName` в
-   `app/build.gradle.kts` приклеивает его свойством `-Pcsqtt.versionSuffix`. Литерал версии обязан
-   оставаться **первым** в строке: из неё читают версию пять мест (`build_apk.sh`, `install_apk.sh`,
-   `collect-release-assets.sh`, `release-note.sh`, шаг `Verify APK identity`),
-   и перестановка выражения сломает их молча. `versionCode` бета не меняет — иначе релиз с меньшим
+9. **Суффикс версии для беты.** `beta-version.sh` считает `-beta.<short-sha>`, а Gradle
+   приклеивает его к базе из `version.properties` свойством `-Pcsqtt.versionSuffix`.
+   Shell-скрипты версию в Kotlin не парсят: базу все читают через
+   `scripts/version_properties.sh`, поэтому форма выражения в `app/build.gradle.kts`
+   никого снаружи не касается. `versionCode` бета не меняет — иначе релиз с меньшим
    кодом стал бы для тестера «понижением».
 
 ## Правила Rust, которые роняют сборку
@@ -282,17 +287,50 @@ sudo csqttctl status
 
 ## Бампы версии
 
-`2.5.4` / `versionCode 234` продублированы в: `app/build.gradle.kts` (`versionCode`, `versionName`),
+`2.5.4` / `versionCode 234` живут в `version.properties` — единственном источнике для Gradle и
+скриптов (shell читает его через `scripts/version_properties.sh`) — и продублированы в:
 `rust-client/Cargo.toml` + `rust-client/Cargo.lock`, `rust-server/Cargo.toml` + `rust-server/Cargo.lock`,
-`scripts/install.sh` (`SCRIPT_VERSION`, `CSQTT_DOCKER_IMAGE`), `rust-server/main.rs` (баннер при старте)
-и `rust-server/web_panel.rs` (`CACHE_NAME` PWA service-worker). Согласованность проверяет
-`scripts/check_versions.sh` (гейт `Gate: version consistency` в CI); после бампа запускайте
-`bash scripts/check_versions.sh --root .`.
+`scripts/install.sh` (`SCRIPT_VERSION`, `CSQTT_DOCKER_IMAGE`: установщик публикуется отдельным
+ассетом и обязан быть самодостаточным), `rust-server/main.rs` (баннер при старте),
+`rust-server/web_panel.rs` (`CACHE_NAME` PWA service-worker),
+`docker/compose.yml` и `docker/.env.example` (тег образа). `app/build.gradle.kts` версию не
+хранит: он читает `version.properties`, а гейт падает, если `defaultConfig` снова получит
+литерал или Gradle перестанет читать ключи через `versionProperty()`.
+
+Не правьте десять файлов руками — `scripts/bump_version.sh` восстанавливает все
+десять файлов при ошибке через trap; SIGKILL и power loss не покрываются.
+
+```bash
+scripts/bump_version.sh patch              # versionCode +1
+scripts/bump_version.sh minor --dry-run
+scripts/bump_version.sh 3.0.0 --code 300
+```
+
+`--force-version` разрешает versionName не больше текущего (равенство или откат);
+без него такой бамп отвергается.
+
+Согласованность проверяют три гейта (в CI они идут последовательно внутри
+`Gate: version consistency`); после бампа запускайте все три:
+
+```bash
+bash scripts/check_versions.sh --root .
+bash scripts/check_toolchain.sh --root .
+bash scripts/check_abi_list.sh --root .
+```
 
 ## Тулчейн
 
-Rust `1.97.1`, закреплён независимо в `rust-client/rust-toolchain.toml` и `rust-server/rust-toolchain.toml`
-(разные наборы таргетов; состав — в [BUILDING.md](BUILDING.md#зависимости)). CI — три workflow:
+Пины версий — Rust `1.97.1`, Zig `0.17.0`, cargo-ndk `4.1.2`, cargo-zigbuild `0.24.0`,
+NDK `27.0.12077973`, build-tools `37.0.0` и platform `android-37.0` — живут в одном
+shell-sourceable файле `scripts/toolchain.env`; литералов в исполняемом коде
+build-скриптов и workflow нет (в комментариях они допустимы, тест игнорирует
+`#`-строки).
+`RUST_TOOLCHAIN` продублирован в `rust-client/rust-toolchain.toml` и
+`rust-server/rust-toolchain.toml` (разные наборы таргетов; состав — в
+[BUILDING.md](BUILDING.md#зависимости)), а `scripts/check_toolchain.sh --root .` сверяет
+`channel` обоих `rust-toolchain.toml` и `rust-version` обоих `Cargo.toml` с пином.
+NDK ищется строго по пину; `ALLOW_NEWEST_NDK=1` — осознанный opt-in на самый новый
+установленный NDK с предупреждением о расхождении. CI — три workflow:
 `build.yml` (общие шаги, `workflow_call`), `release.yml` (тег `v*` → GitHub Release) и `beta.yml`
 (пуш в `main` → сообщение с arm64-APK в Telegram-канал; коммит с тегом `v*` бета
 пропускает, поэтому порядок выпуска — сначала тег, потом push `main`). Гейты живут только в `build.yml`: в

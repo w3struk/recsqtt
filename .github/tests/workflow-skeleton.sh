@@ -25,11 +25,16 @@
 #     списком (не inherit);
 #   * каждый `run:` начинается с `set -euo pipefail`;
 #   * вызванные `bash .github/scripts/<name>.sh` существуют и исполняемы;
-#   * build.yml: тулчейн (Free disk space -> SDK -> Rust -> Zig -> cargo-*)
-#     и гейты (локап -> Kotlin -> Rust client -> Rust server musl) идут
-#     в фиксированном порядке, шаги подписи/сборки/сверки — после гейтов;
-#   * версии cargo-ndk/cargo-zigbuild запинены в шаге установки и входят
-#     в ключ кеша `Cache Cargo binaries`;
+#   * build.yml: тулчейн (Free disk space -> Resolve toolchain pins -> SDK ->
+#     Rust -> Zig -> cargo-*) и гейты (локап -> Kotlin -> Rust client ->
+#     Rust server musl) идут в фиксированном порядке, шаги подписи/сборки/сверки
+#     — после гейтов;
+#   * пины версий живут в scripts/toolchain.env: шаг Resolve toolchain pins
+#     source'ит его и отдаёт все семь переменных в $GITHUB_ENV, а шаги
+#     установки используют переменные, а не литералы; каждый ключ
+#     toolchain-кеша содержит хеш scripts/toolchain.env;
+#   * `Gate: version consistency` последовательно гоняет check_versions,
+#     check_toolchain и check_abi_list;
 #   * `Cleanup keystore` выполняется всегда, `Dry run`/`Publish release`
 #     разведены строгими сравнениями `== 'true'` / `== 'false'`;
 #   * APK не передаются в сверку глобом (`--apk` со звёздочкой);
@@ -341,7 +346,7 @@ want(
 for not_passed in ("version-name", "expected-version-code"):
     want(
         not_passed not in build_with,
-        "релиз не передаёт %r: версия читается из app/build.gradle.kts" % not_passed,
+        "релиз не передаёт %r: версия читается из version.properties" % not_passed,
     )
 
 ALLOWED_SECRETS = {
@@ -1092,11 +1097,12 @@ want(
 #      setup-java/setup-python (иначе удалит JDK/Python из RUNNER_TOOL_CACHE).
 TOOLCHAIN = [
     "Free disk space",
+    "Resolve toolchain pins",
     "Setup Java 17",
     "Setup Python",
     "Install Android SDK",
-    "Install Rust 1.97.1",
-    "Install Zig 0.17.0",
+    "Install Rust toolchain",
+    "Install Zig",
     "Install cargo-ndk and cargo-zigbuild",
 ]
 GATES = [
@@ -1117,12 +1123,163 @@ want(
     "шаг 'Free disk space' должен быть ровно один",
 )
 want(
+    names.index("Resolve toolchain pins") == names.index("Free disk space") + 1,
+    "'Resolve toolchain pins' обязан идти сразу после 'Free disk space', получено %r"
+    % (names,),
+)
+want(
+    names.index("Resolve toolchain pins") < names.index("Setup Java 17"),
+    "'Resolve toolchain pins' обязан идти до 'Setup Java 17': пины нужны всем "
+    "последующим шагам и не должны зависеть от setup-экшенов",
+)
+want(
     names.index("Free disk space") < names.index("Setup Java 17"),
     "'Free disk space' обязан идти до 'Setup Java 17' (иначе удалит JDK)",
 )
 want(
     names.index("Free disk space") < names.index("Setup Python"),
     "'Free disk space' обязан идти до 'Setup Python'",
+)
+for version_free in ("Install Rust 1.97.1", "Install Zig 0.17.0"):
+    want(
+        version_free not in names,
+        "имя шага %r содержит версию: имя обязано быть версионно-нейтральным, "
+        "а версия — приходить из scripts/toolchain.env" % (version_free,),
+    )
+
+# 10.7a Единственный источник пинов. Шаг резолва обязан source'ить
+#       scripts/toolchain.env, проверить все семь переменных и выложить их в
+#       $GITHUB_ENV; шаги установки читают переменные, а не литералы версий.
+PINS = (
+    "RUST_TOOLCHAIN",
+    "ZIG_VERSION",
+    "CARGO_NDK_VERSION",
+    "CARGO_ZIGBUILD_VERSION",
+    "ANDROID_NDK_VERSION",
+    "ANDROID_BUILD_TOOLS_VERSION",
+    "ANDROID_PLATFORM",
+)
+resolve_run = str(by_name["Resolve toolchain pins"].get("run", ""))
+want(
+    "source scripts/toolchain.env" in resolve_run,
+    "'Resolve toolchain pins' обязан source'ить scripts/toolchain.env",
+)
+want(
+    '>> "$GITHUB_ENV"' in resolve_run,
+    "'Resolve toolchain pins' обязан выкладывать пины в $GITHUB_ENV",
+)
+for pin in PINS:
+    want(
+        pin in resolve_run,
+        "'Resolve toolchain pins' обязан проверять и экспортировать %s" % pin,
+    )
+
+STEP_VARS = {
+    "Install Android SDK": (
+        "ANDROID_BUILD_TOOLS_VERSION",
+        "ANDROID_PLATFORM",
+        "ANDROID_NDK_VERSION",
+    ),
+    "Install Rust toolchain": ("RUST_TOOLCHAIN",),
+    "Install Zig": ("ZIG_VERSION",),
+    "Install cargo-ndk and cargo-zigbuild": (
+        "CARGO_NDK_VERSION",
+        "CARGO_ZIGBUILD_VERSION",
+    ),
+}
+for step_name, step_vars in STEP_VARS.items():
+    step_run = str(by_name[step_name].get("run", ""))
+    for var in step_vars:
+        want(
+            "$%s" % var in step_run,
+            "шаг %r обязан читать $%s из scripts/toolchain.env, а не литерал"
+            % (step_name, var),
+        )
+
+# Литералы, которые уже переехали в scripts/toolchain.env, не должны
+# вернуться в run-блоки установки: иначе два источника пинов разойдутся.
+STALE_LITERALS = {
+    "Install Android SDK": ("37.0.0", "27.0.12077973", "android-37.0"),
+    "Install Rust toolchain": ("1.97.1",),
+    "Install Zig": ("0.17.0",),
+    "Install cargo-ndk and cargo-zigbuild": ("4.1.2", "0.24.0"),
+}
+for step_name, literals in STALE_LITERALS.items():
+    step_run = "\n".join(
+        line
+        for line in str(by_name[step_name].get("run", "")).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    for literal in literals:
+        want(
+            literal not in step_run,
+            "шаг %r снова содержит литерал версии %r: пины живут только в "
+            "scripts/toolchain.env" % (step_name, literal),
+        )
+
+# 10.7b Ключи toolchain-кешей обязаны инвалидироваться при правке
+#       scripts/toolchain.env. Restore-keys — стабильный префикс без хеша,
+#       иначе восстановить предыдущий слой нечем.
+TOOLCHAIN_CACHES = {
+    "Cache Android SDK": "android-sdk-",
+    "Cache Rust toolchains": "rustup-",
+    "Cache Zig": "zig-",
+    "Cache Cargo binaries": "cargo-bin-",
+    "Cache Rust client host target": "cargo-client-target-",
+    "Cache Rust client Android targets": "cargo-client-android-",
+    "Cache Rust server target": "cargo-server-target-",
+}
+for cache_name, prefix in TOOLCHAIN_CACHES.items():
+    cache_with = by_name[cache_name].get("with") or {}
+    key = str(cache_with.get("key", ""))
+    want(
+        "hashFiles(" in key and "scripts/toolchain.env" in key,
+        "ключ кеша %r обязан содержать hashFiles('scripts/toolchain.env'), "
+        "получено %r" % (cache_name, key),
+    )
+    want(
+        key.startswith(prefix + "${{ runner.os }}-"),
+        "ключ кеша %r обязан начинаться со стабильного префикса %r, получено %r"
+        % (cache_name, prefix + "${{ runner.os }}-", key),
+    )
+    restore_keys = [
+        line.strip()
+        for line in str(cache_with.get("restore-keys", "")).splitlines()
+        if line.strip()
+    ]
+    want(
+        restore_keys
+        and all(
+            line.startswith(prefix + "${{ runner.os }}-") for line in restore_keys
+        ),
+        "restore-keys кеша %r обязаны начинаться с %r, получено %r"
+        % (cache_name, prefix + "${{ runner.os }}-", restore_keys),
+    )
+
+cargo_bin_key = str((by_name["Cache Cargo binaries"].get("with") or {}).get("key", ""))
+for lock in ("rust-client/Cargo.lock", "rust-server/Cargo.lock"):
+    want(
+        lock in cargo_bin_key,
+        "ключ кеша 'Cache Cargo binaries' обязан сохранять хеш %s" % lock,
+    )
+
+# 10.7c Гейт согласованности: версия, тулчейн и ABI-манифест — последовательно.
+gate_run = str(by_name["Gate: version consistency"].get("run", ""))
+GATE_COMMANDS = [
+    "bash scripts/check_versions.sh --root .",
+    "bash scripts/check_toolchain.sh --root .",
+    "bash scripts/check_abi_list.sh --root .",
+]
+gate_positions_in_run = [gate_run.find(command) for command in GATE_COMMANDS]
+want(
+    all(position >= 0 for position in gate_positions_in_run),
+    "'Gate: version consistency' обязан вызывать все три проверки: %r, получено:\n%s"
+    % (GATE_COMMANDS, gate_run),
+)
+want(
+    gate_positions_in_run == sorted(gate_positions_in_run),
+    "порядок проверок в 'Gate: version consistency' нарушен: %r"
+    % (list(zip(GATE_COMMANDS, gate_positions_in_run)),),
 )
 
 # 10.8 Гейты — в фиксированном порядке и после всего тулчейна.
@@ -1190,26 +1347,26 @@ want(
     "keystore не нужен, а падать она должна раньше, чем тратится время на APK",
 )
 
-# 10.9 Пины cargo-* совпадают с версиями в ключе кеша cargo-bin, а сама
-# установка переносима на восстановленный ~/.cargo/bin: `cargo install` не
-# перезаписывает существующий бинарь и падает с exit 101 ("binary `cargo-ndk`
-# already exists in destination"), а кеш с бинарями восстанавливается.
+# 10.9 Шаг установки cargo-* переносим на восстановленный ~/.cargo/bin:
+#      `cargo install` не перезаписывает существующий бинарь и падает с exit
+#      101 ("binary `cargo-ndk` already exists in destination"), а кеш с
+#      бинарями восстанавливается. Версии приходят из scripts/toolchain.env —
+#      проверяем, что литералов нет, а сверка установленной версии идёт ЦЕЛОЙ
+#      строкой (подстрока 4.1.2 совпала бы с 4.1.20).
 install_run = by_name["Install cargo-ndk and cargo-zigbuild"].get("run", "")
-cache_key = str((by_name["Cache Cargo binaries"].get("with") or {}).get("key", ""))
-for crate in ("cargo-ndk", "cargo-zigbuild"):
-    match = re.search(
-        r"ensure_cargo_tool %s %s ([0-9][0-9A-Za-z.+-]*)"
-        % (re.escape(crate), re.escape(crate)),
-        install_run,
+for crate, env_var in (
+    ("cargo-ndk", "CARGO_NDK_VERSION"),
+    ("cargo-zigbuild", "CARGO_ZIGBUILD_VERSION"),
+):
+    pattern = r'ensure_cargo_tool %s %s "\$%s"' % (
+        re.escape(crate),
+        re.escape(crate),
+        re.escape(env_var),
     )
     want(
-        match is not None,
-        "в шаге установки нет пина `ensure_cargo_tool %s %s <X>`" % (crate, crate),
-    )
-    want(
-        match.group(1) in cache_key,
-        "ключ кеша 'Cache Cargo binaries' не содержит запиненной версии %s (%s)"
-        % (crate, match.group(1)),
+        re.search(pattern, install_run) is not None,
+        'в шаге установки нет `ensure_cargo_tool %s %s "$%s"`'
+        % (crate, crate, env_var),
     )
 want(
     "--force" in install_run,
@@ -1328,9 +1485,11 @@ want(
     "'Verify APK signatures' обязан передавать --apksigner из запиненного build-tools",
 )
 
-# 10.15 Provenance: клиентский скрипт получает ABI-скоуп, серверный — нет.
-#       Дефолт native_client_provenance.sh — все три ABI, поэтому сборка с
-#       одним ABI упала бы уже после двадцатиминутной сборки.
+# 10.15 Provenance: оба verify идут со --strict-toolchain (записанный тулчейн
+#       сверяется с scripts/toolchain.env), клиентский скрипт получает
+#       ABI-скоуп, серверный — нет. Дефолт native_client_provenance.sh — все три
+#       ABI, поэтому сборка с одним ABI упала бы уже после двадцатиминутной
+#       сборки.
 provenance_run = by_name["Verify native provenance"].get("run", "")
 provenance_code = [
     line
@@ -1338,18 +1497,29 @@ provenance_code = [
     if not line.lstrip().startswith("#")
 ]
 want(
-    "native_client_provenance.sh verify --abis=" in provenance_run,
-    "'Verify native provenance' обязан передавать --abis клиентскому скрипту",
+    provenance_run.count("--strict-toolchain") == 2,
+    "'Verify native provenance' обязан передавать --strict-toolchain обоим "
+    "скриптам, получено:\n%s" % provenance_run,
 )
-for line in provenance_code:
-    if "native_client_provenance.sh" in line:
-        want(
-            "native_client_provenance.sh verify --abis=" in line,
-            "вызов native_client_provenance.sh без --abis: %r" % (line.strip(),),
-        )
+client_lines = [
+    line for line in provenance_code if "native_client_provenance.sh" in line
+]
+want(client_lines, "'Verify native provenance' обязан вызывать native_client_provenance.sh")
+for line in client_lines:
+    want(
+        "native_client_provenance.sh verify" in line
+        and "--strict-toolchain" in line
+        and "--abis=" in line,
+        "клиентский verify обязан идти со --strict-toolchain и --abis: %r"
+        % (line.strip(),),
+    )
 server_lines = [line for line in provenance_code if "server_asset_provenance.sh" in line]
 want(server_lines, "'Verify native provenance' обязан вызывать server_asset_provenance.sh")
 for line in server_lines:
+    want(
+        "server_asset_provenance.sh verify" in line and "--strict-toolchain" in line,
+        "серверный verify обязан идти со --strict-toolchain: %r" % (line.strip(),),
+    )
     want(
         "--abis" not in line,
         "server_asset_provenance.sh не знает --abis, получено %r" % (line.strip(),),

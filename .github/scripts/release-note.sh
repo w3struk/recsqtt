@@ -5,9 +5,9 @@
 # Технический блок описания GitHub-релиза: версия, коммит, длительность
 # сборки, wire-ревизия, состав ассетов, установка и отпечаток подписи.
 #
-# Версия и versionCode читаются из app/build.gradle.kts теми же регексами, что
-# и в scripts/build_apk.sh (apk_version()); wire-ревизия — из rust-server/main.rs
-# тем же регексом, что и в scripts/server_asset_provenance.sh.
+# Версия и versionCode читаются из version.properties через общий
+# scripts/version_properties.sh; wire-ревизия — из rust-server/main.rs тем же
+# регексом, что и в scripts/server_asset_provenance.sh.
 #
 # Usage:
 #   release-note.sh --root DIR --tag T --commit SHA --duration-seconds N
@@ -15,6 +15,11 @@
 #                   --out FILE
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=../../scripts/version_properties.sh
+source "$SCRIPT_DIR/../../scripts/version_properties.sh"
 
 usage() {
     cat <<'EOF'
@@ -26,7 +31,7 @@ Writes the technical block of the release description to --out and prints it
 to stdout.
 
 Required:
-  --root DIR             repository root (reads app/build.gradle.kts and
+  --root DIR             repository root (reads version.properties and
                          rust-server/main.rs from it)
   --tag T                release tag, e.g. v2.5.1
   --commit SHA           full commit sha of the tag
@@ -153,18 +158,10 @@ require_value --out "$out"
 [[ "$duration" =~ ^[0-9]+$ ]] ||
     die "duration must be a non-negative number of seconds, got '$duration'"
 
-gradle_file="$root/app/build.gradle.kts"
-[[ -f "$gradle_file" ]] || die "cannot read the app version, file not found: $gradle_file"
-version="$(
-    sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$gradle_file" | sed -n '1p'
-)"
-version_code="$(
-    sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' \
-        "$gradle_file" | sed -n '1p'
-)"
-[[ -n "$version" ]] || die "could not read versionName from $gradle_file"
-[[ -n "$version_code" ]] || die "could not read versionCode from $gradle_file"
+version="$(csqtt_version_name "$root")" ||
+    die "could not read versionName from $root/version.properties"
+version_code="$(csqtt_version_code "$root")" ||
+    die "could not read versionCode from $root/version.properties"
 
 if [[ -z "$wire_revision" ]]; then
     wire_source="$root/rust-server/main.rs"

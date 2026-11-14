@@ -22,9 +22,10 @@
 
 Документ описывает reCSQTT 2.5.4 (`versionCode 234`) как работающую систему, а не историю её
 появления. Предмет — границы компонентов, инварианты и контракты, которые нельзя менять
-одной стороной. Версия продублирована в `app/build.gradle.kts`, `Cargo.toml`/`Cargo.lock`
-обоих крейтов, `scripts/install.sh`, стартовом баннере `rust-server/main.rs` и `CACHE_NAME`
-в `rust-server/web_panel.rs`; согласованность проверяет `scripts/check_versions.sh`.
+одной стороной. Версия живёт в `version.properties` — её читают Gradle и скрипты — и
+продублирована в `Cargo.toml`/`Cargo.lock` обоих крейтов, `scripts/install.sh`, стартовом
+баннере `rust-server/main.rs` и `CACHE_NAME` в `rust-server/web_panel.rs`; согласованность
+проверяет `scripts/check_versions.sh`.
 
 Покрытые компоненты:
 

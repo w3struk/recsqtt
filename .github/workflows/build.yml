@@ -7,7 +7,7 @@ on:
         required: true
         type: string
       version-name:
-        description: 'Expected versionName; empty reads app/build.gradle.kts'
+        description: 'Expected versionName; empty reads version.properties'
         required: false
         default: ''
         type: string
@@ -17,7 +17,7 @@ on:
         default: 'arm64-v8a,armeabi-v7a,x86_64'
         type: string
       expected-version-code:
-        description: 'Expected versionCode; empty reads app/build.gradle.kts'
+        description: 'Expected versionCode; empty reads version.properties'
         required: false
         default: ''
         type: string
@@ -71,6 +71,32 @@ jobs:
           sudo rm -rf /usr/share/dotnet || true
           df -h /
 
+      # Пины тулчейна живут в одном файле — scripts/toolchain.env. Шаг читает
+      # его один раз, проверяет, что все семь пинов заданы, и отдаёт их в
+      # $GITHUB_ENV: последующие шаги не держат литералов версий, а смена пина
+      # становится правкой одного файла. Локальные скрипты читают тот же файл.
+      - name: Resolve toolchain pins
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/toolchain.env
+          source scripts/toolchain.env
+          pins=(
+            RUST_TOOLCHAIN
+            ZIG_VERSION
+            CARGO_NDK_VERSION
+            CARGO_ZIGBUILD_VERSION
+            ANDROID_NDK_VERSION
+            ANDROID_BUILD_TOOLS_VERSION
+            ANDROID_PLATFORM
+          )
+          for pin in "${pins[@]}"; do
+            [[ -n ${!pin:-} ]] || {
+              echo "scripts/toolchain.env did not set $pin" >&2
+              exit 1
+            }
+            printf '%s=%s\n' "$pin" "${!pin}" >> "$GITHUB_ENV"
+          done
+
       - name: Setup Java 17
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
@@ -84,18 +110,19 @@ jobs:
 
       # SDK/NDK кешируются в ~/android-sdk: восстановленный каталог превращает
       # установку в быстрые no-op проверки (лицензии и пакеты уже на месте).
-      # Ключ перечисляет все пины, поэтому смена cmdline-tools, build-tools,
-      # NDK или platforms не оставит в кеше старый пакет. Пакеты
-      # platforms;android-37.0 и build-tools;37.0.0 проверены на живом
-      # `sdkmanager --list` — пакета platforms;android-37 не существует
-      # (API 37 публикуется в схеме android-37.0).
+      # Ключ содержит хеш scripts/toolchain.env — единственного источника пинов
+      # build-tools, NDK и platforms, — поэтому смена любого пина не оставит в
+      # кеше старый пакет. Версия cmdline-tools в пинах не живёт и остаётся
+      # литералом ключа. Пакеты platforms;android-37.0 и build-tools;37.0.0
+      # проверены на живом `sdkmanager --list` — пакета platforms;android-37 не
+      # существует (API 37 публикуется в схеме android-37.0).
       # Свой SDK ставим в $HOME/android-sdk, поэтому предустановленный
       # /usr/local/lib/android удаляется шагом Free disk space выше.
       - name: Cache Android SDK
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/android-sdk
-          key: android-sdk-${{ runner.os }}-cmd11076708-bt37.0.0-ndk27.0.12077973-platform37.0
+          key: android-sdk-${{ runner.os }}-cmd11076708-${{ hashFiles('scripts/toolchain.env') }}
           restore-keys: |
             android-sdk-${{ runner.os }}-
 
@@ -120,7 +147,7 @@ jobs:
           printf 'y\n%.0s' {1..100} | "$SDKM" --sdk_root="$ANDROID_HOME" --licenses > /dev/null
           # build-tools запинен явно: появление 37.1.0 не должно молча подменить
           # подписывающий/инспектирующий инструмент (apksigner, aapt2).
-          BT_VER=37.0.0
+          BT_VER="$ANDROID_BUILD_TOOLS_VERSION"
           # Динамическим остаётся только cmake: на подпись он не влияет.
           CMAKE_VER=$("$SDKM" --list 2>/dev/null \
             | sed -n 's/^[[:space:]]*cmake;\(3\.[0-9.]*\).*/\1/p' \
@@ -130,55 +157,55 @@ jobs:
             exit 1
           }
           "$SDKM" --sdk_root="$ANDROID_HOME" \
-            "platforms;android-37.0" "build-tools;$BT_VER" "ndk;27.0.12077973" "cmake;$CMAKE_VER"
+            "platforms;$ANDROID_PLATFORM" "build-tools;$BT_VER" "ndk;$ANDROID_NDK_VERSION" "cmake;$CMAKE_VER"
           {
             echo "ANDROID_HOME=$ANDROID_HOME"
             echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
-            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973"
-            echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.0.12077973"
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+            echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
             echo "BT_VER=$BT_VER"
           } >> "$GITHUB_ENV"
 
-      # Тулчейн 1.97.1 с rustfmt/clippy и target'ами качается каждый прогон за
-      # ~200 МБ; с восстановленным ~/.rustup `rustup toolchain install` и
-      # `rustup target add` становятся no-op. Ключ — хеш rust-toolchain.toml
-      # обоих крейтов, чтобы смена пина не оставила в кеше старый toolchain.
+      # Тулчейн из scripts/toolchain.env с rustfmt/clippy и target'ами качается
+      # каждый прогон за ~200 МБ; с восстановленным ~/.rustup `rustup toolchain
+      # install` и `rustup target add` становятся no-op. Ключ — хеш
+      # scripts/toolchain.env и rust-toolchain.toml обоих крейтов, чтобы смена
+      # пина не оставила в кеше старый toolchain.
       - name: Cache Rust toolchains
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.rustup/toolchains
             ~/.rustup/update-hashes
-          key: rustup-${{ runner.os }}-${{ hashFiles('rust-client/rust-toolchain.toml', 'rust-server/rust-toolchain.toml') }}
+          key: rustup-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env', 'rust-client/rust-toolchain.toml', 'rust-server/rust-toolchain.toml') }}
           restore-keys: |
             rustup-${{ runner.os }}-
 
-      # Версия из rust-toolchain.toml обоих крейтов; явный `toolchain install`
-      # делает шаг детерминированным независимо от каталога вызова.
-      - name: Install Rust 1.97.1
+      # Версия — RUST_TOOLCHAIN из scripts/toolchain.env; явный `toolchain
+      # install` делает шаг детерминированным независимо от каталога вызова.
+      - name: Install Rust toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
-          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android x86_64-unknown-linux-musl --toolchain 1.97.1
-          rustc +1.97.1 --version
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android x86_64-unknown-linux-musl --toolchain "$RUST_TOOLCHAIN"
+          rustc "+$RUST_TOOLCHAIN" --version
 
       - name: Cache Zig
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/zig
-          key: zig-${{ runner.os }}-0.17.0
+          key: zig-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env') }}
           restore-keys: |
             zig-${{ runner.os }}-
 
-      # Fallback при проблемах с 0.17.0: заменить версию на 0.16.0 — больше
-      # ничего менять не нужно.
+      # Fallback при проблемах с текущим пином: заменить ZIG_VERSION в
+      # scripts/toolchain.env — больше ничего менять не нужно.
       # Восстановленный ~/zig с нужной версией отменяет скачивание; в
       # $GITHUB_PATH путь добавляется один раз (grep -qxF), иначе строка
       # копилась бы на каждом прогоне.
-      - name: Install Zig 0.17.0
+      - name: Install Zig
         run: |
           set -euo pipefail
-          export ZIG_VERSION='0.17.0'
           ZIG_DIR="$HOME/zig"
           if [[ -x "$ZIG_DIR/zig" && "$("$ZIG_DIR/zig" version)" == "$ZIG_VERSION" ]]; then
             echo "zig $ZIG_VERSION уже установлен — установка не требуется"
@@ -230,21 +257,23 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
-      # Версии cargo-ndk/cargo-zigbuild входят в ключ: иначе смена пина не
-      # инвалидирует кеш и в ~/.cargo/bin останется старый бинарь.
+      # Пины cargo-ndk/cargo-zigbuild входят в ключ через хеш
+      # scripts/toolchain.env: иначе смена пина не инвалидирует кеш и в
+      # ~/.cargo/bin останется старый бинарь. Хеши Cargo.lock сохранены —
+      # пересборка зависимостей тоже должна обновлять кеш бинарей.
       - name: Cache Cargo binaries
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: '~/.cargo/bin'
-          key: cargo-bin-${{ runner.os }}-ndk4.1.2-zigbuild0.24.0-${{ hashFiles('rust-client/Cargo.lock', 'rust-server/Cargo.lock') }}
+          key: cargo-bin-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env', 'rust-client/Cargo.lock', 'rust-server/Cargo.lock') }}
           restore-keys: |
-            cargo-bin-${{ runner.os }}-ndk4.1.2-zigbuild0.24.0-
+            cargo-bin-${{ runner.os }}-
 
       - name: Cache Rust client host target
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: rust-client/target
-          key: cargo-client-target-${{ runner.os }}-${{ hashFiles('rust-client/Cargo.lock', 'rust-client/rust-toolchain.toml') }}
+          key: cargo-client-target-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env', 'rust-client/Cargo.lock', 'rust-client/rust-toolchain.toml') }}
           restore-keys: |
             cargo-client-target-${{ runner.os }}-
 
@@ -259,7 +288,7 @@ jobs:
           path: |
             build/rust-client-android-debug-*
             build/rust-client-android-release-*
-          key: cargo-client-android-${{ runner.os }}-${{ hashFiles('rust-client/Cargo.lock', 'rust-client/rust-toolchain.toml', 'rust-client/build_android_abis.sh') }}
+          key: cargo-client-android-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env', 'rust-client/Cargo.lock', 'rust-client/rust-toolchain.toml', 'rust-client/build_android_abis.sh') }}
           restore-keys: |
             cargo-client-android-${{ runner.os }}-
 
@@ -275,7 +304,7 @@ jobs:
             build/csqtt-uring-linux-recsqtt-linux-amd64
             build/zig-cache
             ~/.cache/zig
-          key: cargo-server-target-${{ runner.os }}-${{ hashFiles('rust-server/Cargo.lock', 'rust-server/rust-toolchain.toml', '.github/scripts/musl-zig-env.sh') }}
+          key: cargo-server-target-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env', 'rust-server/Cargo.lock', 'rust-server/rust-toolchain.toml', '.github/scripts/musl-zig-env.sh') }}
           restore-keys: |
             cargo-server-target-${{ runner.os }}-
 
@@ -301,8 +330,8 @@ jobs:
             fi
             cargo install "$crate" --locked --version "$version" --force
           }
-          ensure_cargo_tool cargo-ndk cargo-ndk 4.1.2
-          ensure_cargo_tool cargo-zigbuild cargo-zigbuild 0.24.0
+          ensure_cargo_tool cargo-ndk cargo-ndk "$CARGO_NDK_VERSION"
+          ensure_cargo_tool cargo-zigbuild cargo-zigbuild "$CARGO_ZIGBUILD_VERSION"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           cargo ndk --version
           cargo-zigbuild --version
@@ -324,10 +353,13 @@ jobs:
             --expected-commit "${INPUT_REF:-}"
 
       # Гейты fail-closed: всё проверяемое отсекается до keystore и сборки.
+      # Три проверки последовательны: версия, пины тулчейна и ABI-манифест.
       - name: 'Gate: version consistency'
         run: |
           set -euo pipefail
           bash scripts/check_versions.sh --root .
+          bash scripts/check_toolchain.sh --root .
+          bash scripts/check_abi_list.sh --root .
 
       # install.sh публикуется ассетом, поэтому его поведение обязано быть
       # зелёным до Kotlin/Rust-сборки. Гейт живёт только здесь: beta и release
@@ -478,12 +510,15 @@ jobs:
       # подменённый или протухший бинарник до публикации. ABI-скоуп обязателен:
       # у native_client_provenance.sh дефолт — все три ABI, и сборка с одним
       # ABI упала бы на отсутствующем. Серверный бинарник всегда amd64,
-      # поэтому server_asset_provenance.sh флага не знает.
+      # поэтому server_asset_provenance.sh флага --abis не знает.
+      # --strict-toolchain: записанный в манифест тулчейн сверяется с пинами
+      # scripts/toolchain.env и расхождение валит прогон. В CI тулчейн ставится
+      # из тех же пинов, поэтому проверка детерминирована.
       - name: Verify native provenance
         run: |
           set -euo pipefail
-          bash scripts/server_asset_provenance.sh verify
-          bash scripts/native_client_provenance.sh verify --abis="${{ inputs.abis }}"
+          bash scripts/server_asset_provenance.sh verify --strict-toolchain
+          bash scripts/native_client_provenance.sh verify --strict-toolchain --abis="${{ inputs.abis }}"
 
       # Сверки ниже работают с копией: артефакт публикуется как каталог, без
       # переименований, которые делает collect-release-assets.sh у вызывающего.

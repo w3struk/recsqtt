@@ -7,6 +7,7 @@
 # manifest live under app/build/generated/.
 # Usage: server_asset_provenance.sh <write|verify> [--root DIR] [--assets recsqtt-linux-amd64]
 #                                         [--assets-dir DIR] [--manifest FILE]
+#                                         [--features a,b] [--strict-toolchain]
 
 set -euo pipefail
 
@@ -18,15 +19,19 @@ ASSET_DIR=""
 MANIFEST=""
 FEATURES=()
 ALLOWED_FEATURES=()
+STRICT_TOOLCHAIN=0
 
-SCHEMA="csqtt.server-asset-provenance.v4"
+SCHEMA="csqtt.server-asset-provenance.v5"
 MARKER="CSQTT_RUST_SERVER_PRODUCTION_V1"
 PRODUCER="rust-server/build_linux.sh"
 
 usage() {
     printf 'Usage: %s <write|verify> [--root DIR] [--assets %s]\n' "$(basename "$0")" "${ALL_ASSETS[*]}" >&2
     printf '       [--assets-dir DIR] [--manifest FILE] [--features a,b]\n' >&2
-    printf '       [--allow-feature NAME]...\n' >&2
+    printf '       [--allow-feature NAME]... [--strict-toolchain]\n' >&2
+    printf '       --strict-toolchain (or CSQTT_STRICT_TOOLCHAIN=1) compares the\n' >&2
+    printf '       recorded versions to the pins in scripts/toolchain.env and fails\n' >&2
+    printf '       on drift; without it a mismatch only warns.\n' >&2
 }
 
 die() {
@@ -80,6 +85,7 @@ while (($#)); do
             shift
             ;;
         --allow-feature=*) ALLOWED_FEATURES+=("${1#--allow-feature=}") ;;
+        --strict-toolchain) STRICT_TOOLCHAIN=1 ;;
         --manifest)
             (($# >= 2)) || die "--manifest requires a value"
             MANIFEST="$2"
@@ -101,12 +107,17 @@ done
 }
 ROOT="$(cd -- "$ROOT" && pwd)"
 
+if [[ "${CSQTT_STRICT_TOOLCHAIN:-0}" == 1 ]]; then
+    STRICT_TOOLCHAIN=1
+fi
+
 GENERATED_ROOT="$ROOT/app/build/generated"
 [[ -n "$ASSET_DIR" ]] || ASSET_DIR="$GENERATED_ROOT/assets"
 [[ -n "$MANIFEST" ]] || MANIFEST="$GENERATED_ROOT/provenance/csqtt-server.json"
 CARGO_TOML="$ROOT/rust-server/Cargo.toml"
 CARGO_LOCK="$ROOT/rust-server/Cargo.lock"
 WIRE_REVISION_SOURCE="$ROOT/rust-server/main.rs"
+TOOLCHAIN_ENV="$ROOT/scripts/toolchain.env"
 
 valid_asset() {
     case "$1" in
@@ -150,6 +161,157 @@ require_file() {
     [[ -s "$1" ]] || die "$2 is empty: $1"
 }
 
+# --- Informational toolchain recording -------------------------------------
+# The manifest records what compiled the binary. By default these values are
+# informational: drift between the manifest and the current host only warns.
+# Strict mode (--strict-toolchain or CSQTT_STRICT_TOOLCHAIN=1) additionally
+# compares every recorded version to its pin in scripts/toolchain.env, because
+# build and verify normally run in the same CI job and would otherwise agree
+# with each other while drifting away from the single-source pins.
+#
+# Probing happens on the machine that runs the script, so every probe failure
+# degrades to "unknown" and never blocks the write.
+#
+# Hermetic probing for tests: set CSQTT_PROVENANCE_RUSTC_VERSION,
+# CSQTT_PROVENANCE_CARGO_ZIGBUILD_VERSION and CSQTT_PROVENANCE_ZIG_VERSION.
+# Values are recorded verbatim and mark the source as "env-override" (or
+# "mixed" when only some are set).
+
+load_pinned_rust_toolchain() {
+    [[ -f "$TOOLCHAIN_ENV" ]] || return 1
+    (
+        # shellcheck source=/dev/null
+        source "$TOOLCHAIN_ENV"
+        [[ -n "${RUST_TOOLCHAIN:-}" ]] || exit 1
+        printf '%s\n' "$RUST_TOOLCHAIN"
+    )
+}
+
+# All three pins, one per line. Strict verification compares the manifest to
+# these values; a missing pin file is a hard failure there, never a fallback to
+# whatever this host happens to have installed.
+load_toolchain_pins() {
+    [[ -f "$TOOLCHAIN_ENV" ]] || return 1
+    (
+        # shellcheck source=/dev/null
+        source "$TOOLCHAIN_ENV"
+        printf '%s\n%s\n%s\n' \
+            "${RUST_TOOLCHAIN:-}" "${CARGO_ZIGBUILD_VERSION:-}" "${ZIG_VERSION:-}"
+    )
+}
+
+# "rustc 1.97.1 (hash date)" and "1.97.1 (hash date)" both mean the 1.97.1
+# channel; the trailing build hash belongs to the distribution, not the pin.
+normalize_rustc_version() {
+    local value="$1"
+    value="${value#rustc }"
+    printf '%s\n' "${value%% *}"
+}
+
+normalize_toolchain_version() {
+    local field="$1" value="$2"
+    case "$field" in
+        rustc) normalize_rustc_version "$value" ;;
+        *) printf '%s\n' "${value##* }" ;;
+    esac
+}
+
+probe_output() {
+    local out
+    out="$("$@" 2>/dev/null)" || return 1
+    out="${out%%$'\n'*}"
+    out="${out%$'\r'}"
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
+}
+
+probe_rustc_version() {
+    local override="${CSQTT_PROVENANCE_RUSTC_VERSION:-}" output
+    if [[ -n "$override" ]]; then
+        printf '%s\n' "$override"
+        return 0
+    fi
+    if [[ -n "$PINNED_RUST_TOOLCHAIN" ]] &&
+        output="$(probe_output rustc "+$PINNED_RUST_TOOLCHAIN" --version)"; then
+        :
+    elif output="$(probe_output rustc --version)"; then
+        :
+    else
+        printf 'unknown\n'
+        return 0
+    fi
+    # "rustc 1.97.1 (hash date)" -> "rustc 1.97.1": the trailing build hash
+    # changes with the compiler distribution, not with the pinned channel.
+    awk 'NF >= 2 { print $1 " " $2; next } { print $1 }' <<<"$output"
+}
+
+probe_cargo_zigbuild_version() {
+    local override="${CSQTT_PROVENANCE_CARGO_ZIGBUILD_VERSION:-}" output
+    if [[ -n "$override" ]]; then
+        printf '%s\n' "$override"
+        return 0
+    fi
+    if ! output="$(probe_output cargo-zigbuild --version)"; then
+        printf 'unknown\n'
+        return 0
+    fi
+    awk '{ print $NF }' <<<"$output"
+}
+
+probe_zig_version() {
+    local override="${CSQTT_PROVENANCE_ZIG_VERSION:-}"
+    if [[ -n "$override" ]]; then
+        printf '%s\n' "$override"
+        return 0
+    fi
+    if ! probe_output zig version; then
+        printf 'unknown\n'
+    fi
+}
+
+toolchain_source_label() {
+    local overrides=0
+    [[ -z "${CSQTT_PROVENANCE_RUSTC_VERSION:-}" ]] || overrides=$((overrides + 1))
+    [[ -z "${CSQTT_PROVENANCE_CARGO_ZIGBUILD_VERSION:-}" ]] || overrides=$((overrides + 1))
+    [[ -z "${CSQTT_PROVENANCE_ZIG_VERSION:-}" ]] || overrides=$((overrides + 1))
+    if ((overrides == 3)); then
+        printf 'env-override\n'
+    elif ((overrides > 0)); then
+        printf 'mixed\n'
+    elif [[ -n "$PINNED_RUST_TOOLCHAIN" ]]; then
+        printf 'toolchain.env\n'
+    else
+        printf 'path\n'
+    fi
+}
+
+resolve_toolchain_versions() {
+    PROBED_RUSTC="$(probe_rustc_version)"
+    PROBED_CARGO_ZIGBUILD="$(probe_cargo_zigbuild_version)"
+    PROBED_ZIG="$(probe_zig_version)"
+    TOOLCHAIN_SOURCE="$(toolchain_source_label)"
+}
+
+warn_unknown_toolchain() {
+    local name value
+    for name in rustc cargoZigbuild zig; do
+        case "$name" in
+            rustc) value="$PROBED_RUSTC" ;;
+            cargoZigbuild) value="$PROBED_CARGO_ZIGBUILD" ;;
+            zig) value="$PROBED_ZIG" ;;
+        esac
+        if [[ "$value" == "unknown" ]]; then
+            printf 'warning: could not determine %s version; recording "unknown" in the provenance manifest\n' "$name" >&2
+        fi
+    done
+}
+
+PINNED_RUST_TOOLCHAIN="$(load_pinned_rust_toolchain || true)"
+PROBED_RUSTC="unknown"
+PROBED_CARGO_ZIGBUILD="unknown"
+PROBED_ZIG="unknown"
+TOOLCHAIN_SOURCE="unknown"
+
 cargo_package_field() {
     local key="$1"
     require_file "$CARGO_TOML" "Server Cargo.toml"
@@ -185,7 +347,8 @@ build_input_files() {
         rust-server/ru_apps_preset.json \
         rust-server/data/domains_ru.txt \
         rust-server/data/ips_ru.txt \
-        scripts/server_asset_provenance.sh
+        scripts/server_asset_provenance.sh \
+        scripts/toolchain.env
 
     find "$ROOT/rust-server" -maxdepth 1 -type f -name '*.rs' -printf 'rust-server/%P\n'
     find "$ROOT/rust-server/data" -maxdepth 1 -type f -name '*.txt' -printf 'rust-server/data/%P\n'
@@ -259,6 +422,8 @@ write_manifest() {
     [[ -n "$package_name" && -n "$package_version" ]] || die "Unable to read Rust server package identity"
     revision="$(wire_protocol_revision)"
     build_input_hash="$(canonical_build_input_hash)"
+    resolve_toolchain_versions
+    warn_unknown_toolchain
 
     artifacts='[]'
     for asset in "${ASSETS[@]}"; do
@@ -291,6 +456,10 @@ write_manifest() {
         --arg cargoTomlSha256 "$(sha256_file "$CARGO_TOML")" \
         --arg cargoLockSha256 "$(sha256_file "$CARGO_LOCK")" \
         --arg generatedAtUtc "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
+        --arg toolchainRustc "$PROBED_RUSTC" \
+        --arg toolchainCargoZigbuild "$PROBED_CARGO_ZIGBUILD" \
+        --arg toolchainZig "$PROBED_ZIG" \
+        --arg toolchainSource "$TOOLCHAIN_SOURCE" \
         --argjson artifacts "$artifacts" \
         --argjson features "$(printf '%s\n' "${FEATURES[@]:-}" | sed '/^$/d' | jq -R . | jq -s .)" \
         '{
@@ -303,6 +472,12 @@ write_manifest() {
             wireProtocolRevision: $wireProtocolRevision,
             buildInputSha256: $buildInputSha256,
             features: $features,
+            toolchain: {
+                rustc: $toolchainRustc,
+                cargoZigbuild: $toolchainCargoZigbuild,
+                zig: $toolchainZig,
+                source: $toolchainSource
+            },
             cargoTomlSha256: $cargoTomlSha256,
             cargoLockSha256: $cargoLockSha256,
             artifacts: $artifacts,
@@ -310,6 +485,64 @@ write_manifest() {
         }' >"$tmp"
     mv "$tmp" "$MANIFEST"
     printf 'Wrote Rust server provenance: %s\n' "$MANIFEST"
+}
+
+verify_toolchain() {
+    local field recorded current pin recorded_norm pin_norm
+    local -a pins=()
+    resolve_toolchain_versions
+
+    if [[ "$STRICT_TOOLCHAIN" == 1 ]]; then
+        # Strict means "match the pins", and the pins live in one file. Without
+        # it there is nothing to compare against, so do not guess.
+        if [[ ! -f "$TOOLCHAIN_ENV" ]]; then
+            die "strict toolchain verification requires scripts/toolchain.env; it is missing: $TOOLCHAIN_ENV"
+        fi
+        mapfile -t pins < <(load_toolchain_pins)
+        [[ -n "${pins[0]:-}" ]] || die "scripts/toolchain.env does not define RUST_TOOLCHAIN"
+        [[ -n "${pins[1]:-}" ]] || die "scripts/toolchain.env does not define CARGO_ZIGBUILD_VERSION"
+        [[ -n "${pins[2]:-}" ]] || die "scripts/toolchain.env does not define ZIG_VERSION"
+    fi
+
+    for field in rustc cargoZigbuild zig; do
+        case "$field" in
+            rustc)
+                current="$PROBED_RUSTC"
+                pin="${pins[0]:-}"
+                ;;
+            cargoZigbuild)
+                current="$PROBED_CARGO_ZIGBUILD"
+                pin="${pins[1]:-}"
+                ;;
+            zig)
+                current="$PROBED_ZIG"
+                pin="${pins[2]:-}"
+                ;;
+        esac
+        recorded="$(jq -r --arg field "$field" '.toolchain[$field] // empty' "$MANIFEST")"
+        [[ -n "$recorded" ]] || continue
+
+        if [[ "$STRICT_TOOLCHAIN" != 1 ]]; then
+            # Informational only: report manifest-vs-host drift, say nothing
+            # about the pins (that would be noise on every local verify).
+            if [[ "$recorded" != "unknown" && "$current" != "unknown" && "$recorded" != "$current" ]]; then
+                printf 'warning: Rust server provenance toolchain mismatch for %s: recorded %s, current %s\n' \
+                    "$field" "$recorded" "$current" >&2
+            fi
+            continue
+        fi
+
+        # The pin is the contract. Build and verify sharing one job is exactly
+        # why recorded==current is not sufficient: both can drift together.
+        recorded_norm="$(normalize_toolchain_version "$field" "$recorded")"
+        pin_norm="$(normalize_toolchain_version "$field" "$pin")"
+        if [[ "$recorded_norm" != "$pin_norm" ]]; then
+            die "strict toolchain drift for $field: recorded $recorded, current $current, pin $pin"
+        fi
+        if [[ "$recorded" != "unknown" && "$current" != "unknown" && "$recorded" != "$current" ]]; then
+            die "strict toolchain mismatch for $field: recorded $recorded, current $current, pin $pin"
+        fi
+    done
 }
 
 verify_manifest() {
@@ -326,8 +559,17 @@ verify_manifest() {
          (.marker == $marker) and
          (.producer == $producer) and
          (.runtime == "rust") and
-         ((.features | type) == "array")' "$MANIFEST" >/dev/null ||
+         ((.features | type) == "array") and
+         ((.toolchain | type) == "object") and
+         ((.toolchain.rustc | type) == "string") and
+         ((.toolchain.cargoZigbuild | type) == "string") and
+         ((.toolchain.zig | type) == "string") and
+         ((.toolchain.source | type) == "string")' "$MANIFEST" >/dev/null ||
         die "Rust server provenance identity mismatch"
+
+    # Strict mode needs the pin file; check it before other fail-closed steps so
+    # a missing pin is reported as such instead of as a source-hash failure.
+    verify_toolchain
 
     # A diagnostics build is a different animal: it sniffs DPI on the wire. It must
     # never pass as a production payload unless the caller opted in explicitly.

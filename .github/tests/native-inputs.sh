@@ -24,6 +24,15 @@ ok() { pass=$((pass + 1)); }
 [[ -f "$MANIFEST" ]] || fail "missing native inputs manifest: $MANIFEST"
 ok
 
+# abis.txt is a native build input: editing the ABI list must invalidate the
+# Gradle build and the provenance hash, just like editing the manifest itself.
+grep -qxF 'rust-client/abis.txt' "$MANIFEST" ||
+    fail "manifest does not list rust-client/abis.txt"
+ok
+grep -qF 'rootProject.file("rust-client/abis.txt")' "$GRADLE" ||
+    fail "app/build.gradle.kts does not read rust-client/abis.txt"
+ok
+
 [[ -f "$GRADLE" ]] || fail "missing $GRADLE"
 [[ -f "$PROVENANCE" ]] || fail "missing $PROVENANCE"
 

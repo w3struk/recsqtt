@@ -4,7 +4,7 @@
 #
 # Сверяет версию во всех местах, где она продублирована.
 #
-# База — литерал в первой части `versionName` в app/build.gradle.kts.
+# База — version.properties (единственный источник для Gradle и скриптов).
 # Скрипт только читает файлы, ничего не пишет и не ходит в сеть.
 # При любом расхождении печатает все несовпавшие места и выходит с кодом 1.
 #
@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=scripts/version_properties.sh
+source "$SCRIPT_DIR/version_properties.sh"
+
 ROOT="."
 TAG=""
 
@@ -28,9 +33,9 @@ Usage: scripts/check_versions.sh [--root PATH] [--tag vX.Y.Z]
   --tag vX.Y.Z  дополнительно сверить тег релиза с versionName
 
 Проверяет versionCode и все места, где продублирована версия:
-app/build.gradle.kts, rust-client/Cargo.{toml,lock},
-rust-server/Cargo.{toml,lock}, scripts/install.sh,
-rust-server/main.rs, rust-server/web_panel.rs,
+version.properties (база), app/build.gradle.kts (обязан читать базу),
+rust-client/Cargo.{toml,lock}, rust-server/Cargo.{toml,lock},
+scripts/install.sh, rust-server/main.rs, rust-server/web_panel.rs,
 docker/compose.yml и docker/.env.example.
 EOF
 }
@@ -85,23 +90,91 @@ require_file() {
     return 0
 }
 
-# --- База: versionName и versionCode из Gradle ------------------------------
+# Remove Kotlin // and /* ... */ comments so a gate cannot be satisfied by a
+# comment. Handles multi-line block comments.
+strip_kotlin_comments() {
+    awk '
+        {
+            line = $0
+            out = ""
+            while (length(line) > 0) {
+                if (in_block) {
+                    if (match(line, /\*\//)) {
+                        line = substr(line, RSTART + 2)
+                        in_block = 0
+                    } else {
+                        line = ""
+                    }
+                } else if (match(line, /\/\*/)) {
+                    out = out substr(line, 1, RSTART - 1)
+                    line = substr(line, RSTART + 2)
+                    in_block = 1
+                } else if (match(line, /\/\//)) {
+                    out = out substr(line, 1, RSTART - 1)
+                    line = ""
+                } else {
+                    out = out line
+                    line = ""
+                }
+            }
+            print out
+        }
+    '
+}
 
-GRADLE="$ROOT/app/build.gradle.kts"
-VERSION_NAME=""
-VERSION_CODE=""
-if require_file "$GRADLE"; then
-    VERSION_NAME=$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$GRADLE" | head -n 1)
-    VERSION_CODE=$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$GRADLE" | head -n 1)
-fi
+# --- База: version.properties -----------------------------------------------
 
-if [[ -z "$VERSION_NAME" ]]; then
-    echo "FAIL app/build.gradle.kts: не удалось прочитать versionName" >&2
+if ! VERSION_NAME="$(csqtt_version_name "$ROOT")"; then
+    echo "FAIL version.properties: не удалось прочитать versionName" >&2
     exit 1
 fi
 
-if [[ ! "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
-    fail "app/build.gradle.kts versionCode" "целое число" "${VERSION_CODE:-<пусто>}"
+if ! VERSION_CODE="$(csqtt_version_code "$ROOT")"; then
+    echo "FAIL version.properties: не удалось прочитать versionCode" >&2
+    exit 1
+fi
+
+# --- Gradle обязан читать базу, а не нести собственный литерал ---------------
+
+GRADLE="$ROOT/app/build.gradle.kts"
+if require_file "$GRADLE"; then
+    # A comment must not satisfy the gates below; strip Kotlin comments first.
+    GRADLE_CODE="$(strip_kotlin_comments < "$GRADLE")"
+    if ! grep -q 'version\.properties' <<<"$GRADLE_CODE"; then
+        fail "app/build.gradle.kts (version.properties)" "ссылка на version.properties" "нет"
+    fi
+    if ! grep -q 'versionProperty("versionName")' <<<"$GRADLE_CODE"; then
+        fail "app/build.gradle.kts versionName" "чтение ключа versionName" "вызова versionProperty(\"versionName\") нет"
+    fi
+    if ! grep -q 'versionProperty("versionCode")' <<<"$GRADLE_CODE"; then
+        fail "app/build.gradle.kts versionCode" "чтение ключа versionCode" "вызова versionProperty(\"versionCode\") нет"
+    fi
+    # Literals are searched across the whole defaultConfig block, not one
+    # physical line: `versionName =` with the literal on the next line must
+    # fail too. If the block cannot be found, the gate fails instead of
+    # silently skipping the check.
+    gradle_default_config=$(awk '
+        /defaultConfig[[:space:]]*\{/ { inside = 1 }
+        inside {
+            print
+            depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+            if (depth <= 0) exit
+        }
+    ' <<<"$GRADLE_CODE")
+    if [[ -z "$gradle_default_config" ]]; then
+        fail "app/build.gradle.kts defaultConfig" "блок defaultConfig" "не найден"
+    fi
+    if grep -Eq '"[0-9]+\.[0-9]+\.[0-9]+"' <<<"$gradle_default_config"; then
+        fail "app/build.gradle.kts defaultConfig" "версия из version.properties" "строковый литерал версии"
+    fi
+    if grep -Eq '^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*[0-9]' <<<"$gradle_default_config"; then
+        fail "app/build.gradle.kts versionCode" "выражение из version.properties" "числовой литерал"
+    fi
+    # Only a val whose name looks like a version is an app-version literal;
+    # dependency pins such as `val composeBom = "2026.08.00"` are legitimate.
+    if grep -Eq 'val[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)?[Vv][Ee][Rr][Ss][Ii][Oo][Nn][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' <<<"$GRADLE_CODE"; then
+        fail "app/build.gradle.kts" "версия из version.properties" "строковый литерал версии в val"
+    fi
 fi
 
 # --- Сравнение версии в конкретном файле ------------------------------------

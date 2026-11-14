@@ -15,7 +15,7 @@ Usage: build_android_abis.sh [--abis=arm64-v8a,armeabi-v7a,x86_64] [--jobs=N] [-
 
 Builds the Android client ABIs concurrently, one log file per ABI.
   --abis=LIST    Comma-separated subset of arm64-v8a,armeabi-v7a,x86_64
-  --jobs=N       Parallel cargo jobs per ABI (default: max(1, nproc/3))
+  --jobs=N       Parallel cargo jobs per ABI (default: max(1, min(nproc, RAM GiB) / ABI count))
   --log-dir=DIR  Directory for per-ABI logs (default: build/rust-client-android-logs)
   --variant=V    Android build variant (default: release). "debug" uses the Cargo
                  "android-debug" profile (inherits dev: opt-level = 1, debuginfo
@@ -24,7 +24,34 @@ Builds the Android client ABIs concurrently, one log file per ABI.
 EOF
 }
 
-ABIS_CSV="arm64-v8a,armeabi-v7a,x86_64"
+ABIS_CSV=""
+# ABI list: rust-client/abis.txt
+ABI_MANIFEST="$ROOT/rust-client/abis.txt"
+
+read_default_abis() {
+    local line out=""
+    if [ ! -f "$ABI_MANIFEST" ]; then
+        printf 'error: ABI manifest not found: %s\n' "$ABI_MANIFEST" >&2
+        return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line="${line//[[:space:]]/}"
+        [ -n "$line" ] || continue
+        if [ -n "$out" ]; then
+            out="$out,$line"
+        else
+            out="$line"
+        fi
+    done <"$ABI_MANIFEST"
+    if [ -z "$out" ]; then
+        printf 'error: ABI manifest lists no ABIs: %s\n' "$ABI_MANIFEST" >&2
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+ABIS_CSV="$(read_default_abis)" || exit 1
 JOBS=""
 VARIANT="release"
 LOG_DIR="$DEFAULT_LOG_DIR"
@@ -78,7 +105,39 @@ fi
 
 if [ -z "$JOBS" ]; then
     CORES="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-    JOBS=$((CORES / 3))
+    # The per-ABI job count is also the divide-by-ABI-count factor: every ABI is
+    # built in parallel below. Bound it by RAM as well as by cores, because each
+    # rustc (aws-lc-sys compiles C and asm through cc/cmake) can peak at several
+    # hundred MB - the old nproc/3 per ABI meant 12 concurrent rustc on a 12-core
+    # 8 GB machine, which filled swap and made the build slower, not faster.
+    # One GiB per concurrent rustc keeps the peak inside the machine and still
+    # uses every core of a big host.
+    MEM_BYTES=""
+    MEM_TOTAL_KIB="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+    if [[ "$MEM_TOTAL_KIB" =~ ^[0-9]+$ ]] && [ "$MEM_TOTAL_KIB" -gt 0 ]; then
+        MEM_BYTES=$((MEM_TOTAL_KIB * 1024))
+    fi
+    # /proc/meminfo reports the host inside a container; take the smaller of it
+    # and the cgroup limit (v2 memory.max, v1 memory.limit_in_bytes).
+    for limit_file in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+        [ -r "$limit_file" ] || continue
+        limit="$(cat "$limit_file" 2>/dev/null || true)"
+        # v2 writes "max" for unlimited; v1 uses a huge sentinel.
+        [[ "$limit" =~ ^[0-9]+$ ]] || continue
+        [ "$limit" -gt 0 ] || continue
+        [ "$limit" -lt 9223372036854771712 ] || continue
+        if [ -z "$MEM_BYTES" ] || [ "$limit" -lt "$MEM_BYTES" ]; then
+            MEM_BYTES="$limit"
+        fi
+    done
+    if [ -n "$MEM_BYTES" ]; then
+        MEM_GIB=$((MEM_BYTES / 1073741824))
+        [ "$MEM_GIB" -ge 1 ] || MEM_GIB=1
+        if [ "$MEM_GIB" -lt "$CORES" ]; then
+            CORES="$MEM_GIB"
+        fi
+    fi
+    JOBS=$((CORES / ${#ABIS[@]}))
     if [ "$JOBS" -lt 1 ]; then
         JOBS=1
     fi

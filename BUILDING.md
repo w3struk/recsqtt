@@ -25,16 +25,38 @@ Gradle собирает и проверяет **только клиент** (`ca
 | Компонент | Версия / примечание |
 | --- | --- |
 | JDK | 17+ |
-| Android SDK | `compileSdk 37`, build-tools |
-| Android NDK | 27.0.12077973 (или другой; берётся самый новый из `$ANDROID_HOME/ndk`) |
-| Rust | 1.97.1 (фиксируется `rust-toolchain.toml` в обоих crate'ах; Android-таргеты клиента rustup доустановит сам) |
-| cargo-ndk | `cargo install cargo-ndk` |
-| Zig | 0.14+ (`zig` в `PATH`) |
-| cargo-zigbuild | `cargo install cargo-zigbuild --locked` |
+| Android SDK | `compileSdk 37`; `platforms;android-37.0` и `build-tools;37.0.0` — из `scripts/toolchain.env` |
+| Android NDK | `27.0.12077973` — из `scripts/toolchain.env`; ставится в `$ANDROID_HOME/ndk/<версия>` |
+| Rust | `1.97.1` — `RUST_TOOLCHAIN` из `scripts/toolchain.env`, продублирован в `rust-toolchain.toml` обоих crate'ов; Android-таргеты клиента rustup доустановит сам |
+| cargo-ndk | `4.1.2` — `CARGO_NDK_VERSION` из `scripts/toolchain.env` |
+| Zig | `0.17.0` — `ZIG_VERSION` из `scripts/toolchain.env` (`zig` в `PATH`) |
+| cargo-zigbuild | `0.24.0` — `CARGO_ZIGBUILD_VERSION` из `scripts/toolchain.env` |
 | CMake + Ninja | из Android SDK или системные |
 | jq | нужен provenance-скриптам |
 | python3 | нужен проверке файла пресета `rust-server/ru_apps_preset.json` в `rust-server/build_linux.sh` (выполняется и при `--no-tests`, локально и в CI) |
 | bash, coreutils, findutils | стандартные |
+
+### Единственный источник пинов
+
+Версии тулчейна живут в одном shell-sourceable файле — `scripts/toolchain.env`
+(`RUST_TOOLCHAIN`, `ZIG_VERSION`, `CARGO_NDK_VERSION`, `CARGO_ZIGBUILD_VERSION`,
+`ANDROID_NDK_VERSION`, `ANDROID_BUILD_TOOLS_VERSION`, `ANDROID_PLATFORM`).
+Файл только source'ится и экспортирует переменные; литералов версий в
+исполняемом коде скриптов и workflow быть не должно — в комментариях они
+допустимы, а workflow-тест игнорирует `#`-строки. Его читают `scripts/android_env.sh`,
+`scripts/check_toolchain.sh`, `scripts/native_client_provenance.sh`,
+`scripts/server_asset_provenance.sh`, локальные build-скрипты и CI — шаг
+`Resolve toolchain pins` в `build.yml` кладёт те же значения в `$GITHUB_ENV`.
+
+`scripts/check_toolchain.sh --root .` сверяет `channel` в обоих
+`rust-toolchain.toml` и `rust-version` в обоих `Cargo.toml` с `RUST_TOOLCHAIN` и
+входит в гейт `Gate: version consistency`. Смена пина — правка одного файла плюс
+`bash scripts/check_toolchain.sh --root .`.
+
+NDK ищется строго по пину: `scripts/android_env.sh` берёт
+`$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION`. Если его нет, а установлен другой NDK,
+сборка падает с подсказкой. Осознанный opt-in на самый новый установленный NDK —
+`ALLOW_NEWEST_NDK=1`; тогда helper печатает предупреждение о расхождении с пином.
 
 `scripts/android_env.sh` сам находит SDK/NDK: `ANDROID_HOME` → `ANDROID_SDK_ROOT` →
 `sdk.dir` из `local.properties` → типовые пути (`~/Android/Sdk`, `~/.android-sdk`,
@@ -44,7 +66,8 @@ Gradle собирает и проверяет **только клиент** (`ca
 
 ```bash
 export ANDROID_HOME="$HOME/Android/Sdk"
-export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+source scripts/toolchain.env
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
 ```
 
 `local.properties` — локальный файл, он в `.gitignore` и не коммитится. Android
@@ -216,10 +239,12 @@ bash scripts/run_system_checks.sh   # требует root для TUN/systemd п�
   установке на устройство: сборка сужается до ABI устройства, universal-APK не
   создаётся.
 
-Имя APK всегда содержит версию приложения (`versionName` из
-`app/build.gradle.kts`): `app-2.5.4-arm64-v8a-release.apk`,
-`recsqtt-2.5.4-universal.apk`. Скрипты `install_apk.sh` и `build_apk.sh` собирают
-имя из той же версии, поэтому второго источника правды нет.
+Имя APK всегда содержит версию приложения (`versionName` из `version.properties`):
+`app-2.5.4-arm64-v8a-release.apk`, `recsqtt-2.5.4-universal.apk`. Файл читают Gradle
+(через `providers.fileContents`, чтобы configuration cache инвалидировался при его
+изменении) и общий `scripts/version_properties.sh` для скриптов `install_apk.sh` и
+`build_apk.sh`, поэтому второго источника правды нет; литерал в `defaultConfig` или
+отказ Gradle читать ключи гейт `check_versions.sh` не пропустит.
 
 Ограничение amd64 относится только к VPS, а не к телефону: Android-клиент
 по-прежнему поддерживает `arm64-v8a`, `armeabi-v7a` и `x86_64`. Установщик
@@ -314,6 +339,17 @@ provenance та же инварианта проверяется count-check'о�
 трёхартефактный манифест отвергается. Формат манифеста и проверки целостности,
 ELF, wire-revision и cargo features не меняются.
 
+Оба манифеста пишут информационный блок `toolchain` (клиент —
+`csqtt.native-client-provenance.v7`, сервер — `csqtt.server-asset-provenance.v5`):
+`rustc`, `cargoNdk`, `ndk` и `source` — значения, снятые на машине сборки.
+Запись никогда не гейтит сборку: на машине без `rustc`/`cargo-ndk`/NDK поля
+остаются `unknown`, а проверка печатает предупреждение. Сравнение с
+`scripts/toolchain.env` включается явно — флагом `--strict-toolchain` или
+`CSQTT_STRICT_TOOLCHAIN=1`: тогда расхождение записанного и пина, а также
+отсутствующий блок или пин становятся жёсткой ошибкой. Строгий режим
+предназначен для CI/релиза; локальная проверка по умолчанию остаётся
+информационной.
+
 Какие ABI собираются: `-Pcsqtt.abis` → `android.injected.build.abi` (его подставляет
 Android Studio для выбранного устройства) → ABI подключённого устройства → все три.
 Поэтому запуск ▶ из IDE линкует один ABI вместо трёх, install-задача ставит ABI
@@ -325,15 +361,46 @@ ABI из `-Pcsqtt.abis` присутствует в манифесте** (лиш
 
 ABI подключённого устройства Gradle узнаёт сам — через `scripts/device_abi.sh`,
 который он вызывает на этапе конфигурации для задач `installCsqtt*`: скрипт читает
-`ro.product.cpu.abilist` через adb и берёт первый поддерживаемый ABI
-(`arm64-v8a` → `armeabi-v7a` → `x86_64`). Список поддерживаемых ABI продублирован
-в скрипте и в `supportedAbis` в `app/build.gradle.kts` — при расхождении Gradle
-отвергнет значение сам.
+`ro.product.cpu.abilist` через adb и берёт первый ABI из манифеста, который
+устройство поддерживает (`arm64-v8a` → `armeabi-v7a` → `x86_64`).
+
+Единственный источник ABI-списка — `rust-client/abis.txt`. Из него выводят
+значения `app/build.gradle.kts` (`supportedAbis`, split-суффиксы и cargo-таргеты),
+`scripts/device_abi.sh`, `rust-client/build_so.sh`,
+`rust-client/build_android_abis.sh` и `scripts/native_client_provenance.sh`.
+`scripts/check_abi_list.sh --root .` (входит в `Gate: version consistency`)
+требует, чтобы манифест упоминали все Tier-1 потребители и чтобы **каждый** ABI
+из манифеста присутствовал в каждой per-ABI карте: cargo-таргет, суффикс
+target-dir, ELF-класс/машина, `valid_abi()` и `install_lib`. Поэтому добавление строки в
+`abis.txt` — ещё не поддержка: без правки всех карт гейт красный. Tier-2
+упаковщики (`scripts/build_apk.sh`, `.github/scripts/collect-release-assets.sh`,
+входы `abis:` workflow) могут добавлять только `universal`. Манифест входит в
+`rust-client/native-inputs.txt`, поэтому его правка инвалидирует Gradle-входы и
+provenance-хеш.
+
+### Память и параллелизм
+
+Ни heap Gradle, ни число cargo-задач не заданы абсолютным числом: обе величины
+машинно-зависимы, а проект собирают и на 16-гигабайтном CI-раннере, и на
+8-гигабайтной WSL-виртуалке.
+
+- `org.gradle.jvmargs` задаёт `-XX:MaxRAMPercentage=50`, а не `-Xmx`: 8 ГБ на
+  раннере, 4 ГБ в 8-гигабайтной WSL. Kotlin-демону нужен явный `-Xmx2g`: его
+  лаунчер подставляет свой `-Xmx` (≈85 % heap'а Gradle) и тот перебивает
+  `-XX:MaxRAMPercentage`, поэтому процент там не работает.
+- `~/.gradle/gradle.properties` перекрывает проектный файл (в Gradle 9 user-home
+  выигрывает), поэтому собственный `org.gradle.jvmargs` там держать не нужно: иначе
+  локальная и CI-сборка идут в разных режимах памяти, и ни один из них не проверяется.
+- `--jobs` по умолчанию считает `rust-client/build_android_abis.sh`:
+  `max(1, min(nproc, RAM GiB) / число ABI)`. ABI собираются параллельно, поэтому
+  потолок по памяти важнее потолка по ядрам: на 12-ядерной/8-гигабайтной машине это
+  2 задачи на ABI (6 rustc вместо 12), на 4-ядерном раннере с одним ABI — 4.
+  Перекрывается `-Pcsqtt.cargoJobs=N` (Gradle) или `--jobs=N` (`build_so.sh`).
 
 | Свойство | Смысл |
 | --- | --- |
 | `-Pcsqtt.abis=arm64-v8a,x86_64` | какие ABI собирать и упаковывать (перекрывает ABI, инжектированный IDE) |
-| `-Pcsqtt.cargoJobs=N` | параллельные cargo-задачи на ABI |
+| `-Pcsqtt.cargoJobs=N` | параллельные cargo-задачи на ABI (перекрывает расчёт по ядрам и памяти) |
 | `-Pcsqtt.nativeTests=true` | прогнать fmt/clippy/test перед нативной сборкой |
 | `-Pcsqtt.buildNativeClient=false` | не пересобирать клиент, только проверить |
 | `-Pcsqtt.skipNativeVerification=true` | пропустить и сборку, и проверку клиента |
@@ -374,6 +441,41 @@ bash scripts/build_apk.sh
 
 
 
+## Бамп версии
+
+`versionName`/`versionCode` живут в `version.properties` — единственном источнике
+для Gradle и скриптов (shell читает файл через `scripts/version_properties.sh`).
+Значения продублированы в десяти местах: `rust-client/Cargo.toml`/`Cargo.lock`,
+`rust-server/Cargo.toml`/`Cargo.lock`, `scripts/install.sh` (`SCRIPT_VERSION`,
+`CSQTT_DOCKER_IMAGE`), `rust-server/main.rs` (баннер), `rust-server/web_panel.rs`
+(`CACHE_NAME` PWA) и `docker/compose.yml` + `docker/.env.example` (тег образа).
+`app/build.gradle.kts` версию не хранит — он читает `version.properties`.
+
+`scripts/bump_version.sh` правит все десять файлов и в конце запускает
+проверку; при ошибке он восстанавливает все десять файлов через trap.
+SIGKILL и power loss не покрываются — резервная копия при этом остаётся в
+временном каталоге, но автоматического отката уже не будет:
+
+```bash
+scripts/bump_version.sh patch          # 2.5.4 -> 2.5.5, versionCode +1
+scripts/bump_version.sh minor --dry-run
+scripts/bump_version.sh 3.0.0 --code 300
+```
+
+`--force-version` разрешает versionName не больше текущего (равенство или откат);
+без него такой бамп отвергается.
+
+`Cargo.lock` обновляется настоящим `cargo update --offline -p <crate> --precise`,
+поэтому посторонние пакеты в lock-файле не меняются. После бампа (и вручную)
+должны быть зелены три гейта — они же идут последовательно в
+`Gate: version consistency`:
+
+```bash
+bash scripts/check_versions.sh --root .
+bash scripts/check_toolchain.sh --root .
+bash scripts/check_abi_list.sh --root .
+```
+
 ## Релизный CI (GitHub Actions)
 
 CI — три workflow: `.github/workflows/build.yml` (`workflow_call`: гейты и сборка, общие для
@@ -407,8 +509,9 @@ CI кеширует тяжёлые каталоги, которых раньше
 `build/rust-client-android-*` (cargo-ndk по ABI), `build/csqtt-uring-linux-recsqtt-linux-amd64`
 и `build/zig-cache` + `~/.cache/zig`, `~/.rustup`, `~/zig`, `~/android-sdk` и
 `~/.gradle/caches/build-cache-1`. Ключи привязаны к `Cargo.lock`,
-`rust-toolchain.toml`, `gradle.properties` и пинам SDK/NDK/Zig, поэтому смена пина
-не оставляет старые артефакты. Проверка корректности не делегируется кешу: cargo
+`rust-toolchain.toml`, `gradle.properties` и — у каждого toolchain-кеша — к
+`hashFiles('scripts/toolchain.env')`, поэтому смена любого пина не оставляет
+старые артефакты. Проверка корректности не делегируется кешу: cargo
 сам инвалидирует по исходникам, а provenance/verify сверяют результат.
 
 Шаг `Gate: CI and release script fixtures` прогоняет все `.github/tests/*.sh`

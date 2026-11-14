@@ -18,20 +18,31 @@
 # Gradle calls this at configuration time: the ABI decides how many native
 # binaries cargo builds (one `cargo ndk` run per ABI) and which APK splits get
 # packaged, so it has to be known before the build is configured. The supported
-# list must match `supportedAbis` in app/build.gradle.kts.
+# list comes from rust-client/abis.txt, the same manifest `supportedAbis` reads.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-SUPPORTED_ABIS=(arm64-v8a armeabi-v7a x86_64)
-
 die() {
     echo >&2
     echo "ERROR: $*" >&2
     exit 1
 }
+
+# The supported list is the shared manifest, not a second copy: Gradle, the
+# Rust build scripts and provenance all read rust-client/abis.txt.
+ABI_MANIFEST="$ROOT/rust-client/abis.txt"
+[[ -f "$ABI_MANIFEST" ]] || die "ABI manifest not found: $ABI_MANIFEST"
+SUPPORTED_ABIS=()
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line//[[:space:]]/}"
+    [[ -n "$line" ]] || continue
+    SUPPORTED_ABIS+=("$line")
+done <"$ABI_MANIFEST"
+((${#SUPPORTED_ABIS[@]} > 0)) || die "ABI manifest lists no ABIs: $ABI_MANIFEST"
 
 # adb is looked up the same way the other scripts find it: the ADB override
 # first, then the SDK, then PATH.

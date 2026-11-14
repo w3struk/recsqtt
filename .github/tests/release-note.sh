@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #
 # Тест .github/scripts/release-note.sh против настоящего репозитория:
-# versionName/versionCode читаются из app/build.gradle.kts тем же sed'ом, что
+# versionName/versionCode читаются из version.properties тем же helper'ом, что
 # и в скрипте, wire-ревизия — из rust-server/main.rs. Значения не
 # хардкодятся: бамп версии не должен ломать тест.
 
@@ -17,14 +17,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 FINGERPRINT=9F2C0A1B2C3D4E5F60718293A4B5C6D7E8F90123A4B5C6D7E8F90123A4B5C6D7
 HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-VERSION="$(
-    sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$REPO_ROOT/app/build.gradle.kts" | sed -n '1p'
-)"
-VERSION_CODE="$(
-    sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' \
-        "$REPO_ROOT/app/build.gradle.kts" | sed -n '1p'
-)"
+# shellcheck source=../../scripts/version_properties.sh
+source "$REPO_ROOT/scripts/version_properties.sh"
+VERSION="$(csqtt_version_name "$REPO_ROOT")"
+VERSION_CODE="$(csqtt_version_code "$REPO_ROOT")"
 WIRE_REVISION="$(
     sed -n 's/.*WIRE_PROTOCOL_REVISION[[:space:]]*:[[:space:]]*&str[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
         "$REPO_ROOT/rust-server/main.rs" | sed -n '1p'
@@ -203,21 +199,20 @@ expect_fail "non-numeric duration must fail" "duration" \
     bash "$SUT" --root "$REPO_ROOT" --tag v2.5.1 --commit "$HEAD_SHA" \
     --duration-seconds 12m --out "$TMP/bad-duration.md"
 
-expect_fail "missing gradle file must fail" "build.gradle.kts" \
+expect_fail "missing version.properties must fail" "version.properties" \
     bash "$SUT" --root "$TMP" --tag v2.5.1 --commit "$HEAD_SHA" \
-    --duration-seconds 754 --out "$TMP/no-gradle.md"
+    --duration-seconds 754 --out "$TMP/no-version-file.md"
 
-# Gradle file without versionName/versionCode: exit 1, no note.
+# version.properties without versionName/versionCode: exit 1, no note.
 PARTIAL_ROOT="$TMP/partial"
-mkdir -p "$PARTIAL_ROOT/app" "$PARTIAL_ROOT/rust-server"
-printf 'android {\n}\n' >"$PARTIAL_ROOT/app/build.gradle.kts"
+mkdir -p "$PARTIAL_ROOT/rust-server"
+printf '# empty\n' >"$PARTIAL_ROOT/version.properties"
 expect_fail "versionName missing must fail" "versionName" \
     bash "$SUT" --root "$PARTIAL_ROOT" --tag v2.5.1 --commit "$HEAD_SHA" \
     --duration-seconds 754 --out "$TMP/no-version.md"
 
 # rust-server/main.rs missing and no --wire-revision: exit 1, names the source.
-printf 'android {\n    versionCode = 7\n    versionName = "1.0.0"\n}\n' \
-    >"$PARTIAL_ROOT/app/build.gradle.kts"
+printf 'versionName=1.0.0\nversionCode=7\n' >"$PARTIAL_ROOT/version.properties"
 expect_fail "wire revision source missing must fail" "rust-server/main.rs" \
     bash "$SUT" --root "$PARTIAL_ROOT" --tag v2.5.1 --commit "$HEAD_SHA" \
     --duration-seconds 754 --out "$TMP/no-wire.md"
@@ -227,11 +222,13 @@ bash "$SUT" --root "$PARTIAL_ROOT" --tag v2.5.1 --commit "$HEAD_SHA" \
     --duration-seconds 754 --wire-revision CSQTT-WIRE-3 --out "$TMP/partial.md" >/dev/null ||
     fail "explicit --wire-revision must not need rust-server/main.rs"
 ok
-assert_line "$TMP/partial.md" '^## reCSQTT 1\.0\.0$' "version from the partial Gradle file"
-assert_line "$TMP/partial.md" '^Версия: 1\.0\.0 \(versionCode 7\)$' "versionCode from the partial Gradle file"
+assert_line "$TMP/partial.md" '^## reCSQTT 1\.0\.0$' "version from the partial version.properties"
+assert_line "$TMP/partial.md" '^Версия: 1\.0\.0 \(versionCode 7\)$' "versionCode from the partial version.properties"
 
 # A failed run must not leave a note behind for the publish step to upload.
-[[ ! -f "$TMP/no-gradle.md" ]] || fail "failed run left a note file behind"
+for failed_note in no-version-file.md no-version.md no-wire.md; do
+    [[ ! -f "$TMP/$failed_note" ]] || fail "failed run left $failed_note behind"
+done
 ok
 
 printf 'release-note: %d assertions OK (version %s, versionCode %s, %s)\n' \

@@ -16,6 +16,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=../../scripts/version_properties.sh
+source "$SCRIPT_DIR/../../scripts/version_properties.sh"
+
 usage() {
     cat <<'EOF'
 Usage: collect-release-assets.sh --root DIR [--apk-dir DIR] [--assets-dir DIR]
@@ -116,14 +121,9 @@ if [[ -z "$assets_dir" ]]; then
 fi
 
 if [[ -z "$version" ]]; then
-    gradle_file="$root/app/build.gradle.kts"
-    [[ -f "$gradle_file" ]] || die "cannot read versionName, file not found: $gradle_file"
-    version="$(
-        sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-            "$gradle_file" | head -n 1
-    )"
+    version="$(csqtt_version_name "$root")" ||
+        die "could not read versionName from $root/version.properties"
 fi
-[[ -n "$version" ]] || die "could not read versionName from $root/app/build.gradle.kts"
 
 mkdir -p "$out" || die "cannot create output directory: $out"
 out="$(cd -- "$out" && pwd)"

@@ -14,6 +14,37 @@ if (localPropertiesFile.isFile) {
     localPropertiesFile.inputStream().use { input -> localProperties.load(input) }
 }
 
+// version.properties at the repository root is the single source of truth for
+// the app version; scripts/version_properties.sh reads the same file. The
+// content goes through a provider so the configuration cache is invalidated
+// when the file changes instead of reusing a stale version.
+val versionPropertiesFile = rootProject.layout.projectDirectory.file("version.properties")
+val versionPropertiesText = run {
+    check(versionPropertiesFile.asFile.isFile) {
+        "version.properties is missing: ${versionPropertiesFile.asFile}"
+    }
+    providers.fileContents(versionPropertiesFile).asText.get()
+}
+val versionProperties = Properties().apply {
+    versionPropertiesText.reader().use { reader -> load(reader) }
+}
+
+fun versionProperty(key: String): String =
+    versionProperties.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() }
+        ?: throw GradleException("version.properties: $key is not set")
+
+val baseVersionName = versionProperty("versionName").also { name ->
+    require(Regex("""^[0-9]+\.[0-9]+\.[0-9]+$""").matches(name)) {
+        "version.properties: versionName must be X.Y.Z, got '$name'"
+    }
+}
+val versionCodeText = versionProperty("versionCode")
+require(Regex("""^[1-9][0-9]*$""").matches(versionCodeText)) {
+    "version.properties: versionCode must be a positive decimal integer without leading zeros, got '$versionCodeText'"
+}
+val versionCodeFromProperties = versionCodeText.toIntOrNull()
+    ?: throw GradleException("version.properties: versionCode is out of range: '$versionCodeText'")
+
 fun releaseSigningValue(name: String): String? =
     providers.gradleProperty(name).orNull
         ?: providers.environmentVariable(name).orNull
@@ -45,7 +76,27 @@ val releaseSigningProblems = mutableListOf<String>().apply {
 }
 val releaseSigningReady = releaseSigningProblems.isEmpty()
 
-val supportedAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+// rust-client/abis.txt — единственный источник правды для набора ABI клиента.
+// Его же читают scripts/device_abi.sh, rust-client/build_so.sh,
+// rust-client/build_android_abis.sh и scripts/native_client_provenance.sh, а
+// scripts/check_abi_list.sh требует, чтобы каждый ABI из манифеста был описан
+// во всех per-ABI картах. readLines() на этапе конфигурации — configuration
+// cache учитывает это чтение и инвалидирует запись при правке файла.
+val abiManifest: File = rootProject.file("rust-client/abis.txt")
+
+fun readAbiManifest(): List<String> {
+    check(abiManifest.isFile) { "rust-client/abis.txt is missing: $abiManifest" }
+    return abiManifest.readLines()
+        .map { it.substringBefore('#').trim() }
+        .filter { it.isNotEmpty() }
+}
+
+val supportedAbis = readAbiManifest().also { abis ->
+    require(abis.isNotEmpty()) { "rust-client/abis.txt lists no ABIs" }
+    require(abis.distinct().size == abis.size) {
+        "rust-client/abis.txt lists duplicate ABIs: ${abis.joinToString()}"
+    }
+}
 
 // The ABI of the connected device, asked for by the install tasks.
 //
@@ -143,14 +194,11 @@ android {
         applicationId = "csqtt.quic.amurcanov"
         minSdk = 26
         targetSdk = 37
-        versionCode = 234
+        versionCode = versionCodeFromProperties
         // The release version plus an optional suffix supplied by CI: the beta
-        // workflow passes -Pcsqtt.versionSuffix=-beta.<short-sha>. The literal
-        // stays first: the sed/regex parsers in scripts/build_apk.sh,
-        // scripts/install_apk.sh, .github/scripts/collect-release-assets.sh,
-        // .github/scripts/release-note.sh, the "Verify APK identity" step and
-        // scripts/gen_version_lockup.py all read versionName from this line.
-        versionName = "2.5.4" +
+        // workflow passes -Pcsqtt.versionSuffix=-beta.<short-sha>. Scripts read
+        // the base from version.properties, so this expression is Gradle-only.
+        versionName = baseVersionName +
             (providers.gradleProperty("csqtt.versionSuffix").orNull ?: "")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -350,7 +398,8 @@ fun clientCargoArtifacts(variant: String): List<File> = buildList {
         val (target, suffix) = when (abi) {
             "arm64-v8a" -> "aarch64-linux-android" to "arm64"
             "armeabi-v7a" -> "armv7-linux-androideabi" to "armv7"
-            else -> "x86_64-linux-android" to "x86_64"
+            "x86_64" -> "x86_64-linux-android" to "x86_64"
+            else -> error("unsupported ABI: $abi (see rust-client/abis.txt)")
         }
         add(rootBuildDir.resolve("rust-client-android-$variant-$suffix/$target/$profileDir/client"))
     }
@@ -381,8 +430,12 @@ fun registerNativeClientBuild(variant: String) = tasks.register<Exec>("buildNati
     val skip = (providers.gradleProperty("csqtt.skipNativeVerification").orNull ?: "false").toBoolean()
     val enabled = !skip && (providers.gradleProperty("csqtt.buildNativeClient").orNull ?: "true").toBoolean()
     val tests = (providers.gradleProperty("csqtt.nativeTests").orNull ?: "false").toBoolean()
-    val jobs = providers.gradleProperty("csqtt.cargoJobs").orNull
-        ?: (Runtime.getRuntime().availableProcessors() / 3).coerceAtLeast(1).toString()
+    // Cargo parallelism is decided by rust-client/build_android_abis.sh: it knows both
+    // the core count and how many ABIs it is about to build in parallel, and bounds the
+    // jobs by RAM as well. Gradle used to pass nproc/3 here, which on a 4-vCPU runner
+    // with the single-ABI beta build meant --jobs 1 (fully serial). Only an explicit
+    // -Pcsqtt.cargoJobs overrides the script's own default.
+    val jobsOverride = providers.gradleProperty("csqtt.cargoJobs").orNull
     val abis = selectedAbis.joinToString(",")
     val sdk = androidComponents.sdkComponents.sdkDirectory.get().asFile.absolutePath
 
@@ -391,14 +444,15 @@ fun registerNativeClientBuild(variant: String) = tasks.register<Exec>("buildNati
     workingDir = rootProject.layout.projectDirectory.asFile
     environment("ANDROID_HOME", sdk)
     environment("ANDROID_SDK_ROOT", sdk)
-    commandLine(
+    val command = mutableListOf(
         "bash",
         "rust-client/build_so.sh",
         if (tests) "--tests" else "--no-tests",
         "--abis=$abis",
-        "--jobs=$jobs",
-        "--variant=$variant",
     )
+    jobsOverride?.let { command += "--jobs=$it" }
+    command += "--variant=$variant"
+    commandLine(command)
 
     inputs.files(clientNativeInputs)
     inputs.property("variant", variant)

@@ -55,6 +55,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=scripts/version_properties.sh
+source "$SCRIPT_DIR/version_properties.sh"
+
 ADB="${ADB:-adb}"
 DEVICE_WAIT_SECONDS="${DEVICE_WAIT_SECONDS:-120}"
 
@@ -79,18 +83,6 @@ die() {
     echo >&2
     echo "ERROR: $*" >&2
     exit 1
-}
-
-# The app version, as it appears in the APK file names.
-#
-# app/build.gradle.kts is the single place the version is defined, and the
-# scripts read it from there instead of keeping a second copy of the number:
-# the APK names are built from this value and from the ABI.
-apk_version() {
-    local versions
-    versions="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$ROOT/app/build.gradle.kts")"
-    printf '%s' "${versions%%$'\n'*}"
 }
 
 VARIANT=""
@@ -223,8 +215,8 @@ device_abi="$("$ADB" -s "$SERIAL" shell getprop ro.product.cpu.abi 2>/dev/null |
 # The APKs carry the app version in their names
 # (app-<version>-<abi>-<variant>.apk), so the name is built from the version,
 # the ABI and the variant.
-APK_VERSION="$(apk_version)"
-[[ -n "$APK_VERSION" ]] || die "could not read versionName from app/build.gradle.kts"
+APK_VERSION="$(csqtt_version_name "$ROOT")" ||
+    die "could not read versionName from $ROOT/version.properties"
 ABI_APK="app-$APK_VERSION-$device_abi-$VARIANT.apk"
 UNIVERSAL_APK="app-$APK_VERSION-universal-$VARIANT.apk"
 

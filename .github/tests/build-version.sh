@@ -4,9 +4,9 @@
 #
 # Секция стенда для .github/scripts/build-version.sh.
 #
-# Значения версии и versionCode не хардкодятся: они читаются из репозитория
-# теми же sed'ами, что и в скрипте, иначе тест закреплял бы конкретный номер
-# версии вместо контракта.
+# Значения версии и versionCode не хардкодятся: они читаются из
+# version.properties тем же helper'ом, что и в скрипте, иначе тест закреплял бы
+# конкретный номер версии вместо контракта.
 
 set -euo pipefail
 export LC_ALL=C
@@ -35,10 +35,10 @@ ok() {
     printf '[OK] %s\n' "$1"
 }
 
-VERSION="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$REPO_ROOT/app/build.gradle.kts" | head -n 1)"
-CODE="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' \
-    "$REPO_ROOT/app/build.gradle.kts" | head -n 1)"
+# shellcheck source=../../scripts/version_properties.sh
+source "$REPO_ROOT/scripts/version_properties.sh"
+VERSION="$(csqtt_version_name "$REPO_ROOT")"
+CODE="$(csqtt_version_code "$REPO_ROOT")"
 HEAD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 [[ -n "$VERSION" && -n "$CODE" && -n "$HEAD_SHA" ]] ||
     fail "не удалось прочитать исходные значения версии из репозитория"
@@ -78,7 +78,18 @@ assert_key "$out" version "$BETA" "с суффиксом: version"
 assert_key "$out" suffix "-beta.abc1234" "с суффиксом: suffix"
 assert_key "$out" base "$VERSION" "с суффиксом: base не меняется"
 
-# 3–7. Отказы.
+# 3. --root указывает на другое дерево: версия берётся оттуда, а не из cwd.
+ALT_ROOT="$TMP/alt-root"
+mkdir -p "$ALT_ROOT"
+printf 'versionName=7.7.7\nversionCode=777\n' >"$ALT_ROOT/version.properties"
+git -c init.defaultBranch=main init -q "$ALT_ROOT"
+git -C "$ALT_ROOT" -c user.email=test@example.com -c user.name=test add version.properties
+git -C "$ALT_ROOT" -c user.email=test@example.com -c user.name=test commit -qm init
+out="$("$SCRIPT" --root "$ALT_ROOT")"
+assert_key "$out" base "7.7.7" "--root: base из другого дерева"
+assert_key "$out" version-code "777" "--root: version-code из другого дерева"
+
+# 4–8. Отказы.
 # Пустые значения = «читать из файла»: так release.yml/build.yml передают
 # отсутствующие override'ы; пустая строка не должна падать как «нет значения».
 out="$("$SCRIPT" --root "$REPO_ROOT" --version-name "" --version-code "" --expected-commit "")"
@@ -91,7 +102,7 @@ expect_fail "чужой versionCode отвергнут" -- --root "$REPO_ROOT" -
 expect_fail "чужой commit отвергнут" -- --root "$REPO_ROOT" \
     --expected-commit "0000000000000000000000000000000000000000"
 mkdir -p "$TMP/empty"
-expect_fail "каталог без build.gradle.kts отвергнут" -- --root "$TMP/empty"
+expect_fail "каталог без version.properties отвергнут" -- --root "$TMP/empty"
 
 # 8. GITHUB_OUTPUT: ровно пять строк key=value, stdout пуст.
 GITHUB_OUTPUT="$TMP/github-output" "$SCRIPT" --root "$REPO_ROOT" >"$TMP/stdout"

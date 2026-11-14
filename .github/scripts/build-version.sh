@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 amurcanov
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #
-# Версия сборки: база из app/build.gradle.kts, опциональный суффикс (бета),
+# Версия сборки: база из version.properties, опциональный суффикс (бета),
 # versionCode и коммит — плюс сверка того, что ожидает вызывающий.
 #
 # Usage:
@@ -18,12 +18,17 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=../../scripts/version_properties.sh
+source "$SCRIPT_DIR/../../scripts/version_properties.sh"
+
 usage() {
     cat <<'EOF'
 Usage: build-version.sh --root DIR [--version-name V] [--version-code C]
                         [--expected-commit SHA]
 
-Reads the base version and versionCode from app/build.gradle.kts and prints:
+Reads the base version and versionCode from version.properties and prints:
   base=, version=, suffix=, version-code=, commit=
 
   --version-name V       override versionName (must extend the base with -suffix)
@@ -91,20 +96,11 @@ while (($#)); do
 done
 
 root="${root:-$PWD}"
-gradle_file="$root/app/build.gradle.kts"
-[[ -f "$gradle_file" ]] || die "не найден файл версии: $gradle_file"
 
-# Канонические парсеры: те же sed'ы читают версию в scripts/build_apk.sh,
-# scripts/install_apk.sh, collect-release-assets.sh, release-note.sh и в шаге
-# "Verify APK identity". Литерал в build.gradle.kts остаётся первым именно
-# поэтому.
-base="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$gradle_file" | head -n 1)"
-code="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' \
-    "$gradle_file" | head -n 1)"
-
-[[ -n "$base" ]] || die "не удалось прочитать versionName из $gradle_file"
-[[ -n "$code" ]] || die "не удалось прочитать versionCode из $gradle_file"
+base="$(csqtt_version_name "$root")" ||
+    die "не удалось прочитать versionName из $root/version.properties"
+code="$(csqtt_version_code "$root")" ||
+    die "не удалось прочитать versionCode из $root/version.properties"
 
 commit="$(git -C "$root" rev-parse HEAD 2>/dev/null)" ||
     die "не удалось прочитать HEAD репозитория $root"
@@ -122,7 +118,7 @@ fi
     die "suffix '$suffix' must start with '-' (got version '$version', base '$base')"
 
 [[ -z "$expected_code" || "$expected_code" == "$code" ]] ||
-    die "versionCode mismatch: expected '$expected_code', $gradle_file has '$code'"
+    die "versionCode mismatch: expected '$expected_code', $root/version.properties has '$code'"
 [[ -z "$expected_commit" || "$expected_commit" == "$commit" ]] ||
     die "commit mismatch: expected '$expected_commit', HEAD is '$commit'"
 

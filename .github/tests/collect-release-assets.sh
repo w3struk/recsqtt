@@ -77,8 +77,7 @@ make_tree() {
     mkdir -p "$root/app/build/outputs/apk/release" "$root/app/build/generated/assets" \
         "$root/scripts"
 
-    printf 'android {\n    defaultConfig {\n        versionName = "%s"\n    }\n}\n' \
-        "$VERSION" >"$root/app/build.gradle.kts"
+    printf 'versionName=%s\nversionCode=999\n' "$VERSION" >"$root/version.properties"
 
     printf 'installer-payload-v1\n' >"$root/scripts/$INSTALLER_NAME"
     printf 'bootstrap-payload-v1\n' >"$root/scripts/$BOOTSTRAP_NAME"
@@ -244,8 +243,8 @@ if grep -qF 'asset-paths.txt' "$LIST_FILE"; then
 fi
 ok
 
-# Defaults: --root alone derives the Gradle paths, and the list file defaults
-# to <out>/asset-paths.txt.
+# Defaults: --root alone derives the build paths and version.properties, and
+# the list file defaults to <out>/asset-paths.txt.
 DEFAULT_ROOT="$TMP/defaults"
 make_tree "$DEFAULT_ROOT"
 ( cd "$DEFAULT_ROOT" && bash "$SUT" --out "$TMP/out-default" ) >/dev/null ||
@@ -379,6 +378,13 @@ if [[ -f "$TMP/out-empty-binary/SHA256SUMS" ]]; then
     fail "failed run left a SHA256SUMS behind"
 fi
 ok
+
+# Missing version.properties and no --version: exit 1, stderr names the file.
+MISSING_VERSION_ROOT="$TMP/missing-version"
+make_tree "$MISSING_VERSION_ROOT"
+rm -f "$MISSING_VERSION_ROOT/version.properties"
+expect_fail "missing version.properties must fail" "version.properties" \
+    bash "$SUT" --root "$MISSING_VERSION_ROOT" --out "$TMP/out-missing-version"
 
 # --version that matches no input files: exit 1.
 VERSION_ROOT="$TMP/bad-version"

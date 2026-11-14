@@ -15,9 +15,25 @@ set -euo pipefail
 
 SERVER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SERVER_DIR/.." && pwd)"
+
+# Toolchain pins have one source of truth; a missing pin file must fail closed
+# instead of silently using a literal kept in this script.
+TOOLCHAIN_ENV="$ROOT/scripts/toolchain.env"
+if [[ ! -f "$TOOLCHAIN_ENV" ]]; then
+  echo "Error: toolchain pin file not found: $TOOLCHAIN_ENV" >&2
+  echo "  scripts/toolchain.env is the single source of toolchain versions." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$TOOLCHAIN_ENV"
+if [[ -z "${RUST_TOOLCHAIN:-}" ]]; then
+  echo "Error: scripts/toolchain.env does not define RUST_TOOLCHAIN." >&2
+  exit 1
+fi
+
 LOG_DIR="$ROOT/build/csqtt-uring-linux-logs"
 
-TOOLCHAIN="1.97.1"
+TOOLCHAIN="$RUST_TOOLCHAIN"
 
 VARIANT_NAMES=(amd64)
 VARIANT_TARGETS=(x86_64-unknown-linux-musl)

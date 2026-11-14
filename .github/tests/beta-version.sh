@@ -4,9 +4,8 @@
 #
 # Секция стенда для .github/scripts/beta-version.sh.
 #
-# Форма строки versionName в фикстуре — как в живом app/build.gradle.kts:
-# литерал первым, суффикс приклеен выражением. На этой форме держатся все
-# sed-парсеры версии в репозитории.
+# Фикстура — version.properties: единственный источник базы версии, который
+# читают и Gradle, и скрипты.
 
 set -euo pipefail
 export LC_ALL=C
@@ -43,9 +42,7 @@ assert_key() {
 
 # --- изолированный репозиторий -------------------------------------------
 git -c init.defaultBranch=main init -q "$TMP/repo"
-mkdir -p "$TMP/repo/app"
-printf 'android {\n    defaultConfig {\n        versionCode = 231\n        versionName = "2.5.1" +\n            (providers.gradleProperty("csqtt.versionSuffix").orNull ?: "")\n    }\n}\n' \
-    >"$TMP/repo/app/build.gradle.kts"
+printf 'versionName=2.5.1\nversionCode=231\n' >"$TMP/repo/version.properties"
 git -C "$TMP/repo" -c user.email=test@example.com -c user.name=test add -A
 git -C "$TMP/repo" -c user.email=test@example.com -c user.name=test commit -qm init
 
@@ -87,9 +84,10 @@ rc=0
 ok "несуществующий --root отвергнут"
 
 # --- 4. живой репозиторий -------------------------------------------------
-LIVE_BASE="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$REPO_ROOT/app/build.gradle.kts" | head -n 1)"
+# shellcheck source=../../scripts/version_properties.sh
+source "$REPO_ROOT/scripts/version_properties.sh"
+LIVE_BASE="$(csqtt_version_name "$REPO_ROOT")"
 out="$("$SCRIPT" --root "$REPO_ROOT" --branch main)"
-assert_key "$out" base "$LIVE_BASE" "живой репозиторий: base совпадает с sed-парсером"
+assert_key "$out" base "$LIVE_BASE" "живой репозиторий: base совпадает с version.properties"
 
 printf 'beta-version: %d assertions OK (base %s)\n' "$pass" "$LIVE_BASE"

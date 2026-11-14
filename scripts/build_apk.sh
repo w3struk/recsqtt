@@ -16,6 +16,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
+# shellcheck source=scripts/version_properties.sh
+source "$SCRIPT_DIR/version_properties.sh"
+
 usage() {
     echo "Usage: $(basename -- "$0") [--verify-native-only]" >&2
 }
@@ -39,18 +42,6 @@ case "${1:-}" in
 esac
 
 cd "$ROOT"
-
-# The app version, as it appears in the APK file names.
-#
-# app/build.gradle.kts is the single place the version is defined, and the
-# scripts read it from there instead of keeping a second copy of the number:
-# the APK names are built from this value and from the ABI.
-apk_version() {
-    local versions
-    versions="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$ROOT/app/build.gradle.kts")"
-    printf '%s' "${versions%%$'\n'*}"
-}
 
 echo "=== reCSQTT APK Build Script ==="
 echo "=== Output: 4 APKs (universal, arm64-v8a, armeabi-v7a, x86_64) ==="
@@ -112,11 +103,11 @@ APK_DIR="$ROOT/app/build/outputs/apk/release"
 RELEASE_DIR="$ROOT/app/release"
 mkdir -p "$RELEASE_DIR"
 
-APK_VERSION="$(apk_version)"
-if [[ -z "$APK_VERSION" ]]; then
-    echo "ERROR: could not read versionName from app/build.gradle.kts" >&2
+# The APK names are built from the same version.properties that Gradle reads.
+APK_VERSION="$(csqtt_version_name "$ROOT")" || {
+    echo "ERROR: could not read versionName from $ROOT/version.properties" >&2
     exit 1
-fi
+}
 
 # Stale split from the x86 era is never produced anymore.
 rm -f "$APK_DIR/app-x86-release.apk" "$APK_DIR"/app-*-x86-release.apk "$RELEASE_DIR/recsqtt-x86.apk"

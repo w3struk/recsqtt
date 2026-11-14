@@ -1,0 +1,20 @@
+# Единый список Android ABI клиента.
+#
+# Один источник правды для всех потребителей сборки:
+#   - app/build.gradle.kts               — supportedAbis / splits;
+#   - scripts/device_abi.sh              — SUPPORTED_ABIS;
+#   - rust-client/build_so.sh            — ABIS_CSV по умолчанию;
+#   - rust-client/build_android_abis.sh  — ABIS_CSV по умолчанию;
+#   - scripts/native_client_provenance.sh — ALL_ABIS и verify.
+#
+# Формат: имя ABI Android, по одному на строку. `#` начинает комментарий.
+# Порядок значим: это порядок ABI в отчётах и в сборке по умолчанию.
+#
+# Добавление ABI сюда — ещё не поддержка: scripts/check_abi_list.sh требует,
+# чтобы новый ABI появился во всех per-ABI картах (cargo-таргет, суффикс
+# target-dir, ELF-класс/машина, install_lib) в тех же коммитах. Universal —
+# не ABI: он существует только в Tier-2 упаковщиках и сюда не входит.
+
+arm64-v8a
+armeabi-v7a
+x86_64

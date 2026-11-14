@@ -15,6 +15,22 @@ set -euo pipefail
 SERVER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SERVER_DIR/.." && pwd)"
 
+# Toolchain pins have one source of truth. A missing file must stop the build:
+# silently falling back to the literal that used to live here is how the local
+# scripts and CI drift apart.
+TOOLCHAIN_ENV="$ROOT/scripts/toolchain.env"
+if [[ ! -f "$TOOLCHAIN_ENV" ]]; then
+  echo "Error: toolchain pin file not found: $TOOLCHAIN_ENV" >&2
+  echo "  scripts/toolchain.env is the single source of toolchain versions." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$TOOLCHAIN_ENV"
+if [[ -z "${RUST_TOOLCHAIN:-}" ]]; then
+  echo "Error: scripts/toolchain.env does not define RUST_TOOLCHAIN." >&2
+  exit 1
+fi
+
 # Один target-dir на clippy/test/release: release-зависимости, собранные
 # clippy, переиспользуются финальной сборкой, а debug-тесты живут в том же
 # каталоге отдельным профилем. Имя обязано совпадать с build_linux_variants.sh,
@@ -23,7 +39,7 @@ ROOT="$(cd -- "$SERVER_DIR/.." && pwd)"
 SERVER_TARGET_ASSET="recsqtt-linux-amd64"
 SERVER_TARGET_DIR="$ROOT/build/csqtt-uring-linux-$SERVER_TARGET_ASSET"
 
-TOOLCHAIN="1.97.1"
+TOOLCHAIN="$RUST_TOOLCHAIN"
 MUSL_TARGETS=(
   x86_64-unknown-linux-musl
 )
@@ -267,18 +283,42 @@ mkdir -p "$ASSETS_DIR" "$DIST_DIR" "$(dirname "$PROVENANCE_MANIFEST")"
 assert_static_binary() {
   local src="$1"
   local asset="$2"
+  local output status
 
+  # Three-state on purpose: success, "checked and dynamic", and "could not
+  # check". A missing/unusable inspector must fail the build, never pass it.
   if command -v readelf >/dev/null 2>&1; then
-    if readelf -l "$src" 2>/dev/null | grep -q 'INTERP'; then
+    if output="$(readelf -l "$src" 2>&1)"; then
+      :
+    else
+      status=$?
+      echo "Error: readelf failed on $asset (exit $status); cannot verify static linking" >&2
+      exit 1
+    fi
+    if grep -q 'INTERP' <<<"$output"; then
       echo "Error: $asset is dynamically linked; expected a static musl binary" >&2
       exit 1
     fi
-  elif command -v file >/dev/null 2>&1; then
-    if ! file -b "$src" | grep -q 'statically linked'; then
-      echo "Error: $asset is not static: $(file -b "$src")" >&2
+    return 0
+  fi
+
+  if command -v file >/dev/null 2>&1; then
+    if output="$(file -b "$src" 2>&1)"; then
+      :
+    else
+      status=$?
+      echo "Error: file failed on $asset (exit $status); cannot verify static linking" >&2
       exit 1
     fi
+    if ! grep -q 'statically linked' <<<"$output"; then
+      echo "Error: $asset is not static: $output" >&2
+      exit 1
+    fi
+    return 0
   fi
+
+  echo "Error: neither readelf nor file is available; cannot verify static linking for $asset" >&2
+  exit 1
 }
 
 copy_asset() {

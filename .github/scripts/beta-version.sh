@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 amurcanov
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #
-# Версия беты: база из app/build.gradle.kts плюс -beta.<short-sha>.
+# Версия беты: база из version.properties плюс -beta.<short-sha>.
 #
 # Usage:
 #   beta-version.sh --root DIR [--branch NAME]
@@ -10,10 +10,15 @@
 # Выход (в $GITHUB_OUTPUT, если задан, иначе в stdout):
 #   commit=, short=, base=, version=, suffix=, version-code=
 #
-# Тот же sed читает версию в build-version.sh, collect-release-assets.sh и
-# scripts/build_apk.sh — форму строки versionName менять нельзя.
+# Версию из version.properties читают Gradle и все скрипты — через общий
+# scripts/version_properties.sh.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=../../scripts/version_properties.sh
+source "$SCRIPT_DIR/../../scripts/version_properties.sh"
 
 usage() {
     cat <<'EOF'
@@ -67,16 +72,10 @@ root="${root:-$PWD}"
 [[ -z "$branch" || "$branch" == "main" ]] ||
     die "бета собирается только с main, получено '$branch'"
 
-gradle_file="$root/app/build.gradle.kts"
-[[ -f "$gradle_file" ]] || die "нет файла $gradle_file"
-
-base="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$gradle_file" | head -n 1)"
-[[ -n "$base" ]] || die "не удалось прочитать versionName из $gradle_file"
-
-code="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' \
-    "$gradle_file" | head -n 1)"
-[[ -n "$code" ]] || die "не удалось прочитать versionCode из $gradle_file"
+base="$(csqtt_version_name "$root")" ||
+    die "не удалось прочитать versionName из $root/version.properties"
+code="$(csqtt_version_code "$root")" ||
+    die "не удалось прочитать versionCode из $root/version.properties"
 
 commit="$(git -C "$root" rev-parse HEAD 2>/dev/null)" ||
     die "не удалось прочитать HEAD репозитория $root"

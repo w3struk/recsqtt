@@ -30,7 +30,7 @@ concurrency:
 # Осознанные отличия от прежнего одного job'а:
 #   1. `Checkout release target` больше не нужен при сборке: build.yml чекаутит
 #      inputs.ref (полный sha из resolve). В publish тот же `git checkout
-#      --detach` остаётся — note читает app/build.gradle.kts и
+#      --detach` остаётся — note читает version.properties и
 #      rust-server/main.rs дерева тега.
 #   2. `Record start time` переехал в resolve и отдаётся выходом started;
 #      длительность в note покрывает весь пайплайн, а не один job.
@@ -95,7 +95,7 @@ jobs:
       contents: read
     # Reusable workflow: ни runs-on, ни timeout-minutes здесь быть не может —
     # они живут внутри build.yml. version-name и expected-version-code не
-    # передаются: релиз читает версию из app/build.gradle.kts, как раньше.
+    # передаются: релиз читает версию из version.properties, как раньше.
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ needs.resolve.outputs.commit }}
@@ -243,7 +243,7 @@ jobs:
           persist-credentials: false
 
       # При workflow_dispatch github.ref = refs/heads/main, поэтому без этого
-      # шага note читала бы app/build.gradle.kts и rust-server/main.rs дерева
+      # шага note читала бы version.properties и rust-server/main.rs дерева
       # main, а не дерева коммита тега. Коммит уже есть в локальной истории
       # (checkout с fetch-depth: 0), сеть не нужна.
       - name: Checkout release target

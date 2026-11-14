@@ -113,6 +113,12 @@ make_fixture() {
     CARGO_BINARY="$ROOT/build/csqtt-uring-linux-recsqtt-linux-amd64/x86_64-unknown-linux-musl/release/csqtt"
     OUT="$ROOT/stdout.txt" ERR="$ROOT/stderr.txt" CALLS="$ROOT/calls.jsonl"
     export SERVER_BUILD_CALLS="$CALLS" SERVER_BUILD_CARGO_MODE=ok
+    # Provenance probing must not reach the mocked toolchain (it would add
+    # unexpected invocations to the recorded call log); the overrides keep the
+    # manifest deterministic without mocking version output.
+    export CSQTT_PROVENANCE_RUSTC_VERSION="rustc 1.97.1"
+    export CSQTT_PROVENANCE_CARGO_ZIGBUILD_VERSION="0.24.0"
+    export CSQTT_PROVENANCE_ZIG_VERSION="0.17.0"
 }
 
 run_sut() {
@@ -188,7 +194,7 @@ assert_payload() {
     sha="${sha^^}"
     size="$(stat -c '%s' "$CARGO_BINARY")"
     jq -e --argjson features "$features" --arg sha "$sha" --argjson size "$size" '
-        .schema == "csqtt.server-asset-provenance.v4" and
+        .schema == "csqtt.server-asset-provenance.v5" and
         .marker == "CSQTT_RUST_SERVER_PRODUCTION_V1" and
         .producer == "rust-server/build_linux.sh" and .runtime == "rust" and
         .features == $features and (.artifacts | length) == 1 and
