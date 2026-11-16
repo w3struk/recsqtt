@@ -54,13 +54,6 @@ object CsqttConstants {
         const val MODE_AUTO_JS = "auto_js"
     }
 
-    object SrtpMode {
-        const val WRAP = "wrap-srtp"
-        const val DTLS = "dtls-srtp"
-        const val AUTO = "auto"
-        const val DEFAULT = AUTO
-    }
-
     object Timeouts {
         const val CAPTCHA_AUTO_TIMEOUT_MS = 10_000L
         const val CAPTCHA_MANUAL_TIMEOUT_MS = 60_000L

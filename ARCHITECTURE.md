@@ -66,8 +66,9 @@
 3. Rust читает IP-пакеты из TUN; адреса и домены, попавшие в правило, уходят в direct-relay
    (`direct_relay.rs`, netstack-smoltcp) мимо туннеля, остальное — воркерам через `Dispatcher`.
 4. Пакет получает RTP-подобную обёртку (`obfs.rs`: SSRC, sequence, timestamp, padding) и
-   шифруется: WRAP (ChaCha20-Poly1305, ключ HKDF-SHA256 из пароля, `wrap.rs`) либо SRTP-ключами
-   из DTLS 1.2 (`shared/dtls.rs`).
+   шифруется как профиль SRTP AES128-CM/SHA1-80: AES-128-CTR с IV из SSRC/sequence/timestamp
+   и HMAC-SHA1, усечённый до 10 байт. Ключ — либо производное пароля (`wrap.rs`: HKDF-SHA256,
+   salt `CSQTT-WRAP-v1`), либо SRTP-ключи из DTLS 1.2 (`shared/dtls.rs`).
 5. Внутри TURN-аллокации VK пакет уходит Send/Data indication на peer — адрес reCSQTT-сервера из
    ссылки (сервер по умолчанию слушает UDP `0.0.0.0:46000`); сервер демультиплексирует трафик по
    сессии (пароль + `-gen` + `-salt`), пишет в свой TUN и выпускает в интернет через NAT.
@@ -116,7 +117,7 @@ TURN-креды выдаёт VK API по хешу или токену (`auth.rs`
   `TunnelLogPolicy`).
 - **«Подключение»** — состояние туннеля и кнопка включения VPN.
 - **«Туннель»** — поле ссылки `csqtt://` и параметры клиента: режим кредов,
-  SRTP, транспорт и число воркеров.
+  транспорт и число воркеров.
 - **«Настройки»** — профиль (с переименованием), отпечаток, оформление,
   автопауза при Wi-Fi, тумблер логов, «Выбор TURN-подсетей», «Обновление»
   (проверка обновлений) и маршрутизация приложений: режим списка и кнопка
@@ -136,8 +137,9 @@ QR-сканер — единственная иконка в шапке экра
 argv собирается вручную, разбирается `#[derive(Parser)] struct Arguments` (`rust-client/main.rs`);
 Kotlin пишет один дефис, Rust нормализует в двойной (`normalize_cli_argument`), `-vk` = `--vk`.
 Флаги, которые передаёт Kotlin (подмножество `Arguments` из `rust-client/main.rs`): `-peer`, `-n`, `-listen`, `-tun-uds`, `-vk`, `-vk-hash-mode`, `-fingerprint`, `-client-ids`,
-`-obfs`, `-turn-transport`, `-srtp-mode`, `-custom-turn-ips`, `-vk-auth-mode`, `-gen`, `-salt`,
-`-captcha-mode`, `-routing-ips-sha`, `-routing-content-sha-file`; с `-tun-uds csqtt_tun_uds` флаг
+`-obfs`, `-turn-transport`, `-custom-turn-ips`, `-vk-auth-mode`, `-gen`, `-salt`,
+`-captcha-mode`, `-routing-ips-sha`, `-routing-content-sha-file`; `-srtp-mode` приложение не передаёт
+(клиент берёт дефолт `auto`). С `-tun-uds csqtt_tun_uds` флаг
 `-listen` сокета не открывает — единственный вход TUN FD. Канал управления — stdin, по одной команде в строке:
 
 - `PAUSE` / `RESUME` — `PauseGate`: воркеры ждут возобновления, сессии не рвутся;
@@ -205,7 +207,7 @@ Rust подтверждает SCM_RIGHTS байтом и слушает соке
 
 ## Транспорт и формат пакетов
 
-Транспорт выбирается двумя осями: `turn_transport` (как клиент соединяется с TURN) и `srtp_mode` (откуда берутся ключи шифрования полезной нагрузки). `obfs_mode` поверх этого задаёт форму RTP-метаданных и паддинга.
+Транспорт выбирается двумя осями: `turn_transport` (как клиент соединяется с TURN) и `srtp_mode` (откуда берутся ключи шифрования полезной нагрузки; приложение всегда запускает клиент с `auto`, `wrap-srtp`/`dtls-srtp` выбираются только из CLI). `obfs_mode` поверх этого задаёт форму RTP-метаданных и паддинга.
 
 | `turn_transport` | Значение в Android | Реализация |
 | --- | --- | --- |
@@ -225,7 +227,7 @@ Rust подтверждает SCM_RIGHTS байтом и слушает соке
 - **`obfs_mode`** (`audio`/`video`/`unified`) меняет только RTP-обёртку: payload type 111/96, SSRC, sequence/timestamp, padding.
   `unified` держит кадр в пределах 1350 байт, `audio` — 100–150 байт на малых пакетах.
   Android санитизирует значение до `unified` (`SettingsStore.obfsMode` и `TunnelService`), остальные два режима доступны только из CLI.
-- **`srtp_mode`**: `wrap-srtp` (в Kotlin `wrap`) выводит ключи из пароля (`derive_wrap_key`, HKDF-SHA256, salt `CSQTT-WRAP-v1`);
+- **`srtp_mode`** (флаг CLI; приложение его больше не передаёт, поэтому в APK-клиенте всегда `auto`): `wrap-srtp` выводит ключи из пароля (`derive_wrap_key`, HKDF-SHA256, salt `CSQTT-WRAP-v1`);
   `dtls-srtp` выполняет DTLS-рукопожатие; `auto` (по умолчанию) пробует DTLS и при ошибке откатывается на WRAP.
   В `shared/dtls.rs` — собственный DTLS 1.2: клиентский и серверный handshake, сертификат ECDSA P-256 с CN `WebRTC`
   и сроком 30 дней, TLS 1.2 PRF, SRTP-профили `SRTP_AES128_CM_SHA1_80`, `SRTP_AEAD_AES_256_GCM`, `SRTP_AEAD_AES_128_GCM` (`shared/dtls.rs`); `_32` не предлагается, ключевой блок 60 байт.
@@ -258,7 +260,7 @@ TURN-кред. Супервизор перезапускает воркера, �
 `TunVpnService`, передавая FD в Rust через `csqtt_tun_uds`.
 
 Пакетный путь: TUN → `Dispatcher` → direct-relay для адресов/доменов правила → иначе обфускация
-и шифрование (SRTP по умолчанию `auto`: DTLS-SRTP с откатом в WRAP) → TURN Send/Data на peer.
+и шифрование (из приложения всегда `auto`: DTLS-SRTP с откатом в WRAP) → TURN Send/Data на peer.
 Пакеты до 1280 байт идут как есть, крупные режутся `wire_protocol` (`MAX_FRAG_PAYLOAD = 1272`) и
 собираются реасемблером. Конфиг — `GETCONF` (400/800/1600/3000 мс) → `TUNCONF` с адресом, DNS и
 правилом; изменение правила приходит уведомлением, и config-owner повторяет `GETCONF`.

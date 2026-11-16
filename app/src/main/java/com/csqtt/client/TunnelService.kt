@@ -247,7 +247,6 @@ class TunnelService : Service() {
                             turnTransport = intent.getStringExtra("turn_transport")
                                 ?.takeIf { it == CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS }
                                 ?: CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT,
-                            srtpMode = sanitizeSrtpMode(intent.getStringExtra("srtp_mode")),
                             customTurnIps = intent.getStringExtra("custom_turn_ips") ?: "",
                             generationId = genId,
                             sessionSalt = salt,
@@ -390,7 +389,6 @@ class TunnelService : Service() {
                     password = source.password,
                     obfsMode = store.obfsMode.first(),
                     turnTransport = store.turnTransport.first(),
-                    srtpMode = sanitizeSrtpMode(store.srtpMode.first()),
                     customTurnIps = store.customTurnIps.first(),
                     vkAuthMode = vkAuthMode,
                     captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
@@ -1334,14 +1332,6 @@ class TunnelService : Service() {
             CsqttConstants.VkAuth.MODE_CAPTCHA -> CsqttConstants.VkAuth.MODE_CAPTCHA
             CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_AUTO_JS
             else -> CsqttConstants.VkAuth.MODE_CALLS
-        }
-    }
-
-    private fun sanitizeSrtpMode(mode: String?): String {
-        return when (mode?.lowercase()) {
-            CsqttConstants.SrtpMode.WRAP -> CsqttConstants.SrtpMode.WRAP
-            CsqttConstants.SrtpMode.DTLS -> CsqttConstants.SrtpMode.DTLS
-            else -> CsqttConstants.SrtpMode.AUTO
         }
     }
 

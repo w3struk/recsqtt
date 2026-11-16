@@ -35,9 +35,9 @@ class SettingsStoreInitOrderTest {
             .findAll(source.subList(init, end).joinToString("\n"))
             .map { it.groupValues[1] }
             .toList()
-        // Коллекторов стало меньше после удаления доменного и адресного слоя:
-        // было 25, десять из них ушли вместе с ключами, осталось 15.
-        assertTrue("блок init больше не поднимает сборщики кэша", collected.size >= 12)
+        // Порог — страховка от вырожденного совпадения regex, а не учёт настроек:
+        // сейчас коллекторов 11 (12 было до удаления `srtp_mode`).
+        assertTrue("блок init больше не поднимает сборщики кэша", collected.size >= 9)
 
         for (name in collected) {
             val at = properties[name]

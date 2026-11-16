@@ -139,14 +139,6 @@ internal fun SettingsTabContent(
         scope.launch { settingsStore.saveTurnTransport(transport) }
     }
 
-    val srtpMode by settingsStore.srtpMode.collectAsStateWithLifecycle(
-        initialValue = SettingsStore.cachedSrtpMode ?: CsqttConstants.SrtpMode.DEFAULT,
-    )
-
-    fun applySrtpMode(mode: String) {
-        scope.launch { settingsStore.saveSrtpMode(mode) }
-    }
-
     fun requestTurnTransport(transport: String) {
         if (shouldConfirmTcpTransport(turnTransport, transport, tcpTransportRiskAcknowledged)) {
             pendingTcpTransportSelection = { applyTurnTransport(transport) }
@@ -537,28 +529,6 @@ internal fun SettingsTabContent(
                     onTitleInfo = { showWorkModeGeneralDialog = true },
                     onInfo = { mode -> showWorkModeDetailDialog = mode },
                     onSelected = ::requestWorkMode,
-                )
-
-                CompactDropdownSetting(
-                    title = "Режим SRTP",
-                    selectedKey = srtpMode,
-                    options = listOf(
-                        CsqttConstants.SrtpMode.WRAP to "WRAP-SRTP",
-                        CsqttConstants.SrtpMode.DTLS to "DTLS-SRTP",
-                        CsqttConstants.SrtpMode.AUTO to "Авто",
-                    ),
-                    enabled = true,
-                    indicatorProvider = { mode ->
-                        when (mode) {
-                            CsqttConstants.SrtpMode.WRAP -> ModeIndicator(progress = 0.5f, color = Color(0xFF43A047))
-                            CsqttConstants.SrtpMode.DTLS -> ModeIndicator(progress = 1.0f, color = Color(0xFF43A047))
-                            CsqttConstants.SrtpMode.AUTO -> ModeIndicator(progress = 1.0f, color = Color(0xFF1475FD))
-                            else -> null
-                        }
-                    },
-                    onTitleInfo = null,
-                    onInfo = null,
-                    onSelected = ::applySrtpMode,
                 )
 
                 CompactDropdownSetting(

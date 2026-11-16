@@ -1395,8 +1395,6 @@ object TunnelManager {
         cmd.add(params.obfsMode)
         cmd.add("-turn-transport")
         cmd.add(params.turnTransport)
-        cmd.add("-srtp-mode")
-        cmd.add(params.srtpMode)
         if (params.customTurnIps.isNotBlank()) {
             cmd.add("-custom-turn-ips")
             cmd.add(params.customTurnIps)
@@ -2682,7 +2680,6 @@ data class TunnelParams(
     val clientIds: String = CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS,
     val obfsMode: String = CsqttConstants.Tunnel.DEFAULT_OBFS_MODE,
     val turnTransport: String = CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT,
-    val srtpMode: String = CsqttConstants.SrtpMode.DEFAULT,
     val generationId: Long = 0,
     val sessionSalt: String = "",
     val allowHashRedistribution: Boolean = false,

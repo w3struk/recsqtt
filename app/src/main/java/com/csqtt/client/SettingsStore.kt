@@ -64,7 +64,6 @@ class SettingsStore(context: Context) {
         private val VK_AUTH_MODE = stringPreferencesKey("vk_auth_mode") 
         private val OBFS_MODE = stringPreferencesKey("obfs_mode") 
         private val TURN_TRANSPORT = stringPreferencesKey("turn_transport")
-        private val SRTP_MODE = stringPreferencesKey("srtp_mode")
         private val CAPTCHA_MODE = stringPreferencesKey("captcha_mode")
         private val CAPTCHA_SOLVE_METHOD = stringPreferencesKey("captcha_solve_method") 
         private val CAPTCHA_WBV_SOLVE_METHOD = stringPreferencesKey("captcha_wbv_solve_method") 
@@ -123,9 +122,6 @@ class SettingsStore(context: Context) {
         internal var cachedTurnTransport: String? = null
 
         @Volatile
-        internal var cachedSrtpMode: String? = null
-
-        @Volatile
         internal var cachedWorkersPerHash: Int? = null
 
         @Volatile
@@ -157,7 +153,7 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, EXCLUDED_APPS, WHITELIST_APPS, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, SRTP_MODE, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS, CUSTOM_TURN_IPS, SELECTED_TURN_SUBNET -> stringPreferencesKey(newName) as Preferences.Key<T>
+                VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, EXCLUDED_APPS, WHITELIST_APPS, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS, CUSTOM_TURN_IPS, SELECTED_TURN_SUBNET -> stringPreferencesKey(newName) as Preferences.Key<T>
                 WORKERS_PER_HASH, LISTEN_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
                 NO_DNS, IS_WHITELIST, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 CONNECTION_GENERATION -> longPreferencesKey(newName) as Preferences.Key<T>
@@ -256,15 +252,6 @@ class SettingsStore(context: Context) {
         when (prefs[getProfileKey(TURN_TRANSPORT, profile)]) {
             CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS -> CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS
             else -> CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT
-        }
-    }
-
-    val srtpMode: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        when (prefs[getProfileKey(SRTP_MODE, profile)]) {
-            CsqttConstants.SrtpMode.WRAP -> CsqttConstants.SrtpMode.WRAP
-            CsqttConstants.SrtpMode.DTLS -> CsqttConstants.SrtpMode.DTLS
-            else -> CsqttConstants.SrtpMode.DEFAULT
         }
     }
 
@@ -417,7 +404,6 @@ class SettingsStore(context: Context) {
                 launch { vkAccessToken.collect { cachedVkAccessToken = it } }
                 launch { obfsMode.collect { cachedObfsMode = it } }
                 launch { turnTransport.collect { cachedTurnTransport = it } }
-                launch { srtpMode.collect { cachedSrtpMode = it } }
                 launch { workersPerHash.collect { cachedWorkersPerHash = it } }
                 cachedExtraWorkers = false
                 launch { customTurnIps.collect { cachedCustomTurnIps = it } }
@@ -678,17 +664,6 @@ class SettingsStore(context: Context) {
             prefs[getProfileKey(TURN_TRANSPORT, profile)] = when (transport) {
                 CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS -> CsqttConstants.Tunnel.TURN_TRANSPORT_TCP_TLS
                 else -> CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT
-            }
-        }
-    }
-
-    suspend fun saveSrtpMode(mode: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(SRTP_MODE, profile)] = when (mode) {
-                CsqttConstants.SrtpMode.WRAP -> CsqttConstants.SrtpMode.WRAP
-                CsqttConstants.SrtpMode.DTLS -> CsqttConstants.SrtpMode.DTLS
-                else -> CsqttConstants.SrtpMode.DEFAULT
             }
         }
     }
