@@ -26,8 +26,6 @@ pub struct ClientGroup {
     pub name: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub routing_rule_id: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub admin_uuid: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sub_uuid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -810,7 +808,6 @@ CREATE TABLE IF NOT EXISTS client_groups (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     routing_rule_id TEXT NOT NULL DEFAULT '',
-    admin_uuid      TEXT NOT NULL DEFAULT '',
     sub_uuid        TEXT NOT NULL DEFAULT '',
     workers         INTEGER,
     vk_token        TEXT,
@@ -897,14 +894,6 @@ fn ensure_client_group_columns(connection: &Connection) -> Result<()> {
         .context("read client_groups schema")?
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("collect client_groups schema")?;
-    if !columns.iter().any(|column| column == "admin_uuid") {
-        connection
-            .execute(
-                "ALTER TABLE client_groups ADD COLUMN admin_uuid TEXT NOT NULL DEFAULT ''",
-                [],
-            )
-            .context("add admin_uuid column")?;
-    }
     if !columns.iter().any(|column| column == "sub_uuid") {
         connection
             .execute(
@@ -1125,12 +1114,11 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
     {
         let mut insert = transaction
             .prepare(
-                "INSERT INTO client_groups (id, name, routing_rule_id, admin_uuid, sub_uuid, workers, vk_token, vk_hashes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO client_groups (id, name, routing_rule_id, sub_uuid, workers, vk_token, vk_hashes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     routing_rule_id = excluded.routing_rule_id,
-                    admin_uuid = excluded.admin_uuid,
                     sub_uuid = excluded.sub_uuid,
                     workers = excluded.workers,
                     vk_token = excluded.vk_token,
@@ -1143,7 +1131,6 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                     group.id,
                     group.name,
                     group.routing_rule_id,
-                    group.admin_uuid,
                     group.sub_uuid,
                     group.workers.map(|w| w as i64),
                     group.vk_token.as_deref(),
@@ -1410,32 +1397,30 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
     }
     {
         let mut select = connection
-            .prepare("SELECT id, name, routing_rule_id, admin_uuid, sub_uuid, workers, vk_token, vk_hashes FROM client_groups")
+            .prepare("SELECT id, name, routing_rule_id, sub_uuid, workers, vk_token, vk_hashes FROM client_groups")
             .context("prepare client_groups select")?;
         let mut rows = select.query([]).context("read client_groups")?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0).context("read group id")?;
             let name: String = row.get(1).context("read group name")?;
             let routing_rule_id: String = row.get(2).unwrap_or_default();
-            let admin_uuid: String = row.get(3).unwrap_or_default();
-            let mut sub_uuid: String = row.get(4).unwrap_or_default();
+            let mut sub_uuid: String = row.get(3).unwrap_or_default();
             if sub_uuid.trim().is_empty() {
                 sub_uuid = random_uuid_v4();
             }
             let workers: Option<u32> = row
-                .get::<_, Option<i64>>(5)
+                .get::<_, Option<i64>>(4)
                 .ok()
                 .flatten()
                 .and_then(|w| (3..=100).contains(&w).then_some(w as u32));
-            let vk_token: Option<String> = row.get(6).ok().flatten();
-            let vk_hashes: Option<String> = row.get(7).ok().flatten();
+            let vk_token: Option<String> = row.get(5).ok().flatten();
+            let vk_hashes: Option<String> = row.get(6).ok().flatten();
             db.groups.insert(
                 id.clone(),
                 ClientGroup {
                     id,
                     name,
                     routing_rule_id,
-                    admin_uuid,
                     sub_uuid,
                     workers,
                     vk_token,
@@ -2317,7 +2302,6 @@ mod tests {
             super::ClientGroup {
                 id: group_id.clone(),
                 name: "Test Group".to_string(),
-                admin_uuid: "admin-uuid-456".to_string(),
                 sub_uuid: "sub-uuid-789".to_string(),
                 workers: Some(99),
                 vk_token: Some("vk1.a.group_custom_token".to_string()),
@@ -2331,7 +2315,6 @@ mod tests {
         let restored = load_database(&directory).unwrap();
         let restored_group = restored.groups.get(&group_id).expect("group should exist");
         assert_eq!(restored_group.name, "Test Group");
-        assert_eq!(restored_group.admin_uuid, "admin-uuid-456");
         assert_eq!(restored_group.workers, Some(99));
         assert_eq!(
             restored_group.vk_token.as_deref(),

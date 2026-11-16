@@ -404,7 +404,7 @@ Android и ждёт ответа до 60 с; ждёт при этом тольк
 Панель — `axum`-роутер (`web_panel.rs`) на `--web-port` (443 в доменном режиме), TLS из
 `web_cert.pem`/`web_key.pem` в config-dir: отсутствующая пара генерируется self-signed через `rcgen` при первом
 старте, неполная — отказ старта, перезагрузка по `SIGUSR1`. Разметка — константы в бинарнике (`PANEL_HTML`,
-`LOGIN_HTML`, `GROUP_ADMIN_HTML`).
+`LOGIN_HTML`, `CLIENT_SUB_HTML`, `GROUP_SUB_HTML`).
 
 - **Вход.** Креды — `CSQTT_WEB_USER`/`CSQTT_WEB_PASS` (`--web-user`, `--web-pass-stdin`), установщик пишет их в
   `/etc/csqtt/csqtt.env`. `POST /api/login` сравнивает constant-time (`secret_eq`), поля раскодируются
@@ -415,8 +415,8 @@ Android и ждёт ответа до 60 с; ждёт при этом тольк
 - **REST API.** `/api/clients[/{password}]`, `/api/groups`, `/api/routing-rules`, `/api/links`,
   `/api/template-domains`, `/api/template-ips`, `/api/preset-apps`, `/api/settings`, `/api/logs`, `/api/export`,
   `/api/import`, `/api/reboot` и batch-операции; в панели — окно «Документация REST API» (`X-API-Key`/`Bearer`,
-  вкладки «Клиенты», «Группы», «Подписки», «Маршрутизация», «Система»); capability-страницы
-  `/{admin_uuid}/admin` и подписки `/{sub_uuid}/sub` — по UUID без логина панели.
+  вкладки «Клиенты», «Группы», «Подписки», «Маршрутизация», «Система»); capability-страница
+  подписки `/{sub_uuid}/sub` — по UUID без логина панели.
 - **QR и `csqtt://`.** `make_client_link` собирает
   `connect?v=2&host=...&peer=...&password=...[&hashes=h1+h2|&token=...]`; payload шифруется AES-256-GCM с ключом
   из `CSQTT_CIPHER_KEY_SEED` и кодируется base64url (`csqtt://<base64>`); QR рисует `qrcode.min.js`, ссылки
@@ -563,4 +563,4 @@ caps `NET_ADMIN`/`NET_RAW`/`NET_BIND_SERVICE`, `--restart unless-stopped`, ка�
 | Generation / salt | Идентификаторы поколения и соли сессии; смена любого из них ретирует прежнюю сессию |
 | TUNCONF | Ответ сервера `TUNCONF:<ip>:<dns>:0:stream-v1`, выдающий клиенту туннельный адрес и DNS |
 | Снимок (snapshot) | Копия runtime-состояния перед cutover: БД, env, сертификаты, unit-файлы, сеть, прежний бинарник |
-| Capability-URL | Ссылка с UUID (`/{admin_uuid}/admin`, `/{sub_uuid}/sub`), дающая доступ без логина панели |
+| Capability-URL | Ссылка подписки с UUID (`/{sub_uuid}/sub`), дающая доступ без логина панели |
