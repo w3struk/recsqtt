@@ -33,8 +33,11 @@ internal fun resolveConnectionSourceFrom(
             .map(String::trim)
             .filter { it.length >= 16 }
             .distinct()
-        val filtered = VkHashValidationCodec.active(rawList, invalidHashes)
-        return (if (filtered.isNotEmpty()) filtered else rawList).joinToString(",")
+        // Фолбэка на исходный список нет осознанно: хеш, помеченный `Invalid`
+        // после `CALL_UNAVAILABLE`, иначе снова уходил бы в подключение и снова
+        // требовал капчу у VK, хотя звонок уже мёртв. Пустой результат доходит до
+        // `ConnectionStartPolicy` и превращается в понятный блокер запуска.
+        return VkHashValidationCodec.active(rawList, invalidHashes).joinToString(",")
     }
     val linkHashes = activeHashes(parsed.hashes.joinToString(","))
     return ConnectionSource(

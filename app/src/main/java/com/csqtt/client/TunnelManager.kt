@@ -729,7 +729,7 @@ object TunnelManager {
         }
     }
 
-    private fun recoverUnavailableVkCall(hash: String) {
+    private fun recoverUnavailableVkCall(hash: String, code: Int) {
         if (!running.value || !callRecoveryPending.compareAndSet(false, true)) return
         val context = activeContext() ?: run {
             callRecoveryPending.set(false)
@@ -740,6 +740,7 @@ object TunnelManager {
                 Intent(context.applicationContext, TunnelService::class.java).apply {
                     action = CsqttConstants.General.ACTION_RECOVER_VK_CALL
                     putExtra(CsqttConstants.General.EXTRA_UNAVAILABLE_VK_HASH, hash)
+                    putExtra(CsqttConstants.General.EXTRA_UNAVAILABLE_VK_CODE, code)
                 },
             )
         }.onFailure {
@@ -753,15 +754,19 @@ object TunnelManager {
     ) {
         val params = currentParams ?: return
         val displayHash = displayVkHash(event.hash)
-        val reason = if (event.code == TunnelEventParser.CALL_NOT_FOUND_CODE) "звонок не найден" else "код ${event.code}"
+        val reason = when (event.code) {
+            TunnelEventParser.CALL_NOT_FOUND_CODE -> "звонок не найден"
+            0 -> "застой: нет credential'а (таймауты/капча)"
+            else -> "код ${event.code}"
+        }
         if (shouldReplaceUnavailableVkHash(params.vkHashMode)) {
             updateLog(
                 key = "vk_hash_auto_replace_$displayHash",
-                message = "[VK] Хеш \"$displayHash\" устарел · ошибка ${event.code} — $reason · создаём новый ✓",
+                message = "[VK] Хеш \"$displayHash\" устарел · ошибка ${event.code} — $reason · заменяем одним новым, остальные переиспользуем ✓",
                 priority = 36,
                 level = LogLevel.OK,
             )
-            recoverUnavailableVkCall(event.hash)
+            recoverUnavailableVkCall(event.hash, event.code)
             return
         }
 
@@ -777,7 +782,7 @@ object TunnelManager {
             level = LogLevel.OK,
         )
         activeScope.launch {
-            if (shouldPersistUnavailableVkHash(params.vkHashMode, isNewUnavailableHash)) {
+            if (shouldPersistUnavailableVkHash(params.vkHashMode, isNewUnavailableHash, event.code)) {
                 activeContext()?.let { ctx ->
                     val store = activeSettingsStore ?: SettingsStore(ctx).also {
                         activeSettingsStore = it
@@ -1559,9 +1564,6 @@ object TunnelManager {
                         val exitCode = initialExitCode
                             ?: runCatching { targetProcess.exitValue() }.getOrNull()
                         val shouldRestart = lifecycleWantsRestart
-                        if (lifecycleWantsRestart) {
-                            VkAutoCallsManager.finishActiveCalls()
-                        }
                         val restartContext = activeContext()
                         val restartParams = if (restartContext == null) {
                             null

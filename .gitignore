@@ -12,3 +12,10 @@ app/src/main/jniLibs/
 app/src/main/assets/recsqtt-linux-*
 .local/
 rust-server/dist/
+
+.vscode/settings.json
+.slim/deepwork/
+.slim/deepwork/**
+.codegraph/
+docs/superpowers/
+.superpowers/brainstorm

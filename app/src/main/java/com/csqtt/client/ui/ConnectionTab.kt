@@ -5,6 +5,7 @@ import android.net.VpnService
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,7 +21,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CallEnd
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -40,7 +49,11 @@ import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ConnectionSource
 import com.csqtt.client.ConnectionStartBlocker
@@ -57,7 +70,9 @@ import com.csqtt.client.resolveConnectionSource
 import com.csqtt.client.showRaisedToast
 import com.csqtt.client.ui.components.CsqttScreen
 import com.csqtt.client.ui.design.CsqttShapes
+import com.csqtt.client.ui.design.CsqttSizes
 import com.csqtt.client.ui.utils.parseCsqttLink
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -93,6 +108,32 @@ internal fun ConnectionTab(
     val savedVkAccessToken by settingsStore.vkAccessToken.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedVkAccessToken)
 
     var pendingStartAfterVpnPermission by remember { mutableStateOf(false) }
+    var isClosingVkCalls by remember { mutableStateOf(false) }
+    var showCloseVkCallsConfirm by remember { mutableStateOf(false) }
+    val showCloseVkCalls = savedHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API
+    val isTunnelActive = tunnelRunning || tunnelStarting || tunnelStopping || autoPausedForWifi
+
+    fun closeVkCalls() {
+        scope.launch {
+            isClosingVkCalls = true
+            runCatching {
+                val intent = Intent(context, TunnelService::class.java).apply {
+                    action = CsqttConstants.General.ACTION_CLOSE_VK_CALLS
+                }
+                context.startService(intent)
+                context.showRaisedToast("Закрываем звонки VK…", Toast.LENGTH_SHORT)
+            }.onFailure { error ->
+                TunnelManager.updateLog(
+                    "vk_calls_close_error",
+                    "Не удалось отправить запрос на закрытие звонков VK: ${error.message ?: error.javaClass.simpleName}",
+                    90,
+                    true,
+                )
+            }
+            delay(2000)
+            isClosingVkCalls = false
+        }
+    }
 
     val parsedLink = remember(csqttLink) { parseCsqttLink(csqttLink) }
     val linkHashes = parsedLink?.hashes.orEmpty()
@@ -109,7 +150,10 @@ internal fun ConnectionTab(
             VkHashValidationCodec.decode(vkHashCheckResultsJson),
         )
     }
-    val manualHashes = if (activeManualHashes.isNotEmpty()) activeManualHashes else rawManualHashes
+    // Хеши, помеченные `Invalid`, не возвращаются в оборот: иначе мёртвый звонок
+    // снова требует капчу. Если невалидны все — список пуст, и запуск блокирует
+    // `ConnectionStartPolicy`.
+    val manualHashes = activeManualHashes
     val accountAutoJsMode = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
     val hashSettingsLoaded = savedHashMode != null && savedVkAccessToken != null
     val autoHashMode = accountAutoJsMode || (
@@ -239,8 +283,22 @@ internal fun ConnectionTab(
                 configurationValid = isValid,
                 linkMissing = csqttLink.isBlank(),
                 onToggleTunnel = { toggleTunnel() },
+                showCloseVkCalls = showCloseVkCalls,
+                isClosingVkCalls = isClosingVkCalls,
+                onRequestCloseVkCalls = { showCloseVkCallsConfirm = true },
             )
         }
+    }
+
+    if (showCloseVkCallsConfirm) {
+        CloseVkCallsDialog(
+            isTunnelActive = isTunnelActive,
+            onDismiss = { showCloseVkCallsConfirm = false },
+            onConfirm = {
+                showCloseVkCallsConfirm = false
+                closeVkCalls()
+            },
+        )
     }
 }
 
@@ -254,10 +312,14 @@ private fun TunnelConnectionPanel(
     configurationValid: Boolean,
     linkMissing: Boolean,
     onToggleTunnel: () -> Unit,
+    showCloseVkCalls: Boolean = false,
+    isClosingVkCalls: Boolean = false,
+    onRequestCloseVkCalls: () -> Unit = {},
 ) {
     val isStarting = tunnelStarting && !tunnelRunning && !tunnelStopping
     val canToggle = !tunnelStopping && (tunnelRunning || isStarting || autoPausedForWifi || !cooldownActive || !configurationValid)
     val activeVisual = tunnelRunning || isStarting || autoPausedForWifi || tunnelStopping
+    val isTunnelActive = tunnelRunning || tunnelStarting || tunnelStopping || autoPausedForWifi
     val logoScale = if (activeVisual) 1.06f else 0.96f
     val statusColor = when {
         autoPausedForWifi -> MaterialTheme.colorScheme.tertiary
@@ -331,6 +393,15 @@ private fun TunnelConnectionPanel(
 
             TunnelUptimeText(tunnelRunning = tunnelRunning || autoPausedForWifi || tunnelStopping)
         }
+
+        if (showCloseVkCalls) {
+            CloseVkCallsAction(
+                enabled = !isTunnelActive && !isClosingVkCalls,
+                isClosing = isClosingVkCalls,
+                isTunnelActive = isTunnelActive,
+                onClick = onRequestCloseVkCalls,
+            )
+        }
     }
 }
 
@@ -355,4 +426,179 @@ private fun formatTunnelUptime(seconds: Long?): String {
     val minutes = (totalSeconds % 3600) / 60
     val sec = totalSeconds % 60
     return String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, sec)
+}
+
+@Composable
+private fun CloseVkCallsAction(
+    enabled: Boolean,
+    isClosing: Boolean,
+    isTunnelActive: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(CsqttSizes.CompactControlHeight),
+            shape = CsqttShapes.Pill,
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = Color.Transparent,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                disabledContainerColor = Color.Transparent,
+                disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+            ),
+            border = BorderStroke(
+                1.dp,
+                if (enabled) {
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                } else {
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)
+                },
+            ),
+            contentPadding = PaddingValues(horizontal = 16.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.CallEnd,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = if (isClosing) "Закрываем звонки VK…" else "Закрыть звонки VK",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+        }
+
+        if (isTunnelActive) {
+            Text(
+                text = "Для закрытия звонков сначала отключите VPN",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f),
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CloseVkCallsDialog(
+    isTunnelActive: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            shape = CsqttShapes.Dialog,
+            color = appSectionCardColor(),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            border = BorderStroke(1.dp, appSectionCardBorderColor()),
+            tonalElevation = 0.dp,
+            modifier = Modifier.fillMaxWidth(0.92f),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.CallEnd,
+                        contentDescription = null,
+                        tint = if (isTunnelActive) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Text(
+                        text = "Закрыть звонки VK?",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                    )
+                }
+
+                Text(
+                    text = if (isTunnelActive) {
+                        "Туннель запущен. Сначала необходимо отключить VPN: завершение звонков во время активного соединения невозможно.\n\nЗвонки будут завершены в VK, а сохранённые ссылки удалены. При следующем запуске потребуется создать новые звонки и решить капчу."
+                    } else {
+                        "Звонки будут завершены в VK, а сохранённые ссылки удалены из памяти приложения. При следующем запуске потребуется создать новые звонки — для этого нужно решить капчу."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 16.sp,
+                )
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = onConfirm,
+                        enabled = !isTunnelActive,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(CsqttSizes.ControlHeight),
+                        shape = CsqttShapes.Pill,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError,
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp, pressedElevation = 0.dp),
+                    ) {
+                        Text(
+                            text = "Закрыть звонки",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(CsqttSizes.ControlHeight),
+                        shape = CsqttShapes.Pill,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                    ) {
+                        Text(
+                            text = "Отмена",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun CloseVkCallsActionPreview() {
+    CloseVkCallsAction(
+        enabled = true,
+        isClosing = false,
+        isTunnelActive = false,
+        onClick = {},
+    )
 }

@@ -1,0 +1,5 @@
+!.slim/deepwork/
+!.slim/deepwork/**
+!.codegraph/
+!docs/superpowers/
+!.superpowers/brainstorm

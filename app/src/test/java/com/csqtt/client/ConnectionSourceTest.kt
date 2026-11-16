@@ -77,6 +77,26 @@ class ConnectionSourceTest {
     }
 
     @Test
+    fun `all hashes invalid yields no hashes instead of a dead one`() {
+        val bad = "badhashbadhashbad1"
+        val invalid = mapOf(bad to VkHashValidationStatus.Invalid)
+        val fromStore = resolveConnectionSourceFrom(
+            link = enc("connect?v=2&host=vps.example&peer=46000"),
+            hashes = bad,
+            invalidHashes = invalid,
+        )!!
+        assertEquals("", fromStore.hashes)
+
+        val fromLink = resolveConnectionSourceFrom(
+            link = enc("connect?v=2&host=vps.example&peer=46000&hashes=$bad"),
+            hashes = null,
+            invalidHashes = invalid,
+        )!!
+        assertEquals("", fromLink.hashes)
+        assertTrue(fromLink.hashesFromLink.not())
+    }
+
+    @Test
     fun `link token disables stored hashes`() {
         val link = enc("connect?v=2&host=vps.example&peer=46000&token=vk1.aBc-_%2B9")
         val source = resolveConnectionSourceFrom(link = link, hashes = "zyxwvutsrqponmlk2")!!

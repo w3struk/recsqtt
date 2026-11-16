@@ -12,7 +12,10 @@ object CsqttConstants {
         const val ACTION_RESTART_WHEN_VK_REACHABLE = "com.csqtt.client.RESTART_WHEN_VK_REACHABLE"
         const val ACTION_VERIFY_VK_REACHABILITY = "com.csqtt.client.VERIFY_VK_REACHABILITY"
         const val ACTION_RECOVER_VK_CALL = "com.csqtt.client.RECOVER_VK_CALL"
+        /** Единственный пользовательский путь завершения звонков VK: остановка туннеля их не трогает. */
+        const val ACTION_CLOSE_VK_CALLS = "com.csqtt.client.CLOSE_VK_CALLS"
         const val EXTRA_UNAVAILABLE_VK_HASH = "unavailable_vk_hash"
+        const val EXTRA_UNAVAILABLE_VK_CODE = "unavailable_vk_code"
     }
 
     object Profiles {

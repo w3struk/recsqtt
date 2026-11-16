@@ -8,11 +8,11 @@ class VkModePolicyTest {
     fun manualUnavailableHashIsPersistedAsInvalid() {
         assertEquals(
             true,
-            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_MANUAL, newlyUnavailable = true),
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_MANUAL, newlyUnavailable = true, code = 9008),
         )
         assertEquals(
             false,
-            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_MANUAL, newlyUnavailable = false),
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_MANUAL, newlyUnavailable = false, code = 9008),
         )
     }
 
@@ -20,11 +20,25 @@ class VkModePolicyTest {
     fun autoUnavailableHashIsReplacedInsteadOfPersisted() {
         assertEquals(
             false,
-            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_AUTO_API, newlyUnavailable = true),
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_AUTO_API, newlyUnavailable = true, code = 9008),
         )
         assertEquals(
             false,
-            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_AUTO_JS, newlyUnavailable = true),
+            shouldPersistUnavailableVkHash(CsqttConstants.VkAutoHash.MODE_AUTO_JS, newlyUnavailable = true, code = 9008),
+        )
+    }
+
+    @Test
+    fun stallVerdictNeverMarksTheHashInvalid() {
+        // Код 0 — вердикт клиента (застой), а не VK: живой хеш мог просто ждать
+        // медленного пользователя, и такая метка блокировала бы подключение.
+        assertEquals(
+            false,
+            shouldPersistUnavailableVkHash(
+                CsqttConstants.VkAutoHash.MODE_MANUAL,
+                newlyUnavailable = true,
+                code = 0,
+            ),
         )
     }
 

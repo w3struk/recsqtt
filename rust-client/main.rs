@@ -945,6 +945,11 @@ mod worker_count_tests {
         assert_eq!(normalize_worker_count(48), 40);
         assert_eq!(normalize_worker_count(5), 5);
         assert_eq!(normalize_worker_count(4), 5);
+        assert_eq!(
+            MAX_WORKERS.div_ceil(worker::WORKERS_PER_CREDENTIAL),
+            10,
+            "100 воркеров — это 10 групп, у каждой свой credential"
+        );
         assert!(
             MAX_WORKERS.div_ceil(worker::WORKERS_PER_CREDENTIAL)
                 <= vk_js_calls::MAX_ACCOUNT_CREDENTIALS
@@ -962,9 +967,9 @@ mod worker_count_tests {
     #[test]
     fn auto_js_waits_for_at_most_two_independent_turn_bots() {
         assert_eq!(required_js_ready_bots(1), 1);
-        assert_eq!(required_js_ready_bots(2), 2);
-        assert_eq!(required_js_ready_bots(3), 2);
-        assert_eq!(required_js_ready_bots(4), 2);
+        assert_eq!(required_js_ready_bots(GROUPS_PER_CREDENTIAL), 1);
+        assert_eq!(required_js_ready_bots(GROUPS_PER_CREDENTIAL + 1), 2);
+        assert_eq!(required_js_ready_bots(MAX_WORKERS / WORKERS_PER_GROUP), 2);
         assert_eq!(required_js_ready_bots(13), 2);
     }
 

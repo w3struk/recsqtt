@@ -95,6 +95,8 @@ class TunnelService : Service() {
     private val vkProbeJobs = mutableMapOf<Network, Job>()
     private val vkProbeLock = Any()
     private var vkRecoveryJob: Job? = null
+    private val vkCallReplacementBudget = VkCallReplacementBudget()
+    private val vkCallStallBudget = VkCallReplacementBudget(max = 3)
     private var autoPauseSettingsJob: Job? = null
     private var autoPauseWifiWatchJob: Job? = null
     private val autoPauseMutex = Mutex()
@@ -127,6 +129,9 @@ class TunnelService : Service() {
 
         when (intent.action) {
             "START" -> {
+                // Бюджет замен звонков — на одну попытку старта, а не на всю жизнь сервиса.
+                vkCallReplacementBudget.reset()
+                vkCallStallBudget.reset()
                 if (isStopping) return START_NOT_STICKY
                 isStopping = false
                 resourcesReleased = false
@@ -218,7 +223,7 @@ class TunnelService : Service() {
                                 99,
                                 true,
                             )
-                            launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true) }
+                            launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false) }
                             return@launch
                         }
 
@@ -264,20 +269,25 @@ class TunnelService : Service() {
                             true,
                         )
                         TunnelManager.starting.value = false
-                        launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true) }
+                        launch(Dispatchers.Main) { if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false) }
                     }
                 }
             }
             "STOP", "DISCONNECT" -> {
-                stopTunnel(finishVkCalls = true)
+                stopTunnel(finishVkCalls = false)
             }
             CsqttConstants.General.ACTION_RESTART_WHEN_VK_REACHABLE -> verifyVkAndRestart()
             CsqttConstants.General.ACTION_VERIFY_VK_REACHABILITY -> verifyVkAndSuspend()
             CsqttConstants.General.ACTION_RECOVER_VK_CALL -> {
                 recoverUnavailableVkCall(
                     intent.getStringExtra(CsqttConstants.General.EXTRA_UNAVAILABLE_VK_HASH).orEmpty(),
+                    intent.getIntExtra(
+                        CsqttConstants.General.EXTRA_UNAVAILABLE_VK_CODE,
+                        TunnelEventParser.CALL_NOT_FOUND_CODE,
+                    ),
                 )
             }
+            CsqttConstants.General.ACTION_CLOSE_VK_CALLS -> closeVkCalls()
             "RESTORE_NOTIFICATION" -> {
                 if (foregroundStarted && !isStopping) {
                     lastNotificationText = null
@@ -328,7 +338,7 @@ class TunnelService : Service() {
                         true,
                     )
                     launch(Dispatchers.Main) {
-                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
+                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
                     }
                     return@launch
                 }
@@ -411,7 +421,7 @@ class TunnelService : Service() {
                         true,
                     )
                     launch(Dispatchers.Main) {
-                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
+                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
                     }
                 }
             } catch (e: CancellationException) {
@@ -425,7 +435,7 @@ class TunnelService : Service() {
                     true,
                 )
                 launch(Dispatchers.Main) {
-                    if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = true)
+                    if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
                 }
             }
         }
@@ -443,10 +453,13 @@ class TunnelService : Service() {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
             CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
                 val token = accessTokenOverride ?: store.vkAccessToken.first()
-                val result = VkAutoCallsManager.startAutoCalls(
+                val userId = store.vkAccessTokenUserId.first()
+                val result = VkAutoCallsManager.ensureCalls(
                     applicationContext,
                     token,
                     workersPerHash,
+                    profile = store.activeProfile.first(),
+                    userId = userId,
                     clearStoredTokenOnInvalid = !tokenFromLink,
                 )
                     ?: return null
@@ -472,7 +485,49 @@ class TunnelService : Service() {
         }
     }
 
-    private fun recoverUnavailableVkCall(hash: String) {
+    private fun closeVkCalls() {
+        serviceScope.launch {
+            try {
+                val store = SettingsStore(applicationContext)
+                val token = store.vkAccessToken.first()
+                    .ifBlank { TunnelManager.getCurrentParams()?.vkAccessToken.orEmpty() }
+                    .ifBlank { resolveConnectionSource(store)?.vkAccessToken.orEmpty() }
+                val profile = store.activeProfile.first()
+                val closed = VkAutoCallsManager.closeAll(applicationContext, token, profile)
+                if (closed) {
+                    TunnelManager.updateLog(
+                        "vk_calls_closed",
+                        "[OK] Звонки VK закрыты",
+                        40,
+                        false,
+                    )
+                } else {
+                    TunnelManager.updateLog(
+                        "vk_calls_closed",
+                        "[ERR] Звонки VK не закрыты: нет VK-токена",
+                        90,
+                        true,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("TunnelService", "Unable to close VK calls", e)
+                TunnelManager.updateLog(
+                    "vk_calls_closed",
+                    "[ERR] Не удалось закрыть звонки VK: ${e.message ?: e.javaClass.simpleName}",
+                    90,
+                    true,
+                )
+            } finally {
+                if (!isStopping && !TunnelManager.running.value && !TunnelManager.starting.value) {
+                    stopSelf()
+                }
+            }
+        }
+    }
+
+    private fun recoverUnavailableVkCall(hash: String, code: Int) {
         if (hash.isBlank()) {
             TunnelManager.completeVkCallRecovery()
             return
@@ -502,14 +557,100 @@ class TunnelService : Service() {
                         accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
                         tokenFromLink = source.tokenFromLink,
                     )
-                    vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API || source.tokenFromLink -> resolveAutoHashes(
-                        store,
-                        fallbackHashes = source.hashes,
-                        workersPerHash = workers,
-                        forcedMode = if (source.tokenFromLink) CsqttConstants.VkAutoHash.MODE_AUTO_API else null,
-                        accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
-                        tokenFromLink = source.tokenFromLink,
-                    )
+                    vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API || source.tokenFromLink -> {
+                        val profile = store.activeProfile.first()
+                        val callStore = VkCallStore(applicationContext)
+                        // Доменный код значит, что ссылка мертва. Иначе — сеть, застой без
+                        // credential'а или чужая ошибка: ссылка, скорее всего, жива, и её
+                        // стоит повторить, а не выбрасывать.
+                        var replaceLink = VkCallEventPolicy.isCallDomainCode(code)
+                        if (!replaceLink) {
+                            val nowMs = System.currentTimeMillis()
+                            var dropped = false
+                            var failedCount: Int? = null
+                            try {
+                                callStore.update(profile) { current ->
+                                    val entry = current.firstOrNull { it.hash == hash }
+                                    if (entry == null) {
+                                        // Хеша нет в реестре (manual/auto_js или чужая
+                                        // сессия) — учитывать нечего, оставляем прежний путь.
+                                        current
+                                    } else {
+                                        val failed = VkCallReusePolicy.registerFailure(entry, nowMs)
+                                        failedCount = failed.failCount
+                                        dropped = VkCallReusePolicy.shouldDrop(failed)
+                                        if (dropped) {
+                                            current.filterNot { it.callId == entry.callId }
+                                        } else {
+                                            current.map { if (it.callId == entry.callId) failed else it }
+                                        }
+                                    }
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w("TunnelService", "Не удалось учесть сбой звонка $hash", e)
+                            }
+                            replaceLink = dropped
+                            val stallCount = failedCount
+                            if (!replaceLink && stallCount != null) {
+                                // Застой помечает hash недоступным и останавливает группу в
+                                // текущем процессе: без перезапуска поток не вернётся, поэтому
+                                // перезапускаем, но с паузой (лимиты VK остывают) и бюджетом.
+                                if (!vkCallStallBudget.tryConsume()) {
+                                    TunnelManager.updateLog(
+                                        "vk_call_stall_budget",
+                                        "[ERR] Лимит повторов после застоя исчерпан — останавливаем туннель",
+                                        99,
+                                        true,
+                                    )
+                                    launch(Dispatchers.Main) { TunnelManager.stop() }
+                                    return@launch
+                                }
+                                TunnelManager.updateLog(
+                                    "vk_call_stall_retry",
+                                    "[VK] Застой по хешу \"${displayVkHash(hash)}\" · повтор через 30 с ($stallCount/${VkCallReusePolicy.MAX_FAILURES})",
+                                    36,
+                                    false,
+                                )
+                                delay(30_000L)
+                                // Пользователь мог остановить туннель за время паузы: stopLocked обнуляет
+                                // currentParams, и отложенный старт не должен воскрешать остановленный туннель.
+                                if (TunnelManager.getCurrentParams() == null) return@launch
+                            }
+                        }
+                        if (replaceLink) {
+                            if (!vkCallReplacementBudget.tryConsume()) {
+                                TunnelManager.updateLog(
+                                    "vk_call_replacement_budget",
+                                    "[ERR] Лимит замен звонков VK исчерпан — останавливаем туннель",
+                                    99,
+                                    true,
+                                )
+                                launch(Dispatchers.Main) { TunnelManager.stop() }
+                                return@launch
+                            }
+                            // Мёртвый звонок уже не закрыть — просто забываем его, остальные
+                            // ссылки остаются в реестре и переиспользуются без нового calls.start.
+                            try {
+                                callStore.update(profile) { current ->
+                                    current.filterNot { it.hash == hash }
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w("TunnelService", "Не удалось убрать звонок $hash из реестра", e)
+                            }
+                        }
+                        resolveAutoHashes(
+                            store,
+                            fallbackHashes = source.hashes,
+                            workersPerHash = workers,
+                            forcedMode = if (source.tokenFromLink) CsqttConstants.VkAutoHash.MODE_AUTO_API else null,
+                            accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
+                            tokenFromLink = source.tokenFromLink,
+                        )
+                    }
                     else -> ResolvedVkHashes(source.hashes, false)
                 } ?: return@launch
                 if (resolved.value.isBlank() && resolved.mode != CsqttConstants.VkAutoHash.MODE_AUTO_JS) {
@@ -1006,7 +1147,25 @@ class TunnelService : Service() {
         resourcesReleased = true
         stopWifiAutoPauseWatch()
         CaptchaWebViewManager.onTunnelStop()
-        if (finishVkCalls) VkAutoCallsManager.finishActiveCalls()
+        // Обычная остановка (finishVkCalls=false) звонки не трогает: ссылки живут в реестре.
+        // Завершение VK-звонков сюда приходит только как явное закрытие.
+        if (finishVkCalls) {
+            val appContext = applicationContext
+            TunnelManager.scope.launch(Dispatchers.IO) {
+                try {
+                    val store = SettingsStore(appContext)
+                    VkAutoCallsManager.closeAll(
+                        appContext,
+                        store.vkAccessToken.first(),
+                        store.activeProfile.first(),
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("TunnelService", "Не удалось закрыть звонки VK", e)
+                }
+            }
+        }
         TunnelManager.stop(finishVkCalls, notifyController = false)
         releaseWakeLock()
         releaseWifiLock()
@@ -1395,7 +1554,7 @@ class TunnelService : Service() {
             vkProbeJobs.clear()
             physicalCandidates.clear()
         }
-        releaseTunnelResources(finishVkCalls = true)
+        releaseTunnelResources(finishVkCalls = false)
         if (foregroundStarted) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             foregroundStarted = false

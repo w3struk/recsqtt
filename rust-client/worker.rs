@@ -1,5 +1,8 @@
 use crate::{
-    auth::{CallUnavailable, TurnCredentials, VkAuth, VkRateLimitError},
+    auth::{
+        CallUnavailable, CaptchaExhausted, CaptchaGatePersisted, CredentialTimeout,
+        TurnCredentials, VkAuth, VkRateLimitError,
+    },
     dispatcher::Dispatcher,
     events::Events,
     obfs::ObfsMode,
@@ -30,6 +33,10 @@ use tokio_util::sync::CancellationToken;
 
 pub const WORKERS_PER_GROUP: usize = 10;
 const _: () = assert!(WORKERS_PER_GROUP == 10);
+/// Сколько групп делят один cohort в `run_groups`. Значение credential'а
+/// теперь общее для всех групп через кэш в `VkAuth`, а состояние отказа
+/// (`failures`, `exhausted`, `fetch_gate`) остаётся персональным для группы,
+/// поэтому одна группа — один cohort.
 pub const GROUPS_PER_CREDENTIAL: usize = 1;
 pub const WORKERS_PER_CREDENTIAL: usize = WORKERS_PER_GROUP * GROUPS_PER_CREDENTIAL;
 const _: () = assert!(WORKERS_PER_CREDENTIAL == 10);
@@ -248,28 +255,20 @@ pub async fn run_groups(context: Arc<GroupContext>) {
     let availability: Vec<_> = (0..hash_count)
         .map(|_| Arc::new(HashAvailability::new(&context.cancel)))
         .collect();
-    let mut credentials_by_hash: Vec<Vec<Arc<GroupCredentials>>> =
-        (0..hash_count).map(|_| Vec::new()).collect();
-    let mut next_credential_id = 1usize;
+    let mut cohorts: CredentialCohorts<GroupCredentials> = CredentialCohorts::new(hash_count);
 
     let mut get_group_credentials = |group_index: usize| -> Arc<GroupCredentials> {
         let hash_index = group_hash_index(group_index, hash_count);
-        let group_index_for_hash = group_index / hash_count;
-        let cohort_index = credential_cohort_index(group_index_for_hash);
-        while credentials_by_hash[hash_index].len() <= cohort_index {
-            credentials_by_hash[hash_index].push(Arc::new(GroupCredentials {
-                credential_id: next_credential_id,
-                hash: context.params.hashes[hash_index].clone(),
-                context: context.clone(),
-                state: tokio::sync::Mutex::new(CredentialCache::default()),
-                fetch_gate: tokio::sync::Mutex::new(()),
-                failures: AtomicUsize::new(0),
-                availability: availability[hash_index].clone(),
-                exhausted: AtomicBool::new(false),
-            }));
-            next_credential_id = next_credential_id.saturating_add(1);
-        }
-        credentials_by_hash[hash_index][cohort_index].clone()
+        cohorts.entry(group_index, hash_count, |credential_id| GroupCredentials {
+            credential_id,
+            hash: context.params.hashes[hash_index].clone(),
+            context: context.clone(),
+            state: tokio::sync::Mutex::new(CredentialCache::default()),
+            fetch_gate: tokio::sync::Mutex::new(()),
+            failures: AtomicUsize::new(0),
+            availability: availability[hash_index].clone(),
+            exhausted: AtomicBool::new(false),
+        })
     };
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -403,8 +402,15 @@ async fn run_group(
     }
 }
 
+/// Сколько подряд стойлов без credential'а и без прогресса капчи терпим (R3).
+const STALL_THRESHOLD: usize = 3;
+
 struct HashAvailability {
     unavailable: AtomicBool,
+    /// Подряд идущие fetch'и без credential'а и без прогресса solve. Счётчик
+    /// per-hash, а не per-credential: иначе несколько `GroupCredentials` на
+    /// один хеш умножали бы порог на их число.
+    stall_streak: AtomicUsize,
     cancel: CancellationToken,
 }
 
@@ -412,6 +418,7 @@ impl HashAvailability {
     fn new(parent_cancel: &CancellationToken) -> Self {
         Self {
             unavailable: AtomicBool::new(false),
+            stall_streak: AtomicUsize::new(0),
             cancel: parent_cancel.child_token(),
         }
     }
@@ -420,6 +427,68 @@ impl HashAvailability {
         self.unavailable.store(true, Ordering::Release);
         self.cancel.cancel();
     }
+
+    /// Считает стойло; `true`, когда серия дошла до порога.
+    fn record_stall(&self) -> bool {
+        let streak = self
+            .stall_streak
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        streak >= STALL_THRESHOLD
+    }
+
+    /// Сброс — только на успешном fetch.
+    fn reset_stall(&self) {
+        self.stall_streak.store(0, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn stall_streak(&self) -> usize {
+        self.stall_streak.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallOutcome {
+    /// Не стойло: сеть, лимит или fetch, где капча была решена.
+    Ignored,
+    /// Стойло посчитано, хеш ещё жив.
+    Counted,
+    /// Порог пересечён: хеш надо пометить недоступным и выйти.
+    Killed,
+}
+
+/// Классифицирует ошибку fetch'а для счётчика застоя (R3).
+///
+/// Инкремент — только для `CredentialTimeout`/`CaptchaExhausted` и только без
+/// прогресса solve внутри окна: длинный, но успешный WebView-solve не должен
+/// убивать живой хеш. Сеть/DNS и `VkRateLimitError` — игнор без сброса.
+fn register_fetch_stall(
+    availability: &HashAvailability,
+    error: &anyhow::Error,
+    solve_progress: bool,
+) -> StallOutcome {
+    if !is_stall_error(error) {
+        return StallOutcome::Ignored;
+    }
+    // Успешный solve обычно означает прогресс, но не когда гейт не снялся:
+    // такой хеш не оживёт от ещё одного решения.
+    let gate_persisted = error.downcast_ref::<CaptchaGatePersisted>().is_some();
+    if solve_progress && !gate_persisted {
+        return StallOutcome::Ignored;
+    }
+    if availability.record_stall() {
+        availability.mark_unavailable();
+        StallOutcome::Killed
+    } else {
+        StallOutcome::Counted
+    }
+}
+
+fn is_stall_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CredentialTimeout>().is_some()
+        || error.downcast_ref::<CaptchaExhausted>().is_some()
+        || error.downcast_ref::<CaptchaGatePersisted>().is_some()
 }
 
 pub struct GroupCredentials {
@@ -438,6 +507,12 @@ struct CachedCredentials {
     generation: u64,
     allocation_attempts: usize,
     allocation_mismatches: usize,
+    /// Когда credential лёг в кэш: по возрасту решается, «свежий» ли он для
+    /// брейкера отказов релея.
+    stored_at: std::time::Instant,
+    /// Сколько аллокаций уже прошло успешно. Ноль означает, что 486 — это
+    /// отказ релея, а не выбранная квота credential'а.
+    successful_allocations: usize,
 }
 
 #[derive(Clone)]
@@ -452,10 +527,21 @@ struct CredentialCache {
     quota_blocked: Option<TurnCredentials>,
     next_generation: u64,
     quota_retries: usize,
+    /// Окно отказов релея свежему credential'у: момент первого отказа и их
+    /// число. По нему считается пауза брейкера.
+    fresh_refusal_window: Option<(std::time::Instant, usize)>,
 }
 
 enum QuotaRotation {
+    /// Реальная квота «пожилого» credential'а: значение выбрасывается, нужен
+    /// новый логин.
     Rotated(Duration),
+    /// Релей отказал свежему credential'у: квота не выбрана, credential жив.
+    /// Минуть новую identity сейчас — значит устроить шторм, поэтому пауза.
+    FreshRefused {
+        delay: Duration,
+        trips: usize,
+    },
     Replaced,
 }
 
@@ -498,17 +584,28 @@ impl CredentialCache {
             generation: self.next_generation,
             allocation_attempts: 0,
             allocation_mismatches: 0,
+            stored_at: std::time::Instant::now(),
+            successful_allocations: 0,
         });
+        self.fresh_refusal_window = None;
         true
     }
 
     fn record_allocation(&mut self, lease: &CredentialLease) {
-        if let Some(cached) = self.current.as_mut()
+        let recorded = if let Some(cached) = self.current.as_mut()
             && cached.generation == lease.generation
             && same_turn_credentials(&cached.value, &lease.value)
         {
             cached.allocation_mismatches = 0;
+            cached.successful_allocations = cached.successful_allocations.saturating_add(1);
+            true
+        } else {
+            false
+        };
+        if recorded {
             self.quota_retries = 0;
+            // Успешная аллокация прерывает серию отказов релея.
+            self.fresh_refusal_window = None;
         }
     }
 
@@ -541,12 +638,38 @@ impl CredentialCache {
         {
             return QuotaRotation::Replaced;
         }
-        let rejected = cached.value.clone();
-        self.current = None;
-        self.quota_blocked = Some(rejected);
+        let fresh_refusal =
+            cached.successful_allocations == 0 && cached.stored_at.elapsed() < FRESH_QUOTA_WINDOW;
+        if fresh_refusal {
+            // Квота не выбрана: 486 на свежем credential'е — отказ релея.
+            // Credential остаётся живым, общий кэш когорты не трогаем: иначе
+            // каждая группа начнёт минтить новую identity (шторм до 3600/час,
+            // пока VK не ответит 29 Rate limit reached и капчей).
+            let trips = self.register_fresh_refusal(std::time::Instant::now());
+            return QuotaRotation::FreshRefused {
+                delay: fresh_quota_backoff(trips),
+                trips,
+            };
+        }
+        let Some(cached) = self.current.take() else {
+            return QuotaRotation::Replaced;
+        };
+        self.quota_blocked = Some(cached.value);
         let delay = quota_rotation_delay(self.quota_retries);
         self.quota_retries = self.quota_retries.saturating_add(1);
         QuotaRotation::Rotated(delay)
+    }
+
+    /// Считает отказ релея свежему credential'у в текущем окне и возвращает их
+    /// число; окно стартует с первого отказа и живёт `FRESH_QUOTA_WINDOW`.
+    fn register_fresh_refusal(&mut self, now: std::time::Instant) -> usize {
+        let current = self
+            .fresh_refusal_window
+            .filter(|(started_at, _)| now.duration_since(*started_at) < FRESH_QUOTA_WINDOW);
+        let trips = current.map_or(1, |(_, trips)| trips.saturating_add(1));
+        let started_at = current.map_or(now, |(started_at, _)| started_at);
+        self.fresh_refusal_window = Some((started_at, trips));
+        trips
     }
 
     fn next_quota_delay(&mut self) -> Duration {
@@ -571,6 +694,27 @@ impl CredentialCache {
         self.current = None;
         AllocationMismatch::Rotated
     }
+}
+
+/// Сбрасывает credential одной когорты хеша, если локальный lease признан
+/// негодным.
+///
+/// Отдельная функция, чтобы решение проверялось тестом без `GroupContext`
+/// (его сборка тянет netstack через `Dispatcher`).
+async fn invalidate_shared_turn(
+    auth: &VkAuth,
+    hash: &str,
+    credential_id: usize,
+    invalidated: bool,
+) {
+    if invalidated {
+        auth.invalidate_turn_credentials(hash, credential_id).await;
+    }
+}
+
+/// 486 на аллокацию означает лимит credential'а у TURN: новый логин оправдан.
+fn quota_rotation_needs_new_credential(rotation: &QuotaRotation) -> bool {
+    matches!(rotation, QuotaRotation::Rotated(_))
 }
 
 impl GroupCredentials {
@@ -615,19 +759,30 @@ impl GroupCredentials {
             "[КРЕД #{}] Запрос (хеш: {short_hash}...)",
             self.credential_id
         );
+        // Прогресс solve считается заново на каждый fetch (R3).
+        self.context.auth.begin_credential_fetch(&self.hash);
         let fetched = tokio::select! {
             _ = self.context.cancel.cancelled() => return None,
             _ = self.availability.cancel.cancelled() => return None,
             result = tokio::time::timeout(
                 CREDENTIAL_FETCH_TIMEOUT,
-                self.context.auth.get_credentials(&self.hash, credential_stream_id),
-            ) => result.unwrap_or_else(|_| Err(anyhow::anyhow!(
-                "VK не вернул credential за {CREDENTIAL_FETCH_TIMEOUT:?}"
-            ))),
+                self.context.auth.get_credentials(
+                    &self.hash,
+                    credential_stream_id,
+                    self.credential_id,
+                ),
+            ) => result.unwrap_or_else(|_| Err(CredentialTimeout {
+                limit: CREDENTIAL_FETCH_TIMEOUT,
+            }.into())),
         };
         match fetched {
             Ok(creds) => {
+                self.availability.reset_stall();
                 let server_addresses = creds.server_addresses.clone();
+                // Хеш TURN-username, а не сам username: в логе нужно видеть, разные ли
+                // identity выдали когортам. Одинаковый тег у двух когорт означает, что
+                // они делят квоту 10 аллокаций и обречены на 486 друг друга.
+                let identity_tag = turn_identity_tag(&creds.username);
                 let mut state = self.state.lock().await;
                 if !state.store(creds) {
                     let delay = state.next_quota_delay();
@@ -651,10 +806,11 @@ impl GroupCredentials {
                     _ = tokio::time::sleep(CREDENTIAL_POST_DELAY) => {}
                 }
                 crate::log_error!(
-                    "[КРЕД #{}] OK, TURN: {:?}, до {} воркеров",
+                    "[КРЕД #{}] OK, TURN: {:?}, до {} воркеров, identity {}",
                     self.credential_id,
                     server_addresses,
-                    WORKERS_PER_CREDENTIAL
+                    WORKERS_PER_CREDENTIAL,
+                    identity_tag
                 );
                 self.context.events.progress("credentials");
                 self.state.lock().await.reserve()
@@ -663,6 +819,21 @@ impl GroupCredentials {
                 if let Some(call) = error.downcast_ref::<CallUnavailable>() {
                     self.availability.mark_unavailable();
                     self.context.events.call_unavailable(&self.hash, call.code);
+                    return None;
+                }
+                let solve_progress = self.context.auth.take_solve_progress(&self.hash);
+                if register_fetch_stall(&self.availability, &error, solve_progress)
+                    == StallOutcome::Killed
+                {
+                    // failures растёт, чтобы поведение совпадало с обычной ошибкой:
+                    // без этого общий счётчик оставался бы «холодным».
+                    self.failures.fetch_add(1, Ordering::Relaxed);
+                    self.context.events.call_unavailable(&self.hash, 0);
+                    crate::log_error!(
+                        "[КРЕД #{}] Застой: {} fetch'ей подряд без credential'а и без прогресса капчи ({error:#}). Хеш недоступен",
+                        self.credential_id,
+                        STALL_THRESHOLD
+                    );
                     return None;
                 }
                 let failures = self.failures.fetch_add(1, Ordering::Relaxed);
@@ -687,8 +858,15 @@ impl GroupCredentials {
     }
 
     async fn invalidate(&self, lease: &CredentialLease) {
-        let mut state = self.state.lock().await;
-        if state.invalidate(lease) {
+        let invalidated = self.state.lock().await.invalidate(lease);
+        invalidate_shared_turn(
+            &self.context.auth,
+            &self.hash,
+            self.credential_id,
+            invalidated,
+        )
+        .await;
+        if invalidated {
             crate::log_error!(
                 "[КРЕД #{}] Невалиден, запрашиваем новый",
                 self.credential_id
@@ -705,7 +883,15 @@ impl GroupCredentials {
     }
 
     async fn rotate_after_quota(&self, lease: &CredentialLease) -> QuotaRotation {
-        self.state.lock().await.rotate_after_quota(lease)
+        let rotation = self.state.lock().await.rotate_after_quota(lease);
+        invalidate_shared_turn(
+            &self.context.auth,
+            &self.hash,
+            self.credential_id,
+            quota_rotation_needs_new_credential(&rotation),
+        )
+        .await;
+        rotation
     }
 
     async fn retry_after_mismatch(&self, lease: &CredentialLease) -> AllocationMismatch {
@@ -1005,6 +1191,18 @@ async fn worker_loop(
             }
             if is_turn_allocation_quota(error, &lower) {
                 match group_creds.rotate_after_quota(&credential_lease).await {
+                    QuotaRotation::FreshRefused {
+                        delay: breaker_delay,
+                        trips,
+                    } => {
+                        attempt = 0;
+                        delay = breaker_delay;
+                        crate::log_error!(
+                            "[TURN][RETRY] Релей отказал свежему credentialу #{} (отказ {trips}): пауза {:?} без переминта identity",
+                            group_creds.credential_id,
+                            delay
+                        );
+                    }
                     QuotaRotation::Rotated(quota_delay) => {
                         attempt = 0;
                         delay = quota_delay;
@@ -1151,6 +1349,23 @@ fn quota_rotation_delay(attempt: usize) -> Duration {
         3 => 800,
         _ => 1_500,
     })
+}
+
+/// Окно, в котором отказ релея свежему credential'у считается отказом, а не
+/// квотой (эталон `vk-turn-proxy`: 60 с).
+const FRESH_QUOTA_WINDOW: Duration = Duration::from_secs(60);
+/// Базовая пауза брейкера свежих отказов (эталон: 30 с).
+const FRESH_QUOTA_BASE_DELAY: Duration = Duration::from_secs(30);
+/// Потолок брейкера (эталон: 5 минут).
+const FRESH_QUOTA_MAX_DELAY: Duration = Duration::from_secs(300);
+
+/// Пауза после `trips` отказов релея свежему credential'у в текущем окне:
+/// 30 с удваивается с каждым отказом, потолок — 5 минут.
+fn fresh_quota_backoff(trips: usize) -> Duration {
+    let exponent = trips.saturating_sub(1).min(16) as u32;
+    FRESH_QUOTA_BASE_DELAY
+        .saturating_mul(1u32 << exponent)
+        .min(FRESH_QUOTA_MAX_DELAY)
 }
 
 fn turn_allocate_stun_code(error: &anyhow::Error) -> Option<i32> {
@@ -1321,6 +1536,15 @@ fn group_worker_ids(group_id: usize, total_workers: usize) -> Range<usize> {
     first..last
 }
 
+/// Короткий тег TURN-username для лога: по нему видно, разные ли identity
+/// достались когортам, но сам username (часть credential'а) в журнал не попадает.
+fn turn_identity_tag(username: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    username.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
+}
+
 fn credential_stream_id(credential_id: usize) -> usize {
     credential_id * 100
 }
@@ -1331,6 +1555,47 @@ fn group_hash_index(group_index: usize, hash_count: usize) -> usize {
 
 fn credential_cohort_index(group_index_for_hash: usize) -> usize {
     group_index_for_hash / GROUPS_PER_CREDENTIAL
+}
+
+/// Пара `(индекс хеша, индекс cohort'а)` для группы: все группы одного cohort'а
+/// разделяют один `Arc` с credential'ом, а значит и один VK-логин с одной капчей.
+fn credential_slot(group_index: usize, hash_count: usize) -> (usize, usize) {
+    let hash_index = group_hash_index(group_index, hash_count);
+    (
+        hash_index,
+        credential_cohort_index(group_index / hash_count),
+    )
+}
+
+/// Лениво создаёт по одному `Arc<T>` на cohort и переиспользует его для всех
+/// групп этого cohort'а.
+struct CredentialCohorts<T> {
+    by_hash: Vec<Vec<Arc<T>>>,
+    next_id: usize,
+}
+
+impl<T> CredentialCohorts<T> {
+    fn new(hash_count: usize) -> Self {
+        Self {
+            by_hash: (0..hash_count).map(|_| Vec::new()).collect(),
+            next_id: 1,
+        }
+    }
+
+    fn entry(
+        &mut self,
+        group_index: usize,
+        hash_count: usize,
+        mut create: impl FnMut(usize) -> T,
+    ) -> Arc<T> {
+        let (hash_index, cohort_index) = credential_slot(group_index, hash_count);
+        while self.by_hash[hash_index].len() <= cohort_index {
+            let credential_id = self.next_id;
+            self.next_id = self.next_id.saturating_add(1);
+            self.by_hash[hash_index].push(Arc::new(create(credential_id)));
+        }
+        self.by_hash[hash_index][cohort_index].clone()
+    }
 }
 
 #[cfg(test)]
@@ -1367,17 +1632,27 @@ mod tests {
 
     #[test]
     fn every_credential_cohort_is_dedicated_to_one_complete_group() {
+        assert_eq!(GROUPS_PER_CREDENTIAL, 1);
+        assert_eq!(WORKERS_PER_CREDENTIAL, WORKERS_PER_GROUP);
         for group_id in 1..=18 {
             let workers: Vec<_> = group_worker_ids(group_id, 18 * WORKERS_PER_GROUP).collect();
             assert_eq!(workers.len(), WORKERS_PER_GROUP);
         }
         for groups_per_hash in 1usize..=18 {
             let cohorts = groups_per_hash.div_ceil(GROUPS_PER_CREDENTIAL);
+            assert_eq!(
+                cohorts,
+                credential_cohort_index(groups_per_hash - 1) + 1,
+                "cohort'ов должно быть ровно ceil({groups_per_hash}/{GROUPS_PER_CREDENTIAL})"
+            );
             for cohort_index in 0..cohorts {
                 let assigned = (0..groups_per_hash)
                     .filter(|group_index| credential_cohort_index(*group_index) == cohort_index)
                     .count();
-                assert!((1..=GROUPS_PER_CREDENTIAL).contains(&assigned));
+                assert_eq!(
+                    assigned, 1,
+                    "у каждой группы должен быть свой cohort и, значит, свой credential"
+                );
                 assert!(assigned * WORKERS_PER_GROUP <= WORKERS_PER_CREDENTIAL);
                 assert_eq!(
                     credential_stream_id(cohort_index + 1),
@@ -1385,6 +1660,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_group_gets_its_own_credential_arc() {
+        assert_eq!(GROUPS_PER_CREDENTIAL, 1);
+        assert_eq!(WORKERS_PER_CREDENTIAL, 10);
+        let mut cohorts: CredentialCohorts<usize> = CredentialCohorts::new(1);
+        let arcs: Vec<_> = (0..GROUPS_PER_CREDENTIAL * 10)
+            .map(|group_index| cohorts.entry(group_index, 1, |credential_id| credential_id))
+            .collect();
+        assert_eq!(arcs.len(), 10);
+        assert!(
+            arcs.iter()
+                .enumerate()
+                .all(|(index, arc)| !arcs[..index].iter().any(|other| Arc::ptr_eq(arc, other))),
+            "ни одна группа не должна делить Arc: изоляция отказов по группам"
+        );
+        assert_eq!(
+            arcs.iter().map(|arc| **arc).collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert_eq!(cohorts.next_id, 11);
+    }
+
+    #[test]
+    fn one_hundred_workers_use_one_cohort_per_group() {
+        let groups = crate::MAX_WORKERS.div_ceil(WORKERS_PER_GROUP);
+        assert_eq!(groups, 10);
+        let mut cohorts: CredentialCohorts<usize> = CredentialCohorts::new(1);
+        let ids: Vec<_> = (0..groups)
+            .map(|group_index| *cohorts.entry(group_index, 1, |credential_id| credential_id))
+            .collect();
+        assert_eq!(ids, (1..=10).collect::<Vec<_>>());
+        assert_eq!(cohorts.by_hash.iter().map(Vec::len).sum::<usize>(), groups);
+        assert_eq!(groups * WORKERS_PER_GROUP, crate::MAX_WORKERS);
+    }
+
+    #[test]
+    fn credential_cohorts_are_isolated_per_hash_and_per_group() {
+        let groups = crate::MAX_WORKERS / WORKERS_PER_GROUP;
+        let hash_count = 2;
+        let mut cohorts: CredentialCohorts<usize> = CredentialCohorts::new(hash_count);
+        let ids: Vec<_> = (0..groups)
+            .map(|group_index| {
+                *cohorts.entry(group_index, hash_count, |credential_id| credential_id)
+            })
+            .collect();
+        // Каждая группа получает собственный credential, независимо от хеша:
+        // два соседних индекса — это разные хеши, и они тоже не должны совпасть.
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), groups);
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+        assert_eq!(cohorts.next_id, groups + 1);
     }
 
     #[test]
@@ -1430,6 +1761,7 @@ mod tests {
             }
             let half_groups = groups / 2;
             assert_eq!(groups_by_hash, [half_groups, half_groups]);
+            // Одна группа — один credential: cohort'ов столько же, сколько групп.
             assert_eq!(cohorts_by_hash, [half_groups, half_groups]);
             assert_eq!(
                 groups_by_hash.map(|g| g * WORKERS_PER_GROUP),
@@ -1449,6 +1781,141 @@ mod tests {
         assert!(!healthy.unavailable.load(Ordering::Acquire));
         assert!(!healthy.cancel.is_cancelled());
         assert!(!root_cancel.is_cancelled());
+    }
+
+    fn fetch_timeout() -> anyhow::Error {
+        CredentialTimeout {
+            limit: CREDENTIAL_FETCH_TIMEOUT,
+        }
+        .into()
+    }
+
+    #[test]
+    fn three_stalls_without_progress_kill_the_hash() {
+        let root_cancel = CancellationToken::new();
+        let availability = HashAvailability::new(&root_cancel);
+        let timeout = fetch_timeout();
+        assert_eq!(
+            register_fetch_stall(&availability, &timeout, false),
+            StallOutcome::Counted
+        );
+        assert_eq!(
+            register_fetch_stall(&availability, &timeout, false),
+            StallOutcome::Counted
+        );
+        assert_eq!(availability.stall_streak(), STALL_THRESHOLD - 1);
+        assert!(!availability.unavailable.load(Ordering::Acquire));
+        assert_eq!(
+            register_fetch_stall(&availability, &timeout, false),
+            StallOutcome::Killed
+        );
+        assert_eq!(availability.stall_streak(), STALL_THRESHOLD);
+        assert!(availability.unavailable.load(Ordering::Acquire));
+        assert!(availability.cancel.is_cancelled());
+        assert!(!root_cancel.is_cancelled());
+    }
+
+    #[test]
+    fn captcha_exhaustion_counts_as_a_stall() {
+        let root_cancel = CancellationToken::new();
+        let availability = HashAvailability::new(&root_cancel);
+        let exhausted: anyhow::Error = CaptchaExhausted {
+            hash: "dead-call".to_owned(),
+            attempts: 6,
+        }
+        .into();
+        assert!(is_stall_error(&exhausted));
+        assert_eq!(
+            register_fetch_stall(&availability, &exhausted, false),
+            StallOutcome::Counted
+        );
+        assert_eq!(availability.stall_streak(), 1);
+    }
+
+    #[test]
+    fn solve_progress_inside_the_window_is_not_counted_as_a_stall() {
+        let root_cancel = CancellationToken::new();
+        let availability = HashAvailability::new(&root_cancel);
+        let timeout = fetch_timeout();
+        for _ in 0..10 {
+            assert_eq!(
+                register_fetch_stall(&availability, &timeout, true),
+                StallOutcome::Ignored
+            );
+        }
+        assert_eq!(availability.stall_streak(), 0);
+        assert!(!availability.unavailable.load(Ordering::Acquire));
+        assert!(!availability.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn persisted_captcha_gate_counts_as_a_stall_even_after_a_successful_solve() {
+        let root_cancel = CancellationToken::new();
+        let availability = HashAvailability::new(&root_cancel);
+        let gate: anyhow::Error = CaptchaGatePersisted {
+            hash: "dead-call".to_owned(),
+        }
+        .into();
+        for expected in [
+            StallOutcome::Counted,
+            StallOutcome::Counted,
+            StallOutcome::Killed,
+        ] {
+            assert_eq!(register_fetch_stall(&availability, &gate, true), expected);
+        }
+        assert!(availability.unavailable.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn network_and_rate_limit_errors_are_not_stalls() {
+        let root_cancel = CancellationToken::new();
+        let availability = HashAvailability::new(&root_cancel);
+        let network = anyhow::anyhow!("connection reset by peer");
+        let rate_limit: anyhow::Error = VkRateLimitError {
+            limit_type: crate::auth::VkRateLimitType::CaptchaLimit,
+            code: 14,
+            message: "captcha wait required".to_owned(),
+            cooldown: Duration::from_secs(60),
+        }
+        .into();
+        for _ in 0..5 {
+            assert_eq!(
+                register_fetch_stall(&availability, &network, false),
+                StallOutcome::Ignored
+            );
+            assert_eq!(
+                register_fetch_stall(&availability, &rate_limit, false),
+                StallOutcome::Ignored
+            );
+        }
+        assert_eq!(availability.stall_streak(), 0);
+        assert!(!availability.unavailable.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_successful_fetch_resets_the_stall_streak() {
+        let root_cancel = CancellationToken::new();
+        let availability = HashAvailability::new(&root_cancel);
+        let timeout = fetch_timeout();
+        assert_eq!(
+            register_fetch_stall(&availability, &timeout, false),
+            StallOutcome::Counted
+        );
+        assert_eq!(
+            register_fetch_stall(&availability, &timeout, false),
+            StallOutcome::Counted
+        );
+        availability.reset_stall();
+        assert_eq!(availability.stall_streak(), 0);
+        assert_eq!(
+            register_fetch_stall(&availability, &timeout, false),
+            StallOutcome::Counted
+        );
+        assert_eq!(
+            register_fetch_stall(&availability, &timeout, false),
+            StallOutcome::Counted
+        );
+        assert!(!availability.unavailable.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1716,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_cache_never_reuses_a_credential_after_nine_allocate_attempts() {
+    fn credential_cache_never_reuses_a_credential_after_ten_allocate_attempts() {
         let addresses: Arc<[Arc<str>]> = Arc::from([Arc::from("turn.example:3478")]);
         let credentials = TurnCredentials {
             username: Arc::from("first"),
@@ -1725,12 +2192,236 @@ mod tests {
         };
         let mut cache = CredentialCache::default();
         cache.store(credentials.clone());
-        for _ in 0..WORKERS_PER_CREDENTIAL {
-            let lease = cache.reserve().expect("allocation slot must be available");
+        for index in 0..WORKERS_PER_CREDENTIAL {
+            let lease = cache
+                .reserve()
+                .unwrap_or_else(|| panic!("allocation slot #{} must be available", index + 1));
             cache.record_allocation(&lease);
         }
+        assert_eq!(WORKERS_PER_CREDENTIAL, 10);
         assert!(cache.current.is_some());
         assert!(cache.reserve().is_none());
+        assert!(cache.current.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalidating_or_quota_rotating_a_credential_clears_its_own_turn_cohort() {
+        use crate::captcha::CaptchaSolver;
+        use crate::profiles::random_profile;
+
+        let auth = Arc::new(VkAuth::new(
+            "legacy",
+            random_profile("chrome"),
+            &[],
+            CaptchaSolver::new("auto", CancellationToken::new()),
+            None,
+        ));
+        let credentials = TurnCredentials {
+            username: Arc::from("u"),
+            password: Arc::from("p"),
+            server_addresses: Arc::from([Arc::from("turn.example:3478")]),
+        };
+        let neighbour = TurnCredentials {
+            username: Arc::from("neighbour"),
+            password: Arc::from("p"),
+            server_addresses: Arc::from([Arc::from("turn.example:3478")]),
+        };
+        auth.seed_turn_cache("hash-a", 1, credentials.clone());
+        auth.seed_turn_cache("hash-a", 2, neighbour);
+        assert!(auth.get_credentials("hash-a", 100, 1).await.is_ok());
+
+        // `false` — локальный lease и так отсутствует: кэш трогать незачем.
+        invalidate_shared_turn(&auth, "hash-a", 1, false).await;
+        assert!(
+            auth.get_credentials("hash-a", 100, 1).await.is_ok(),
+            "a no-op invalidation must not force a new login"
+        );
+
+        // Негодный lease сбрасывает credential своей когорты.
+        invalidate_shared_turn(&auth, "hash-a", 1, true).await;
+        assert!(
+            auth.get_credentials("hash-a", 100, 1).await.is_err(),
+            "credential must be refetched after invalidation"
+        );
+        assert!(
+            auth.get_credentials("hash-a", 200, 2).await.is_ok(),
+            "the neighbour cohort must keep its credential"
+        );
+
+        // 486 (Rotated) — единственный случай, где новый логин оправдан.
+        let rotation = QuotaRotation::Rotated(Duration::from_millis(100));
+        assert!(quota_rotation_needs_new_credential(&rotation));
+        assert!(!quota_rotation_needs_new_credential(
+            &QuotaRotation::Replaced
+        ));
+        auth.seed_turn_cache("hash-a", 1, credentials.clone());
+        invalidate_shared_turn(
+            &auth,
+            "hash-a",
+            1,
+            quota_rotation_needs_new_credential(&rotation),
+        )
+        .await;
+        assert!(
+            auth.get_credentials("hash-a", 100, 1).await.is_err(),
+            "486 must drop the cohort credential so the next fetch is a new login"
+        );
+        assert!(
+            auth.get_credentials("hash-a", 200, 2).await.is_ok(),
+            "486 of one cohort must not invalidate a neighbour"
+        );
+
+        // Свежий отказ релея: credential жив, общий кэш когорты не сбрасывается,
+        // соседняя когорта тоже не затронута.
+        auth.seed_turn_cache("hash-a", 1, credentials.clone());
+        let fresh = QuotaRotation::FreshRefused {
+            delay: fresh_quota_backoff(1),
+            trips: 1,
+        };
+        assert!(
+            !quota_rotation_needs_new_credential(&fresh),
+            "fresh relay refusal must not re-mint an identity"
+        );
+        invalidate_shared_turn(
+            &auth,
+            "hash-a",
+            1,
+            quota_rotation_needs_new_credential(&fresh),
+        )
+        .await;
+        assert!(
+            auth.get_credentials("hash-a", 100, 1).await.is_ok(),
+            "fresh refusal keeps the shared credential of its cohort"
+        );
+        assert!(
+            auth.get_credentials("hash-a", 200, 2).await.is_ok(),
+            "fresh refusal must not touch a neighbour cohort"
+        );
+    }
+
+    fn quota_test_credentials(name: &str) -> TurnCredentials {
+        TurnCredentials {
+            username: Arc::from(name),
+            password: Arc::from("secret"),
+            server_addresses: Arc::from([Arc::from("turn.example:3478")]),
+        }
+    }
+
+    #[test]
+    fn fresh_quota_refusal_keeps_the_credential_and_backs_off() {
+        let mut cache = CredentialCache::default();
+        cache.store(quota_test_credentials("first"));
+        for (trips, expected) in [
+            (1, Duration::from_secs(30)),
+            (2, Duration::from_secs(60)),
+            (3, Duration::from_secs(120)),
+        ] {
+            let lease = cache.reserve().expect("credential must stay available");
+            assert!(
+                matches!(
+                    cache.rotate_after_quota(&lease),
+                    QuotaRotation::FreshRefused { delay, trips: actual }
+                        if actual == trips && delay == expected
+                ),
+                "refusal #{trips} must pause {expected:?}"
+            );
+            assert!(
+                cache.current.is_some(),
+                "fresh refusal must keep the credential (no re-mint)"
+            );
+            assert!(cache.quota_blocked.is_none());
+        }
+        assert_eq!(fresh_quota_backoff(64), FRESH_QUOTA_MAX_DELAY);
+    }
+
+    #[test]
+    fn mature_credential_quota_drops_the_credential() {
+        let mut cache = CredentialCache::default();
+        cache.store(quota_test_credentials("first"));
+        let lease = cache.reserve().unwrap();
+        cache.record_allocation(&lease);
+        assert_eq!(
+            cache
+                .current
+                .as_ref()
+                .expect("credential must be cached")
+                .successful_allocations,
+            1
+        );
+        let rotation = cache.rotate_after_quota(&lease);
+        assert!(
+            matches!(rotation, QuotaRotation::Rotated(delay) if delay == Duration::from_millis(100)),
+            "a credential with successful allocations sees 486 as a real quota"
+        );
+        assert!(quota_rotation_needs_new_credential(&rotation));
+        assert!(cache.current.is_none());
+        assert!(cache.quota_blocked.is_some());
+    }
+
+    #[test]
+    fn successful_allocation_and_store_clear_the_fresh_refusal_counter() {
+        let mut cache = CredentialCache::default();
+        cache.store(quota_test_credentials("first"));
+        let lease = cache.reserve().unwrap();
+        assert!(matches!(
+            cache.rotate_after_quota(&lease),
+            QuotaRotation::FreshRefused { trips: 1, .. }
+        ));
+        assert!(cache.fresh_refusal_window.is_some());
+
+        // Новый credential — новая серия отказов.
+        cache.store(quota_test_credentials("second"));
+        assert!(cache.fresh_refusal_window.is_none());
+
+        let lease = cache.reserve().unwrap();
+        assert!(matches!(
+            cache.rotate_after_quota(&lease),
+            QuotaRotation::FreshRefused { trips: 1, .. }
+        ));
+        assert!(cache.fresh_refusal_window.is_some());
+
+        // Успешная аллокация обрывает серию.
+        let lease = cache.reserve().unwrap();
+        cache.record_allocation(&lease);
+        assert!(cache.fresh_refusal_window.is_none());
+    }
+
+    #[test]
+    fn fresh_refusal_window_rolls_over_after_sixty_seconds() {
+        let mut cache = CredentialCache::default();
+        let start = std::time::Instant::now();
+        assert_eq!(cache.register_fresh_refusal(start), 1);
+        assert_eq!(
+            cache.register_fresh_refusal(start + Duration::from_secs(59)),
+            2
+        );
+        assert_eq!(
+            cache.register_fresh_refusal(start + Duration::from_secs(61)),
+            1,
+            "отказы вне окна 60 с не должны накапливаться"
+        );
+        assert_eq!(
+            cache.register_fresh_refusal(start + Duration::from_secs(62)),
+            2
+        );
+    }
+
+    #[test]
+    fn old_credential_without_allocations_falls_back_to_real_quota() {
+        let mut cache = CredentialCache::default();
+        cache.store(quota_test_credentials("first"));
+        cache
+            .current
+            .as_mut()
+            .expect("credential must be cached")
+            .stored_at = std::time::Instant::now()
+            .checked_sub(FRESH_QUOTA_WINDOW + Duration::from_secs(1))
+            .expect("test host uptime must exceed the fresh window");
+        let lease = cache.reserve().unwrap();
+        assert!(
+            matches!(cache.rotate_after_quota(&lease), QuotaRotation::Rotated(_)),
+            "credential older than the fresh window is a real quota"
+        );
         assert!(cache.current.is_none());
     }
 
@@ -1755,12 +2446,15 @@ mod tests {
         let mut cache = CredentialCache::default();
         cache.store(first.clone());
         let first_lease = cache.reserve().unwrap();
+        // Для «пожилого» credential'а 486 — реальная квота (см. тесты брейкера).
+        cache.current.as_mut().unwrap().successful_allocations = 1;
         assert!(matches!(
             cache.rotate_after_quota(&first_lease),
             QuotaRotation::Rotated(delay) if delay == Duration::from_millis(100)
         ));
         assert!(cache.store(second.clone()));
         let second_lease = cache.reserve().unwrap();
+        cache.current.as_mut().unwrap().successful_allocations = 1;
         assert!(matches!(
             cache.rotate_after_quota(&second_lease),
             QuotaRotation::Rotated(delay) if delay == Duration::from_millis(300)
@@ -1804,6 +2498,7 @@ mod tests {
         let mut cache = CredentialCache::default();
         assert!(cache.store(rejected.clone()));
         let rejected_lease = cache.reserve().unwrap();
+        cache.current.as_mut().unwrap().successful_allocations = 1;
         assert!(matches!(
             cache.rotate_after_quota(&rejected_lease),
             QuotaRotation::Rotated(_)
@@ -1894,6 +2589,21 @@ mod tests {
         assert!(is_transport_timeout("operation timed out"));
         assert!(!is_transport_timeout("turn channelbind: stun error 438"));
         assert!(!is_transport_timeout("turn allocate: stun error 486"));
+    }
+
+    #[test]
+    fn identity_tag_is_stable_and_distinguishes_usernames() {
+        // Тег нужен, чтобы по логу видеть совпадение identity у когорт: одинаковый
+        // тег означает общую квоту 10 аллокаций и неизбежные 486.
+        assert_eq!(
+            turn_identity_tag("turn-user-a"),
+            turn_identity_tag("turn-user-a")
+        );
+        assert_ne!(
+            turn_identity_tag("turn-user-a"),
+            turn_identity_tag("turn-user-b")
+        );
+        assert_eq!(turn_identity_tag("turn-user-a").len(), 8);
     }
 
     #[test]

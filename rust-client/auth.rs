@@ -9,17 +9,45 @@ use anyhow::{Context, Result, bail};
 use primp::{Client, Impersonate, ImpersonateOS, PseudoId, PseudoOrder, cookie::Jar, header};
 use serde_json::Value;
 use std::{
+    collections::{HashMap, HashSet},
     sync::{
-        Arc,
-        atomic::{AtomicI64, Ordering},
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
 const VK_CONNECT_CLIENT_ID: &str = "8093730";
 const VK_CALLS_API_HOST: &str = "api.vk.me";
 const VK_CALLS_API_VERSION: &str = "5.276";
+/// Пауза капчи на один хеш после `CaptchaWaitRequired` (R4).
+const CAPTCHA_LOCKOUT_SECONDS: i64 = 60;
+/// Сколько подряд неудачных solve допустимо на хеш до `CaptchaExhausted` (R5).
+const CAPTCHA_SOLVE_BUDGET: usize = 6;
+/// Сколько раз VK может запросить капчу на один хеш, прежде чем он считается
+/// загеченным. Считаются сами запросы, а не только неудачные solve: одна капча
+/// на стабильной identity должна снимать гейт, иначе повторять бессмысленно.
+const CAPTCHA_PROMPT_BUDGET: usize = 3;
+/// Потолок кэша legacy-identity: auto-режим минтит новые хеши, поэтому
+/// переиспользуемые identity должны вытесняться, а не копиться вечно.
+const MAX_LEGACY_IDENTITIES: usize = 32;
+/// Сколько живёт успешный TURN-credential в кэше по хешу.
+///
+/// Один fetch — это полный VK-логин (`auth.anonymLogin`) и капча, привязанная
+/// к логину, поэтому значение переиспользуется всеми группами хеша, пока VK
+/// или TURN не отвергнут его (`invalidate_turn_credentials`) и пока не истёк
+/// этот TTL.
+const TURN_CREDENTIAL_TTL: Duration = Duration::from_secs(600);
+/// Потолок кэша TURN-credential'ов: auto-режим минтит новые хеши, поэтому
+/// старые записи вытесняются по `seq`, а не копятся вечно.
+const MAX_CACHED_TURNS: usize = 32;
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Clone)]
 struct VkCredentials {
@@ -67,6 +95,86 @@ impl std::fmt::Display for CallUnavailable {
 
 impl std::error::Error for CallUnavailable {}
 
+/// VK не выдал credential за отведённое окно (R3).
+///
+/// `Display` намеренно не содержит «timeout», «timed out» и «тайм-аут»:
+/// `is_network_or_dns_error` иначе приняла бы отказ за сетевой, и застой
+/// никогда не дошёл бы до `CallUnavailable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialTimeout {
+    pub limit: Duration,
+}
+
+impl std::fmt::Display for CredentialTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "VK не выдал credential за {} секунд",
+            self.limit.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for CredentialTimeout {}
+
+/// Бюджет подряд идущих неудачных solve на хеш исчерпан (R5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptchaExhausted {
+    pub hash: String,
+    pub attempts: usize,
+}
+
+impl std::fmt::Display for CaptchaExhausted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "капча VK не даётся для звонка {}: {} подряд неудачных попыток",
+            self.hash, self.attempts
+        )
+    }
+}
+
+impl std::error::Error for CaptchaExhausted {}
+
+/// Капча решалась, но гейт не снялся: локальный кап на fetch исчерпан.
+/// Отличается от `CaptchaExhausted` тем, что solve формально успешны, — но
+/// повторять бессмысленно, поэтому worker считает это застоем.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptchaGatePersisted {
+    pub hash: String,
+}
+
+impl std::fmt::Display for CaptchaGatePersisted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "капча VK не снимается для звонка {} после нескольких решений",
+            self.hash
+        )
+    }
+}
+
+impl std::error::Error for CaptchaGatePersisted {}
+
+/// Транспорт до границы `get_credentials`: капча требует повторного решения.
+/// Наружу не выходит — там уже `VkRateLimitError` с паузой.
+#[derive(Debug, Clone)]
+struct CaptchaWaitRequired {
+    detail: String,
+}
+
+impl std::fmt::Display for CaptchaWaitRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "капча VK требует повторного решения: {}",
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for CaptchaWaitRequired {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VkRateLimitType {
     FloodControl,
@@ -111,20 +219,81 @@ impl std::fmt::Display for VkRateLimitError {
 
 impl std::error::Error for VkRateLimitError {}
 
+/// Стабильная identity legacy-пути для одного хеша.
+///
+/// VK привязывает капчу к связке профиль + cookie jar: если на каждый fetch
+/// генерировать новое имя и новую сессию, решённая капча не переносится и VK
+/// спрашивает её заново. Поэтому профиль, имя, `device_id` и cookie jar живут
+/// в кэше по хешу и переиспользуются между fetch'ами.
+struct LegacyIdentity {
+    profile: Profile,
+    name: String,
+    device_id: String,
+    cookie_jar: Arc<Jar>,
+    /// Порядковый номер создания — по нему вытесняется самая старая запись.
+    seq: u64,
+}
+
+/// Успешный TURN-credential, общий для всех воркеров одной когорты хеша.
+struct CachedTurn {
+    value: TurnCredentials,
+    stored_at: Instant,
+    /// Порядковый номер записи — по нему вытесняется самая старая.
+    seq: u64,
+}
+
+/// Ключ TURN-кэша: хеш + когорта (`GroupCredentials::credential_id`).
+///
+/// VK-relay держит десять аллокаций на одну identity, поэтому значение делится
+/// только внутри когорты в `WORKERS_PER_CREDENTIAL` воркеров: соседние группы
+/// хеша ходят за своим логином, а не садятся на чужой credential.
+type TurnCacheKey = (String, usize);
+
+/// Per-hash gate на fetch + `seq` для вытеснения самого старого gate'а.
+type TurnFetchGate = (u64, Arc<tokio::sync::Mutex<()>>);
+
 pub struct VkAuth {
     mode: Arc<str>,
     auto_js: Option<Arc<CredentialBroker>>,
     profile: Profile,
     credentials: Arc<[VkCredentials]>,
     captcha: Arc<CaptchaSolver>,
-    captcha_lockout_until: AtomicI64,
+    /// Пауза капчи по хешу: капча привязана к звонку, поэтому пауза одного
+    /// хеша не должна голодать остальные (R4).
+    captcha_lockout_until: Mutex<HashMap<String, i64>>,
+    /// Подряд идущие неудачные solve по хешу (R5).
+    captcha_failures: Mutex<HashMap<String, usize>>,
+    /// Запросы капчи по хешу поверх fetch'ей: одна капча должна прилипнуть к
+    /// стабильной identity, а не спрашиваться по кругу.
+    captcha_prompts: Mutex<HashMap<String, usize>>,
+    /// Legacy-identity по хешу: профиль + имя + device_id + cookie jar.
+    legacy_identities: Mutex<HashMap<String, Arc<LegacyIdentity>>>,
+    /// Монотонный счётчик для вытеснения самой старой identity.
+    legacy_identity_seq: AtomicU64,
+    /// Успешный TURN-credential по `(хеш, когорта)`: один логин и одна капча
+    /// обслуживают когорту, пока credential не отвергнут или не истёк TTL.
+    turn_cache: Mutex<HashMap<TurnCacheKey, CachedTurn>>,
+    /// Монотонный счётчик для вытеснения самой старой записи TURN-кэша.
+    turn_cache_seq: AtomicU64,
+    /// Per-hash gate на fetch: мёртвый хеш с 240-секундным `CredentialTimeout`
+    /// не должен блокировать запрос credential'а по живому хешу.
+    turn_fetch_gates: Mutex<HashMap<String, TurnFetchGate>>,
+    /// Монотонный счётчик для вытеснения gate'ов, которыми уже никто не владеет.
+    turn_gate_seq: AtomicU64,
+    /// TTL записи TURN-кэша; в тестах укорачивается, чтобы проверять истечение
+    /// без `sleep`.
+    turn_credential_ttl: Duration,
+    /// Хеши, где с начала текущего fetch был хотя бы один успешный solve (R3).
+    solve_progress: Mutex<HashSet<String>>,
     rate_limit_lockout_until: AtomicI64,
 }
 
 struct LegacyAttempt<'a> {
     client: &'a Client,
     captcha_client: &'a Client,
-    profile: Profile,
+    profile: &'a Profile,
+    name: &'a str,
+    device_id: &'a str,
     saved_profile: Option<&'a crate::profiles::SavedProfile>,
 }
 
@@ -135,6 +304,24 @@ impl VkAuth {
         client_ids: &[String],
         captcha: Arc<CaptchaSolver>,
         auto_js: Option<Arc<CredentialBroker>>,
+    ) -> Self {
+        Self::with_turn_credential_ttl(
+            mode,
+            profile,
+            client_ids,
+            captcha,
+            auto_js,
+            TURN_CREDENTIAL_TTL,
+        )
+    }
+
+    fn with_turn_credential_ttl(
+        mode: &str,
+        profile: Profile,
+        client_ids: &[String],
+        captcha: Arc<CaptchaSolver>,
+        auto_js: Option<Arc<CredentialBroker>>,
+        turn_credential_ttl: Duration,
     ) -> Self {
         let mode = if mode.eq_ignore_ascii_case("auto_js") {
             "auto_js"
@@ -149,9 +336,140 @@ impl VkAuth {
             profile,
             credentials: load_credentials(client_ids).into(),
             captcha,
-            captcha_lockout_until: AtomicI64::new(0),
+            captcha_lockout_until: Mutex::new(HashMap::new()),
+            captcha_failures: Mutex::new(HashMap::new()),
+            captcha_prompts: Mutex::new(HashMap::new()),
+            legacy_identities: Mutex::new(HashMap::new()),
+            legacy_identity_seq: AtomicU64::new(0),
+            turn_cache: Mutex::new(HashMap::new()),
+            turn_cache_seq: AtomicU64::new(0),
+            turn_fetch_gates: Mutex::new(HashMap::new()),
+            turn_gate_seq: AtomicU64::new(0),
+            turn_credential_ttl,
+            solve_progress: Mutex::new(HashSet::new()),
             rate_limit_lockout_until: AtomicI64::new(0),
         }
+    }
+
+    /// Пауза капчи для конкретного хеша — не глобальная.
+    fn captcha_lockout_error(&self, link: &str, now: i64) -> Option<VkRateLimitError> {
+        let until = lock_unpoisoned(&self.captcha_lockout_until)
+            .get(link)
+            .copied()
+            .unwrap_or_default();
+        if now >= until {
+            return None;
+        }
+        Some(VkRateLimitError {
+            limit_type: VkRateLimitType::CaptchaLimit,
+            code: 14,
+            message: "активна пауза капчи для этого звонка".to_string(),
+            cooldown: Duration::from_secs((until - now) as u64),
+        })
+    }
+
+    fn note_captcha_lockout(&self, link: &str) {
+        lock_unpoisoned(&self.captcha_lockout_until)
+            .insert(link.to_owned(), unix_seconds() + CAPTCHA_LOCKOUT_SECONDS);
+    }
+
+    fn clear_captcha_lockout(&self, link: &str) {
+        lock_unpoisoned(&self.captcha_lockout_until).remove(link);
+    }
+
+    /// Учитывает неудачный solve; возвращает длину текущей серии.
+    fn register_captcha_solve_failure(&self, link: &str) -> usize {
+        let mut failures = lock_unpoisoned(&self.captcha_failures);
+        let count = failures.entry(link.to_owned()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    fn clear_captcha_solve_failures(&self, link: &str) {
+        lock_unpoisoned(&self.captcha_failures).remove(link);
+    }
+
+    /// Считает запрос капчи по хешу поверх fetch'ей.
+    ///
+    /// `Some` — бюджет исчерпан: решённая капча не прилипла к identity, ещё один
+    /// WebView ничего не изменит, поэтому хеш считается загеченным и отдаётся
+    /// типизированный отказ (worker считает его застоем).
+    fn check_captcha_prompt_budget(&self, link: &str) -> Option<CaptchaGatePersisted> {
+        let mut prompts = lock_unpoisoned(&self.captcha_prompts);
+        let count = prompts.entry(link.to_owned()).or_insert(0);
+        *count = count.saturating_add(1);
+        if *count >= CAPTCHA_PROMPT_BUDGET {
+            return Some(CaptchaGatePersisted {
+                hash: link.to_owned(),
+            });
+        }
+        None
+    }
+
+    /// Legacy-identity хеша: get-or-create.
+    ///
+    /// Профиль, имя, `device_id` и cookie jar переиспользуются, чтобы VK-сессия
+    /// сохранялась и решённая капча переносилась на следующий fetch. Кэш
+    /// ограничен: при переполнении вытесняется самая старая запись (auto-режим
+    /// минтит новые хеши).
+    fn legacy_identity(&self, link: &str) -> Arc<LegacyIdentity> {
+        let mut identities = lock_unpoisoned(&self.legacy_identities);
+        if let Some(identity) = identities.get(link) {
+            return Arc::clone(identity);
+        }
+        if identities.len() >= MAX_LEGACY_IDENTITIES {
+            let oldest = identities
+                .iter()
+                .min_by_key(|(_, identity)| identity.seq)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                identities.remove(&key);
+            }
+        }
+        let identity = Arc::new(LegacyIdentity {
+            profile: self.profile.clone(),
+            name: generate_name(),
+            device_id: Uuid::new_v4().to_string(),
+            cookie_jar: Arc::new(Jar::default()),
+            seq: self.legacy_identity_seq.fetch_add(1, Ordering::Relaxed),
+        });
+        identities.insert(link.to_owned(), Arc::clone(&identity));
+        identity
+    }
+
+    /// Неудачный solve: до предела — пауза капчи, после — типизированный отказ.
+    fn captcha_solve_error(&self, link: &str, detail: String) -> anyhow::Error {
+        let failures = self.register_captcha_solve_failure(link);
+        if failures >= CAPTCHA_SOLVE_BUDGET {
+            return CaptchaExhausted {
+                hash: link.to_owned(),
+                attempts: failures,
+            }
+            .into();
+        }
+        CaptchaWaitRequired { detail }.into()
+    }
+
+    fn mark_solve_progress(&self, link: &str) {
+        lock_unpoisoned(&self.solve_progress).insert(link.to_owned());
+    }
+
+    /// Начало нового fetch: прогресс solve прошлого окна больше не считается.
+    pub fn begin_credential_fetch(&self, link: &str) {
+        lock_unpoisoned(&self.solve_progress).remove(link);
+    }
+
+    /// Забирает прогресс solve, накопленный за текущий fetch (R3).
+    pub fn take_solve_progress(&self, link: &str) -> bool {
+        lock_unpoisoned(&self.solve_progress).remove(link)
+    }
+
+    /// Успешный fetch снимает и паузу капчи, и бюджет неудачных solve (R5).
+    fn note_fetch_success(&self, link: &str) {
+        self.clear_captcha_lockout(link);
+        self.clear_captcha_solve_failures(link);
+        lock_unpoisoned(&self.captcha_prompts).remove(link);
+        lock_unpoisoned(&self.solve_progress).remove(link);
     }
 
     pub fn client_ids(&self) -> String {
@@ -162,7 +480,135 @@ impl VkAuth {
             .join(", ")
     }
 
-    pub async fn get_credentials(&self, link: &str, stream_id: usize) -> Result<TurnCredentials> {
+    /// Кэш включается для всех режимов, кроме `auto_js`: там credential
+    /// приходит от брокера аккаунтов, и разные группы должны получать разные
+    /// аккаунты, поэтому кэш не читается и не пишется.
+    fn turn_cache_enabled(&self) -> bool {
+        self.mode.as_ref() != "auto_js"
+    }
+
+    /// Свежая запись TURN-кэша по когорте хеша. Просроченная запись удаляется
+    /// здесь же, чтобы следующий промах ушёл в сеть.
+    fn cached_turn(&self, link: &str, credential_id: usize) -> Option<TurnCredentials> {
+        let key = (link.to_owned(), credential_id);
+        let mut cache = lock_unpoisoned(&self.turn_cache);
+        let cached = cache.get(&key)?;
+        if cached.stored_at.elapsed() >= self.turn_credential_ttl {
+            cache.remove(&key);
+            return None;
+        }
+        Some(cached.value.clone())
+    }
+
+    /// Чтение кэша с учётом режима — единственный путь, которым
+    /// `get_credentials` берёт значение.
+    fn cached_turn_for_mode(&self, link: &str, credential_id: usize) -> Option<TurnCredentials> {
+        if !self.turn_cache_enabled() {
+            return None;
+        }
+        self.cached_turn(link, credential_id)
+    }
+
+    /// Кладёт успешный credential в кэш по когорте, вытесняя самую старую
+    /// запись при переполнении.
+    fn store_turn(&self, link: &str, credential_id: usize, value: TurnCredentials) {
+        let key = (link.to_owned(), credential_id);
+        let mut cache = lock_unpoisoned(&self.turn_cache);
+        if !cache.contains_key(&key) && cache.len() >= MAX_CACHED_TURNS {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, cached)| cached.seq)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                cache.remove(&key);
+            }
+        }
+        let seq = self.turn_cache_seq.fetch_add(1, Ordering::Relaxed);
+        cache.insert(
+            key,
+            CachedTurn {
+                value,
+                stored_at: Instant::now(),
+                seq,
+            },
+        );
+    }
+
+    /// Запись кэша с учётом режима — единственный путь, которым
+    /// `get_credentials` кладёт значение.
+    fn store_turn_for_mode(&self, link: &str, credential_id: usize, value: TurnCredentials) {
+        if !self.turn_cache_enabled() {
+            return;
+        }
+        self.store_turn(link, credential_id, value);
+    }
+
+    /// Сбрасывает credential одной когорты хеша: TURN отверг его (486 /
+    /// исчерпанная аутентификация) или его признал негодным repair. Соседние
+    /// когорты того же хеша не затрагиваются — у них свой логин.
+    pub(crate) async fn invalidate_turn_credentials(&self, link: &str, credential_id: usize) {
+        lock_unpoisoned(&self.turn_cache).remove(&(link.to_owned(), credential_id));
+    }
+
+    /// Per-hash gate на fetch: мёртвый хеш с 240-секундным `CredentialTimeout`
+    /// не должен блокировать запрос credential'а по живому хешу. Потолок — как
+    /// у кэша: при переполнении вытесняется самый старый gate, а владеющий им
+    /// fetch продолжает работать со своей `Arc`-копией.
+    fn turn_fetch_gate(&self, link: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = lock_unpoisoned(&self.turn_fetch_gates);
+        if let Some((_, gate)) = gates.get(link) {
+            return Arc::clone(gate);
+        }
+        if gates.len() >= MAX_CACHED_TURNS {
+            let oldest = gates
+                .iter()
+                .min_by_key(|(_, (seq, _))| *seq)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                gates.remove(&key);
+            }
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let seq = self.turn_gate_seq.fetch_add(1, Ordering::Relaxed);
+        gates.insert(link.to_owned(), (seq, Arc::clone(&gate)));
+        gate
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_turn_cache(&self, link: &str, credential_id: usize, value: TurnCredentials) {
+        self.store_turn(link, credential_id, value);
+    }
+
+    /// TURN-credential для когорты группы.
+    ///
+    /// Успешный fetch кладётся в кэш по `(хеш, credential_id)` и обслуживает
+    /// остальные воркеры этой же когорты: логин и капча платятся один раз на
+    /// десять воркеров, а не на каждого. Соседние группы хеша получают свой
+    /// credential. Ошибки не кэшируются, `auto_js` кэш не использует вовсе.
+    pub async fn get_credentials(
+        &self,
+        link: &str,
+        stream_id: usize,
+        credential_id: usize,
+    ) -> Result<TurnCredentials> {
+        if let Some(cached) = self.cached_turn_for_mode(link, credential_id) {
+            return Ok(cached);
+        }
+        let gate = self.turn_fetch_gate(link);
+        let _gate_guard = gate.lock().await;
+        // Двойная проверка: пока ждали gate, соседний воркер той же когорты
+        // мог наполнить кэш, и второй логин был бы лишней капчей.
+        if let Some(cached) = self.cached_turn_for_mode(link, credential_id) {
+            return Ok(cached);
+        }
+        let result = self.fetch_credentials(link, stream_id).await;
+        if let Ok(credentials) = &result {
+            self.store_turn_for_mode(link, credential_id, credentials.clone());
+        }
+        result
+    }
+
+    async fn fetch_credentials(&self, link: &str, stream_id: usize) -> Result<TurnCredentials> {
         if self.mode.as_ref() == "auto_js" {
             let credential_id = stream_id / 100;
             let auto_js_result = match self.auto_js.as_ref() {
@@ -170,7 +616,10 @@ impl VkAuth {
                 None => Err(anyhow::anyhow!("Auto JS credential broker отсутствует")),
             };
             return match auto_js_result {
-                Ok(credentials) => Ok(credentials),
+                Ok(credentials) => {
+                    self.note_fetch_success(link);
+                    Ok(credentials)
+                }
                 Err(auto_js_error) => {
                     crate::log_error!(
                         "[VK JS] Креды аккаунта {credential_id}/{MAX_ACCOUNT_CREDENTIALS} недоступны: {auto_js_error:#} · переход на Авто"
@@ -204,20 +653,15 @@ impl VkAuth {
             }
             .into());
         }
-        let captcha_lockout = self.captcha_lockout_until.load(Ordering::Acquire);
-        if now < captcha_lockout {
-            let remaining = (captcha_lockout - now) as u64;
-            return Err(VkRateLimitError {
-                limit_type: VkRateLimitType::CaptchaLimit,
-                code: 14,
-                message: "активна глобальная пауза капчи".to_string(),
-                cooldown: Duration::from_secs(remaining.max(1)),
-            }
-            .into());
+        if let Some(limit) = self.captcha_lockout_error(link, now) {
+            return Err(limit.into());
         }
         if self.mode.as_ref() == "vkcalls" {
             match self.vk_calls_with_retries(link, stream_id).await {
-                Ok(credentials) => return Ok(credentials),
+                Ok(credentials) => {
+                    self.note_fetch_success(link);
+                    return Ok(credentials);
+                }
                 Err(error) if error.downcast_ref::<CallUnavailable>().is_some() => {
                     return Err(error);
                 }
@@ -238,7 +682,10 @@ impl VkAuth {
                 "[STREAM {stream_id}] [VK Auth] Legacy mode selected, skipping VK Calls path"
             );
         }
-        let cookie_jar = Arc::new(Jar::default());
+        let identity = self.legacy_identity(link);
+        let client = browser_client_for_profile(identity.cookie_jar.clone(), &identity.profile)?;
+        let captcha_client =
+            captcha_client_for_profile(identity.cookie_jar.clone(), &identity.profile)?;
         let mut last_error = None;
         let credential_count = self.credentials.len().max(1);
         for attempt in 0..4 {
@@ -250,9 +697,6 @@ impl VkAuth {
                 credential.client_id,
                 attempt + 1
             );
-            let profile = self.profile.clone();
-            let client = browser_client_for_profile(cookie_jar.clone(), &profile)?;
-            let captcha_client = captcha_client_for_profile(cookie_jar.clone(), &profile)?;
             let saved_profile = load_saved_profile().await;
             match self
                 .legacy_path(
@@ -262,7 +706,9 @@ impl VkAuth {
                     LegacyAttempt {
                         client: &client,
                         captcha_client: &captcha_client,
-                        profile,
+                        profile: &identity.profile,
+                        name: &identity.name,
+                        device_id: &identity.device_id,
                         saved_profile: saved_profile.as_ref(),
                     },
                 )
@@ -273,9 +719,19 @@ impl VkAuth {
                         "[STREAM {stream_id}] [VK Auth] Success with client_id={}",
                         credential.client_id
                     );
+                    self.note_fetch_success(link);
                     return Ok(value);
                 }
                 Err(error) if error.downcast_ref::<CallUnavailable>().is_some() => {
+                    return Err(error);
+                }
+                Err(error) if error.downcast_ref::<CaptchaExhausted>().is_some() => {
+                    // Повторять внутри одного fetch бессмысленно: бюджет на хеш не
+                    // сбрасывается до успешного fetch, каждая попытка упрётся в него же.
+                    return Err(error);
+                }
+                Err(error) if error.downcast_ref::<CaptchaGatePersisted>().is_some() => {
+                    // Гейт не снимается: решение капчи не помогает, это застой.
                     return Err(error);
                 }
                 Err(error) => {
@@ -290,14 +746,13 @@ impl VkAuth {
                         );
                         return Err(error);
                     }
-                    if error.to_string().contains("CAPTCHA_WAIT_REQUIRED") {
-                        self.captcha_lockout_until
-                            .store(unix_seconds() + 60, Ordering::Release);
+                    if error.downcast_ref::<CaptchaWaitRequired>().is_some() {
+                        self.note_captcha_lockout(link);
                         return Err(VkRateLimitError {
                             limit_type: VkRateLimitType::CaptchaLimit,
                             code: 14,
                             message: "captcha wait required".to_string(),
-                            cooldown: Duration::from_secs(60),
+                            cooldown: Duration::from_secs(CAPTCHA_LOCKOUT_SECONDS as u64),
                         }
                         .into());
                     }
@@ -439,14 +894,15 @@ impl VkAuth {
             client,
             captcha_client,
             profile,
+            name,
+            device_id,
             saved_profile,
         } = attempt;
-        let name = generate_name();
-        let escaped_name = query_escape(&name);
+        let escaped_name = query_escape(name);
         let join_url = query_escape(&format!("https://vk.ru/call/join/{link}"));
         let join_link = query_escape(link);
         crate::log_error!(
-            "[STREAM {stream_id}] [VK Auth] Identity - Name: {name} | Fingerprint: {:?}/{:?}",
+            "[STREAM {stream_id}] [VK Auth] Identity - Name: {name} | device_id={device_id} | Fingerprint: {:?}/{:?}",
             profile.impersonate,
             profile.os
         );
@@ -458,7 +914,7 @@ impl VkAuth {
             client,
             "https://login.vk.ru/?act=get_anonym_token",
             &data,
-            &profile,
+            profile,
         )
         .await?;
         let token1 = json_string(&response, &["data", "access_token"])?;
@@ -471,7 +927,7 @@ impl VkAuth {
             "https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id={}",
             query_escape(&credential.client_id)
         );
-        match post_form(client, &preview_url, &preview, &profile).await {
+        match post_form(client, &preview_url, &preview, profile).await {
             Ok(value) => check_fatal_call(&value)?,
             Err(error) => {
                 crate::log_error!(
@@ -489,22 +945,50 @@ impl VkAuth {
         );
         let mut captcha_attempts = 0usize;
         let token2 = loop {
-            let response = post_form(client, &anonymous_url, &anonymous_data, &profile).await?;
+            let response = post_form(client, &anonymous_url, &anonymous_data, profile).await?;
             if let Some(error) = response.get("error") {
                 check_fatal_call(&response)?;
                 let captcha = VkCaptchaError::from_json(error)?;
                 if captcha.redirect_uri.is_empty() || captcha.session_token.is_empty() {
                     bail!("VK API error: {error}");
                 }
+                if let Some(gate) = self.check_captcha_prompt_budget(link) {
+                    // Одна капча на стабильную identity должна снимать гейт.
+                    // Если VK спрашивает в третий раз за серию, ещё один WebView
+                    // ничего не изменит: worker считает это застоем.
+                    self.note_captcha_lockout(link);
+                    crate::log_error!(
+                        "[STREAM {stream_id}] [VK Auth] Капча запрошена {CAPTCHA_PROMPT_BUDGET} раза для {link}: гейт не снимается, хеш считается загеченным"
+                    );
+                    return Err(gate.into());
+                }
                 if captcha_attempts >= 3 {
-                    bail!("CAPTCHA_WAIT_REQUIRED");
+                    // Solve формально прошли, но гейт не снялся. Это не «капча
+                    // требует паузы», а признак, что звонок за гейтом: worker
+                    // считает такое событие застоем (R3), а пауза лишь задаёт темп.
+                    self.note_captcha_lockout(link);
+                    return Err(CaptchaGatePersisted {
+                        hash: link.to_owned(),
+                    }
+                    .into());
                 }
                 captcha_attempts += 1;
-                let success = self
+                let success = match self
                     .captcha
-                    .solve(captcha_client, &profile, saved_profile, stream_id, &captcha)
+                    .solve(captcha_client, profile, saved_profile, stream_id, &captcha)
                     .await
-                    .map_err(|error| anyhow::anyhow!("CAPTCHA_WAIT_REQUIRED: {error}"))?;
+                {
+                    Ok(success) => {
+                        // Токен получен: серия неудачных solve прервана, а для
+                        // счётчика застоя это прогресс, а не безнадёжный fetch.
+                        self.clear_captcha_solve_failures(link);
+                        self.mark_solve_progress(link);
+                        success
+                    }
+                    Err(error) => {
+                        return Err(self.captcha_solve_error(link, format!("{error:#}")));
+                    }
+                };
                 let attempt =
                     if captcha.captcha_attempt.is_empty() || captcha.captcha_attempt == "0" {
                         "1"
@@ -524,20 +1008,13 @@ impl VkAuth {
         };
         random_delay(100, 150).await;
         let session_data = format!(
-            r#"{{"version":2,"device_id":"{}","client_version":1.1,"client_type":"SDK_JS"}}"#,
-            Uuid::new_v4()
+            r#"{{"version":2,"device_id":"{device_id}","client_version":1.1,"client_type":"SDK_JS"}}"#
         );
         let login_data = format!(
             "session_data={}&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA",
             query_escape(&session_data)
         );
-        let login = post_form(
-            client,
-            "https://calls.okcdn.ru/fb.do",
-            &login_data,
-            &profile,
-        )
-        .await?;
+        let login = post_form(client, "https://calls.okcdn.ru/fb.do", &login_data, profile).await?;
         let session_key = json_string(&login, &["session_key"])?;
         random_delay(100, 150).await;
         let join = format!(
@@ -545,7 +1022,7 @@ impl VkAuth {
             query_escape(&token2),
             query_escape(session_key)
         );
-        let response = post_form(client, "https://calls.okcdn.ru/fb.do", &join, &profile).await?;
+        let response = post_form(client, "https://calls.okcdn.ru/fb.do", &join, profile).await?;
         parse_turn_credentials(&response)
     }
 }
@@ -1247,6 +1724,370 @@ mod tests {
         });
         let error = check_ok_error(&response).unwrap_err();
         assert!(error.downcast_ref::<CallUnavailable>().is_some());
+    }
+
+    fn test_auth() -> VkAuth {
+        test_auth_with_ttl(TURN_CREDENTIAL_TTL)
+    }
+
+    fn test_auth_with_ttl(turn_credential_ttl: Duration) -> VkAuth {
+        VkAuth::with_turn_credential_ttl(
+            "legacy",
+            random_profile("chrome"),
+            &[],
+            CaptchaSolver::new("auto", tokio_util::sync::CancellationToken::new()),
+            None,
+            turn_credential_ttl,
+        )
+    }
+
+    fn turn_credentials(name: &str) -> TurnCredentials {
+        TurnCredentials {
+            username: Arc::from(name),
+            password: Arc::from("secret"),
+            server_addresses: Arc::from([Arc::from("turn.example:3478")]),
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_cache_serves_a_stored_credential_without_network() {
+        let auth = test_auth();
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("cached"));
+        let cached = auth
+            .get_credentials("hash-a", 100, 1)
+            .await
+            .expect("cache hit must not fall through to a fetch");
+        assert_eq!(cached.username.as_ref(), "cached");
+        assert_eq!(cached.password.as_ref(), "secret");
+        assert_eq!(cached.server_addresses[0].as_ref(), "turn.example:3478");
+    }
+
+    #[tokio::test]
+    async fn turn_cache_is_not_shared_between_cohorts_of_one_hash() {
+        let auth = test_auth();
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("cohort-1"));
+        // Когорта 1 обслуживается из кэша, когорта 2 — нет: у неё свой логин.
+        assert!(
+            auth.get_credentials("hash-a", 100, 1).await.is_ok(),
+            "own cohort must hit the cache"
+        );
+        assert!(
+            auth.get_credentials("hash-a", 200, 2).await.is_err(),
+            "another cohort of the same hash must not reuse the value"
+        );
+        assert!(auth.cached_turn("hash-a", 1).is_some());
+        assert!(auth.cached_turn("hash-a", 2).is_none());
+        // Две когорты одного хеша живут отдельными записями.
+        auth.seed_turn_cache("hash-a", 2, turn_credentials("cohort-2"));
+        assert_eq!(lock_unpoisoned(&auth.turn_cache).len(), 2);
+        assert_eq!(
+            auth.cached_turn("hash-a", 1).unwrap().username.as_ref(),
+            "cohort-1"
+        );
+        assert_eq!(
+            auth.cached_turn("hash-a", 2).unwrap().username.as_ref(),
+            "cohort-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_turn_cache_entry_is_not_reused() {
+        let auth = test_auth_with_ttl(Duration::ZERO);
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("cached"));
+        assert!(auth.cached_turn("hash-a", 1).is_none());
+        assert!(
+            auth.get_credentials("hash-a", 100, 1).await.is_err(),
+            "expired entry must fall through; legacy path fails without VK credentials"
+        );
+        assert!(
+            lock_unpoisoned(&auth.turn_cache).is_empty(),
+            "expired entry must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidated_turn_cache_entry_is_not_reused() {
+        let auth = test_auth();
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("cached"));
+        assert!(auth.get_credentials("hash-a", 100, 1).await.is_ok());
+        auth.invalidate_turn_credentials("hash-a", 1).await;
+        assert!(auth.cached_turn("hash-a", 1).is_none());
+        assert!(
+            auth.get_credentials("hash-a", 100, 1).await.is_err(),
+            "after invalidation the value must be fetched again"
+        );
+        // Инвалидация отсутствующей записи — no-op, а не ошибка.
+        auth.invalidate_turn_credentials("hash-a", 1).await;
+        assert!(lock_unpoisoned(&auth.turn_cache).is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalidating_one_cohort_keeps_its_neighbour() {
+        let auth = test_auth();
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("cohort-1"));
+        auth.seed_turn_cache("hash-a", 2, turn_credentials("cohort-2"));
+        auth.invalidate_turn_credentials("hash-a", 1).await;
+        assert!(auth.cached_turn("hash-a", 1).is_none());
+        assert!(
+            auth.get_credentials("hash-a", 200, 2).await.is_ok(),
+            "486 of one group must not force a login for its neighbour"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_js_neither_reads_nor_writes_the_turn_cache() {
+        let auth = VkAuth::new(
+            "auto_js",
+            random_profile("chrome"),
+            &[],
+            CaptchaSolver::new("auto", tokio_util::sync::CancellationToken::new()),
+            None,
+        );
+        assert!(!auth.turn_cache_enabled());
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("cached"));
+        assert!(
+            auth.cached_turn_for_mode("hash-a", 1).is_none(),
+            "auto_js must not read the cache: every group gets its own account"
+        );
+        auth.store_turn_for_mode("hash-a", 2, turn_credentials("broker"));
+        assert!(
+            !lock_unpoisoned(&auth.turn_cache).contains_key(&("hash-a".to_owned(), 2)),
+            "auto_js must not write the cache"
+        );
+        assert!(test_auth().turn_cache_enabled());
+    }
+
+    #[test]
+    fn turn_cache_keeps_hashes_apart_and_updates_in_place() {
+        let auth = test_auth();
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("a"));
+        auth.seed_turn_cache("hash-b", 1, turn_credentials("b"));
+        assert_eq!(
+            auth.cached_turn("hash-a", 1).unwrap().username.as_ref(),
+            "a"
+        );
+        assert_eq!(
+            auth.cached_turn("hash-b", 1).unwrap().username.as_ref(),
+            "b"
+        );
+        auth.seed_turn_cache("hash-a", 1, turn_credentials("a2"));
+        assert_eq!(
+            auth.cached_turn("hash-a", 1).unwrap().username.as_ref(),
+            "a2"
+        );
+        assert_eq!(lock_unpoisoned(&auth.turn_cache).len(), 2);
+    }
+
+    #[test]
+    fn turn_cache_evicts_the_oldest_entry_by_seq() {
+        let auth = test_auth();
+        for index in 0..MAX_CACHED_TURNS {
+            auth.seed_turn_cache(
+                &format!("hash-{index}"),
+                1,
+                turn_credentials(&format!("cred-{index}")),
+            );
+        }
+        auth.seed_turn_cache("hash-extra", 1, turn_credentials("cred-extra"));
+        let cache = lock_unpoisoned(&auth.turn_cache);
+        assert_eq!(cache.len(), MAX_CACHED_TURNS);
+        assert!(
+            !cache.contains_key(&("hash-0".to_owned(), 1)),
+            "oldest entry must be evicted first"
+        );
+        assert!(cache.contains_key(&("hash-extra".to_owned(), 1)));
+        assert!(cache.contains_key(&(format!("hash-{}", MAX_CACHED_TURNS - 1), 1)));
+    }
+
+    #[test]
+    fn turn_fetch_gate_is_per_hash() {
+        let auth = test_auth();
+        let first = auth.turn_fetch_gate("hash-a");
+        let same = auth.turn_fetch_gate("hash-a");
+        let other = auth.turn_fetch_gate("hash-b");
+        assert!(
+            Arc::ptr_eq(&first, &same),
+            "fetches of one hash must share a gate"
+        );
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "a slow hash must not block another hash"
+        );
+        assert_eq!(lock_unpoisoned(&auth.turn_fetch_gates).len(), 2);
+    }
+
+    #[test]
+    fn captcha_lockout_is_scoped_to_one_hash() {
+        let auth = test_auth();
+        let now = unix_seconds();
+        auth.note_captcha_lockout("hash-a");
+        let blocked = auth
+            .captcha_lockout_error("hash-a", now)
+            .expect("hash A must be locked out");
+        assert_eq!(blocked.limit_type, VkRateLimitType::CaptchaLimit);
+        assert!(blocked.cooldown.as_secs() > 0);
+        assert!(
+            auth.captcha_lockout_error("hash-b", now).is_none(),
+            "lockout of hash A must not block hash B"
+        );
+        auth.clear_captcha_lockout("hash-a");
+        assert!(auth.captcha_lockout_error("hash-a", now).is_none());
+        assert!(auth.captcha_lockout_error("hash-a", now + 3600).is_none());
+    }
+
+    #[test]
+    fn captcha_budget_counts_consecutive_solve_failures_and_resets_on_success() {
+        let auth = test_auth();
+        for expected in 1..CAPTCHA_SOLVE_BUDGET {
+            assert_eq!(auth.register_captcha_solve_failure("hash-a"), expected);
+        }
+        auth.clear_captcha_solve_failures("hash-a");
+        assert_eq!(auth.register_captcha_solve_failure("hash-a"), 1);
+    }
+
+    #[test]
+    fn captcha_budget_exhaustion_is_a_typed_error() {
+        let auth = test_auth();
+        for _ in 1..CAPTCHA_SOLVE_BUDGET {
+            let error = auth.captcha_solve_error("hash-a", "BOT".to_owned());
+            assert!(error.downcast_ref::<CaptchaExhausted>().is_none());
+            assert!(error.downcast_ref::<CaptchaWaitRequired>().is_some());
+        }
+        let error = auth.captcha_solve_error("hash-a", "BOT".to_owned());
+        let exhausted = error
+            .downcast_ref::<CaptchaExhausted>()
+            .expect("budget must turn into CaptchaExhausted");
+        assert_eq!(exhausted.attempts, CAPTCHA_SOLVE_BUDGET);
+        assert_eq!(exhausted.hash, "hash-a");
+        assert!(!error.to_string().contains("CAPTCHA_WAIT_REQUIRED"));
+        assert!(!is_network_or_dns_error(&error));
+        assert!(
+            auth.captcha_solve_error("hash-b", "BOT".to_owned())
+                .downcast_ref::<CaptchaExhausted>()
+                .is_none(),
+            "budget of hash A must not exhaust hash B"
+        );
+    }
+
+    #[test]
+    fn captcha_prompt_budget_gates_a_hash_after_three_requests() {
+        let auth = test_auth();
+        assert!(auth.check_captcha_prompt_budget("hash-a").is_none());
+        assert!(auth.check_captcha_prompt_budget("hash-a").is_none());
+        let gate = auth
+            .check_captcha_prompt_budget("hash-a")
+            .expect("third prompt must gate the hash");
+        assert_eq!(gate.hash, "hash-a");
+        let error: anyhow::Error = gate.into();
+        assert!(error.downcast_ref::<CaptchaGatePersisted>().is_some());
+        assert!(!is_network_or_dns_error(&error));
+        assert!(
+            auth.check_captcha_prompt_budget("hash-b").is_none(),
+            "budget of hash A must not gate hash B"
+        );
+    }
+
+    #[test]
+    fn captcha_prompt_budget_resets_on_successful_fetch() {
+        let auth = test_auth();
+        assert!(auth.check_captcha_prompt_budget("hash-a").is_none());
+        assert!(auth.check_captcha_prompt_budget("hash-a").is_none());
+        auth.note_fetch_success("hash-a");
+        assert!(
+            auth.check_captcha_prompt_budget("hash-a").is_none(),
+            "a successful fetch must give the hash a fresh prompt budget"
+        );
+        assert!(auth.check_captcha_prompt_budget("hash-a").is_none());
+        assert!(auth.check_captcha_prompt_budget("hash-a").is_some());
+    }
+
+    #[test]
+    fn legacy_identity_is_reused_for_the_same_hash() {
+        let auth = test_auth();
+        let first = auth.legacy_identity("hash-a");
+        let second = auth.legacy_identity("hash-a");
+        assert_eq!(first.name, second.name);
+        assert_eq!(first.device_id, second.device_id);
+        assert_eq!(first.profile.user_agent, second.profile.user_agent);
+        assert!(
+            Arc::ptr_eq(&first.cookie_jar, &second.cookie_jar),
+            "cookie jar must survive between fetches so the VK session persists"
+        );
+    }
+
+    #[test]
+    fn legacy_identity_survives_a_successful_fetch() {
+        let auth = test_auth();
+        let before = auth.legacy_identity("hash-a");
+        auth.note_fetch_success("hash-a");
+        let after = auth.legacy_identity("hash-a");
+        assert_eq!(before.device_id, after.device_id);
+        assert!(Arc::ptr_eq(&before.cookie_jar, &after.cookie_jar));
+    }
+
+    #[test]
+    fn legacy_identity_differs_between_hashes() {
+        let auth = test_auth();
+        let first = auth.legacy_identity("hash-a");
+        let second = auth.legacy_identity("hash-b");
+        assert_ne!(first.device_id, second.device_id);
+        assert!(!Arc::ptr_eq(&first.cookie_jar, &second.cookie_jar));
+    }
+
+    #[test]
+    fn legacy_identity_cache_is_bounded_and_evicts_the_oldest() {
+        let auth = test_auth();
+        for index in 0..MAX_LEGACY_IDENTITIES {
+            auth.legacy_identity(&format!("hash-{index}"));
+        }
+        auth.legacy_identity("hash-new");
+        {
+            let identities = lock_unpoisoned(&auth.legacy_identities);
+            assert_eq!(identities.len(), MAX_LEGACY_IDENTITIES);
+            assert!(
+                !identities.contains_key("hash-0"),
+                "the oldest identity must be evicted"
+            );
+            assert!(identities.contains_key("hash-1"));
+            assert!(identities.contains_key("hash-new"));
+        }
+        // Reuse must not grow the cache or re-create an identity.
+        let reused = auth.legacy_identity("hash-1");
+        auth.legacy_identity("hash-1");
+        let identities = lock_unpoisoned(&auth.legacy_identities);
+        assert_eq!(identities.len(), MAX_LEGACY_IDENTITIES);
+        assert_eq!(identities["hash-1"].device_id, reused.device_id);
+    }
+
+    #[test]
+    fn solve_progress_is_reported_once_per_fetch() {
+        let auth = test_auth();
+        auth.begin_credential_fetch("hash-a");
+        assert!(!auth.take_solve_progress("hash-a"));
+        auth.mark_solve_progress("hash-a");
+        assert!(auth.take_solve_progress("hash-a"));
+        assert!(!auth.take_solve_progress("hash-a"));
+        auth.mark_solve_progress("hash-a");
+        auth.begin_credential_fetch("hash-a");
+        assert!(
+            !auth.take_solve_progress("hash-a"),
+            "a new fetch must start without progress from the previous one"
+        );
+    }
+
+    #[test]
+    fn credential_timeout_is_not_classified_as_a_network_error() {
+        let error: anyhow::Error = CredentialTimeout {
+            limit: Duration::from_secs(240),
+        }
+        .into();
+        assert!(
+            !is_network_or_dns_error(&error),
+            "CredentialTimeout must reach the stall counter, not the network path: {error:#}"
+        );
+        assert!(!error.to_string().to_ascii_lowercase().contains("timeout"));
+        assert!(!error.to_string().to_ascii_lowercase().contains("timed out"));
+        assert!(!error.to_string().contains("тайм-аут"));
     }
 
     #[test]

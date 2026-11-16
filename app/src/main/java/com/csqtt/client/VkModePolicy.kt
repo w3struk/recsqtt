@@ -59,10 +59,19 @@ internal fun vkAuthModeForHashMode(requestedHashMode: String, currentAuthMode: S
 internal fun shouldReplaceUnavailableVkHash(hashMode: String): Boolean =
     hashMode != CsqttConstants.VkAutoHash.MODE_MANUAL
 
+/**
+ * Стоит ли записывать хеш в `Invalid` после `CALL_UNAVAILABLE`.
+ *
+ * Код 0 — это вердикт клиента («застой: не смогли добыть credential»), а не VK:
+ * он приходит после таймаутов и исчерпанного бюджета капчи, в том числе когда
+ * живой хеш просто ждал медленного пользователя. Такой вердикт не должен
+ * оседать в настройках, иначе живая ссылка блокируется до ревалидации.
+ */
 internal fun shouldPersistUnavailableVkHash(
     hashMode: String,
     newlyUnavailable: Boolean,
-): Boolean = newlyUnavailable && !shouldReplaceUnavailableVkHash(hashMode)
+    code: Int,
+): Boolean = code != 0 && newlyUnavailable && !shouldReplaceUnavailableVkHash(hashMode)
 
 internal fun shouldConfirmAutoJsMode(
     currentMode: String,
