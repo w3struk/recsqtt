@@ -87,6 +87,8 @@ struct SettingsRequest {
     #[serde(default)]
     vk_token: Option<String>,
     #[serde(default)]
+    vk_token_user_id: Option<String>,
+    #[serde(default)]
     vk_hashes: Option<String>,
 }
 
@@ -454,6 +456,7 @@ fn make_client_link(
     vk_hashes: &str,
     vk_token: bool,
     shared_token: &str,
+    shared_user_id: &str,
 ) -> String {
     let mut payload = format!(
         "connect?v=2&host={}&peer={}",
@@ -481,6 +484,12 @@ fn make_client_link(
     } else if vk_token && !shared_token.is_empty() {
         payload.push_str("&token=");
         payload.push_str(&url_encode(shared_token));
+        // `user_id` only ever accompanies `token`; an empty id is a degradation
+        // (the client falls back to the token fingerprint), not an error.
+        if !shared_user_id.is_empty() {
+            payload.push_str("&user_id=");
+            payload.push_str(&url_encode(shared_user_id));
+        }
     }
     encrypt_csqtt_link(&payload)
 }
@@ -492,6 +501,7 @@ fn make_entry_link(
     password: &str,
     entry: &model::PasswordEntry,
     shared_token: &str,
+    shared_user_id: &str,
 ) -> String {
     make_client_link(
         host,
@@ -500,6 +510,7 @@ fn make_entry_link(
         &entry.vk_hashes,
         entry.vk_token_enabled,
         shared_token,
+        shared_user_id,
     )
 }
 
@@ -1282,6 +1293,7 @@ async fn settings_get(State(state): State<WebState>) -> impl IntoResponse {
         "dns_secondary": secondary,
         "auto_restart_interval_hours": db.auto_restart_interval_hours(),
         "vk_token": db.vk_access_token,
+        "vk_token_user_id": db.vk_access_token_user_id,
         "vk_hashes": vk_hashes,
         "peer_port": state.app.listen.port()
     }))
@@ -1330,6 +1342,13 @@ async fn settings_post(
         },
         None => None,
     };
+    let requested_vk_access_token_user_id = match request.vk_token_user_id.as_deref() {
+        Some(raw) => match normalize_vk_user_id(raw) {
+            Ok(user_id) => Some(user_id),
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        },
+        None => None,
+    };
     let requested_vk_hashes = match request.vk_hashes {
         Some(raw) => match normalize_client_vk_hashes(&raw) {
             Ok(hashes) => Some(hashes),
@@ -1352,6 +1371,9 @@ async fn settings_post(
         }
         if let Some(token) = requested_vk_access_token {
             db.vk_access_token = token;
+        }
+        if let Some(user_id) = requested_vk_access_token_user_id {
+            db.vk_access_token_user_id = user_id.unwrap_or_default();
         }
         if let Some(hashes) = requested_vk_hashes {
             db.vk_hashes = hashes;
@@ -1526,6 +1548,8 @@ async fn clients_get(
             } else {
                 entry.dtls_port
             };
+            let (effective_token, effective_user_id) =
+                effective_vk_credentials(&entry.group_id, &db);
             let (active_sessions, live) = live_presence(&state.app.sessions, password);
             let (last_online, _) = protocol::presence_view(entry.last_online, live, current);
             ClientInfo {
@@ -1553,7 +1577,8 @@ async fn clients_get(
                     client_peer_port,
                     password,
                     entry,
-                    &db.vk_access_token,
+                    effective_token,
+                    effective_user_id,
                 ),
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
@@ -1598,11 +1623,7 @@ async fn group_clients_get(
     }
     let host = resolve_client_host(&headers, &state).await;
     let current = now();
-    let effective_vk_token = db
-        .groups
-        .get(&id)
-        .and_then(|g| g.vk_token.as_deref())
-        .unwrap_or(&db.vk_access_token);
+    let (effective_vk_token, effective_vk_user_id) = effective_vk_credentials(&id, &db);
     let list: Vec<ClientInfo> = db
         .passwords
         .iter()
@@ -1639,7 +1660,14 @@ async fn group_clients_get(
                 local_port: entry.local_port,
                 group_id: entry.group_id.clone(),
                 routing_rule_id: entry.routing_rule_id.clone(),
-                link: make_entry_link(&host, client_peer_port, password, entry, effective_vk_token),
+                link: make_entry_link(
+                    &host,
+                    client_peer_port,
+                    password,
+                    entry,
+                    effective_vk_token,
+                    effective_vk_user_id,
+                ),
                 sub_uuid: entry.sub_uuid.clone(),
                 workers: entry.workers,
             }
@@ -1675,6 +1703,31 @@ fn normalize_vk_access_token(raw: &str) -> Result<String, &'static str> {
         return Err("VK token is too long or contains whitespace");
     }
     Ok(token.to_owned())
+}
+
+/// A VK user id is entered by hand in the panel: digits only, 1 to 20 of them.
+/// Empty input is valid and means "not set"; it is not an error.
+fn normalize_vk_user_id(raw: &str) -> Result<Option<String>, &'static str> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 20 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("VK user id must be 1 to 20 digits");
+    }
+    Ok(Some(value.to_owned()))
+}
+
+/// Picks the pair (token, user id) that a link must carry for a group. Mirrors
+/// the group-token-else-global rule exactly, so a group token never inherits
+/// the global user id: that would point the calls at the wrong owner.
+fn effective_vk_credentials<'a>(group_id: &str, db: &'a model::Database) -> (&'a str, &'a str) {
+    if let Some(group) = db.groups.get(group_id)
+        && let Some(token) = group.vk_token.as_deref()
+    {
+        return (token, group.vk_token_user_id.as_deref().unwrap_or_default());
+    }
+    (&db.vk_access_token, db.vk_access_token_user_id.as_str())
 }
 
 async fn clients_create(
@@ -1787,13 +1840,15 @@ async fn clients_create(
                 workers: validated_workers,
             },
         );
+        let (effective_token, effective_user_id) = effective_vk_credentials(&group_id, &db);
         let link = make_client_link(
             &host,
             peer_port,
             &password,
             &vk_hashes,
             request.vk_token,
-            &db.vk_access_token,
+            effective_token,
+            effective_user_id,
         );
         let revision = state.app.db_persistence.submit(db.clone());
         (password, expires, revision, link, sub_uuid)
@@ -1992,6 +2047,7 @@ async fn client_get(
         } else {
             entry.dtls_port
         };
+        let (effective_token, effective_user_id) = effective_vk_credentials(&entry.group_id, &db);
         let info = ClientInfo {
             password: password.clone(),
             down: entry.down_bytes,
@@ -2021,7 +2077,8 @@ async fn client_get(
                 client_peer_port,
                 &password,
                 entry,
-                &db.vk_access_token,
+                effective_token,
+                effective_user_id,
             ),
             sub_uuid: entry.sub_uuid.clone(),
             workers: entry.workers,
@@ -2125,6 +2182,8 @@ async fn api_links_get(State(state): State<WebState>, headers: HeaderMap) -> imp
             } else {
                 entry.dtls_port
             };
+            let (effective_token, effective_user_id) =
+                effective_vk_credentials(&entry.group_id, &db);
             ClientLinkItem {
                 name: entry.name.clone(),
                 password: password.clone(),
@@ -2133,7 +2192,8 @@ async fn api_links_get(State(state): State<WebState>, headers: HeaderMap) -> imp
                     client_peer_port,
                     password,
                     entry,
-                    &db.vk_access_token,
+                    effective_token,
+                    effective_user_id,
                 ),
                 expires: entry.expires_at,
                 peer_port: client_peer_port,
@@ -2149,6 +2209,8 @@ async fn api_links_get(State(state): State<WebState>, headers: HeaderMap) -> imp
 struct BatchVkRequest {
     #[serde(default)]
     vk_token: Option<String>,
+    #[serde(default)]
+    vk_token_user_id: Option<String>,
     #[serde(default)]
     vk_hashes: Option<String>,
     #[serde(default)]
@@ -2166,6 +2228,13 @@ async fn api_links_batch_vk(
         },
         None => None,
     };
+    let token_user_id = match request.vk_token_user_id.as_deref() {
+        Some(raw) => match normalize_vk_user_id(raw) {
+            Ok(user_id) => Some(user_id),
+            Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        },
+        None => None,
+    };
     let hashes = match request.vk_hashes {
         Some(h) => match normalize_client_vk_hashes(&h) {
             Ok(v) => Some(v),
@@ -2179,6 +2248,9 @@ async fn api_links_batch_vk(
         let mut db = state.app.db.write().await;
         if let Some(ref t) = token {
             db.vk_access_token = t.clone();
+        }
+        if let Some(user_id) = token_user_id {
+            db.vk_access_token_user_id = user_id.unwrap_or_default();
         }
         if let Some(ref h) = hashes {
             db.vk_hashes = h.clone();
@@ -2343,6 +2415,8 @@ struct ServerExportData {
     dns_provider: String,
     auto_restart_interval_hours: Option<u8>,
     vk_access_token: String,
+    #[serde(default)]
+    vk_access_token_user_id: String,
     vk_hashes: String,
     groups: std::collections::BTreeMap<String, ClientGroup>,
     routing_rules: std::collections::BTreeMap<String, RoutingRule>,
@@ -2365,6 +2439,8 @@ struct ServerImportConfig {
     auto_restart_interval_hours: Option<u8>,
     #[serde(default)]
     vk_access_token: String,
+    #[serde(default)]
+    vk_access_token_user_id: String,
     #[serde(default)]
     vk_hashes: String,
     #[serde(default)]
@@ -2440,6 +2516,7 @@ async fn api_export_get(State(state): State<WebState>) -> impl IntoResponse {
         dns_provider: db.dns_provider.clone(),
         auto_restart_interval_hours: db.auto_restart_interval_hours,
         vk_access_token: db.vk_access_token.clone(),
+        vk_access_token_user_id: db.vk_access_token_user_id.clone(),
         vk_hashes: db.vk_hashes.clone(),
         groups: db.groups.clone(),
         routing_rules: db.routing_rules.clone(),
@@ -2558,6 +2635,9 @@ async fn api_import_post(
                 if !export.vk_access_token.is_empty() {
                     db.vk_access_token = export.vk_access_token;
                 }
+                if !export.vk_access_token_user_id.is_empty() {
+                    db.vk_access_token_user_id = export.vk_access_token_user_id;
+                }
                 if !export.vk_hashes.is_empty() {
                     db.vk_hashes = export.vk_hashes;
                 }
@@ -2591,6 +2671,7 @@ struct GroupInfo {
     name: String,
     routing_rule_id: String,
     sub_uuid: String,
+    vk_token_user_id: String,
     member_count: usize,
     up: i64,
     down: i64,
@@ -2618,6 +2699,7 @@ async fn groups_get(State(state): State<WebState>) -> Response {
             name: group.name.clone(),
             routing_rule_id: group.routing_rule_id.clone(),
             sub_uuid: group.sub_uuid.clone(),
+            vk_token_user_id: group.vk_token_user_id.clone().unwrap_or_default(),
             member_count,
             up,
             down,
@@ -2630,6 +2712,8 @@ async fn groups_get(State(state): State<WebState>) -> Response {
 #[derive(Deserialize)]
 struct CreateGroupRequest {
     name: String,
+    #[serde(default)]
+    vk_token_user_id: Option<String>,
 }
 
 async fn groups_create(
@@ -2640,6 +2724,13 @@ async fn groups_create(
     if name.is_empty() || name.len() > 64 {
         return (StatusCode::BAD_REQUEST, "invalid group name").into_response();
     }
+    let vk_token_user_id = match request.vk_token_user_id.as_deref() {
+        Some(raw) => match normalize_vk_user_id(raw) {
+            Ok(user_id) => user_id,
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        },
+        None => None,
+    };
     let id = format!("grp_{}", random_token(8));
     let group = ClientGroup {
         id: id.clone(),
@@ -2648,6 +2739,7 @@ async fn groups_create(
         sub_uuid: model::random_uuid_v4(),
         workers: None,
         vk_token: None,
+        vk_token_user_id,
         vk_hashes: None,
     };
     let revision = {
@@ -2665,6 +2757,8 @@ async fn groups_create(
 struct UpdateGroupRequest {
     name: Option<String>,
     routing_rule_id: Option<String>,
+    #[serde(default)]
+    vk_token_user_id: Option<String>,
 }
 
 async fn groups_update(
@@ -2672,6 +2766,13 @@ async fn groups_update(
     Path(id): Path<String>,
     Json(request): Json<UpdateGroupRequest>,
 ) -> Response {
+    let requested_vk_token_user_id = match request.vk_token_user_id.as_deref() {
+        Some(raw) => match normalize_vk_user_id(raw) {
+            Ok(user_id) => Some(user_id),
+            Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+        },
+        None => None,
+    };
     let (revision, affected) = {
         let mut db = state.app.db.write().await;
         // Снимок «до» строится по ПРЕЖНЕМУ значению привязки: после мутации
@@ -2708,6 +2809,9 @@ async fn groups_update(
             }
             if let Some(r_id) = request.routing_rule_id {
                 group.routing_rule_id = r_id;
+            }
+            if let Some(user_id) = requested_vk_token_user_id {
+                group.vk_token_user_id = user_id;
             }
         }
         // Union «до» и «после»: участники группы попадают в оба набора (их
@@ -2835,15 +2939,15 @@ async fn client_sub_page(
     } else {
         entry.dtls_port
     };
-    let effective_vk_token = if !entry.group_id.is_empty() {
-        db.groups
-            .get(&entry.group_id)
-            .and_then(|g| g.vk_token.as_deref())
-            .unwrap_or(&db.vk_access_token)
-    } else {
-        &db.vk_access_token
-    };
-    let link = make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+    let (effective_vk_token, effective_vk_user_id) = effective_vk_credentials(&entry.group_id, &db);
+    let link = make_entry_link(
+        &host,
+        client_peer_port,
+        password,
+        entry,
+        effective_vk_token,
+        effective_vk_user_id,
+    );
     let client_name = if entry.name.is_empty() {
         "Клиент".to_string()
     } else {
@@ -2883,15 +2987,15 @@ async fn client_sub_json(
     } else {
         entry.dtls_port
     };
-    let effective_vk_token = if !entry.group_id.is_empty() {
-        db.groups
-            .get(&entry.group_id)
-            .and_then(|g| g.vk_token.as_deref())
-            .unwrap_or(&db.vk_access_token)
-    } else {
-        &db.vk_access_token
-    };
-    let link = make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+    let (effective_vk_token, effective_vk_user_id) = effective_vk_credentials(&entry.group_id, &db);
+    let link = make_entry_link(
+        &host,
+        client_peer_port,
+        password,
+        entry,
+        effective_vk_token,
+        effective_vk_user_id,
+    );
     let client_name = if entry.name.is_empty() {
         "Клиент".to_string()
     } else {
@@ -2942,7 +3046,7 @@ async fn group_sub_page(
     };
 
     let host = resolve_client_host(&headers, &state).await;
-    let effective_vk_token = group.vk_token.as_deref().unwrap_or(&db.vk_access_token);
+    let (effective_vk_token, effective_vk_user_id) = effective_vk_credentials(&group.id, &db);
     let mut items = Vec::new();
     for (password, entry) in &db.passwords {
         if entry.group_id == group.id {
@@ -2951,8 +3055,14 @@ async fn group_sub_page(
             } else {
                 entry.dtls_port
             };
-            let link =
-                make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+            let link = make_entry_link(
+                &host,
+                client_peer_port,
+                password,
+                entry,
+                effective_vk_token,
+                effective_vk_user_id,
+            );
             let name = if entry.name.is_empty() {
                 "Клиент".to_string()
             } else {
@@ -2997,7 +3107,7 @@ async fn group_sub_json(
     };
 
     let host = resolve_client_host(&headers, &state).await;
-    let effective_vk_token = group.vk_token.as_deref().unwrap_or(&db.vk_access_token);
+    let (effective_vk_token, effective_vk_user_id) = effective_vk_credentials(&group.id, &db);
     let mut items = Vec::new();
     for (password, entry) in &db.passwords {
         if entry.group_id == group.id {
@@ -3006,8 +3116,14 @@ async fn group_sub_json(
             } else {
                 entry.dtls_port
             };
-            let link =
-                make_entry_link(&host, client_peer_port, password, entry, effective_vk_token);
+            let link = make_entry_link(
+                &host,
+                client_peer_port,
+                password,
+                entry,
+                effective_vk_token,
+                effective_vk_user_id,
+            );
             let name = if entry.name.is_empty() {
                 "Клиент".to_string()
             } else {
@@ -6388,6 +6504,17 @@ const PANEL_HTML_TEMPLATE: &str = r##"
             background: var(--surface);
             color: var(--text-main);
             box-sizing: border-box;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .hub-field-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent);
+        }
+        .hub-field-input:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            background: var(--surface-hover);
         }
         .hub-field-actions {
             display: flex;
@@ -6427,6 +6554,60 @@ const PANEL_HTML_TEMPLATE: &str = r##"
             background: color-mix(in srgb, var(--danger) 10%, transparent) !important;
             border-color: var(--danger) !important;
             color: #dc2626 !important;
+        }
+        .hub-token-subrow {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+        }
+        .hub-user-id-wrap {
+            flex: 0 0 240px;
+            max-width: 240px;
+        }
+        .hub-subfield-label {
+            display: block;
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .hub-user-id-input {
+            width: 100%;
+        }
+        .hub-subfield-hint {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.45;
+            padding-bottom: 8px;
+            flex: 1;
+            min-width: 0;
+        }
+        .vk-token-paired-card {
+            background: var(--bg-color);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .vk-token-paired-card .input-group input {
+            background: var(--surface);
+        }
+        .vk-token-companion-field {
+            padding-top: 14px;
+            border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+        }
+        .field-hint {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.45;
+            margin-top: 6px;
         }
         .hub-bulk-footer {
             display: flex;
@@ -6505,6 +6686,22 @@ const PANEL_HTML_TEMPLATE: &str = r##"
             .hub-field-row.hub-workers-row .hub-field-actions {
                 flex: 1;
                 min-width: 0;
+            }
+            .hub-token-subrow {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 6px;
+                padding-top: 8px;
+                margin-top: 8px;
+            }
+            .hub-user-id-wrap {
+                flex: none;
+                max-width: 100%;
+                width: 100%;
+            }
+            .hub-subfield-hint {
+                padding-bottom: 0;
+                line-height: 1.4;
             }
             .hub-bulk-footer {
                 flex-direction: column;
@@ -6786,6 +6983,7 @@ const PANEL_HTML_TEMPLATE: &str = r##"
 
         .toast-success { border-left: 3px solid var(--success); }
         .toast-error { border-left: 3px solid var(--danger); }
+        .toast-warning { border-left: 3px solid #f59e0b; }
 
         .toast-progress {
             position: absolute; bottom: 0; left: 0; height: 3px; width: 100%;
@@ -7348,9 +7546,18 @@ const PANEL_HTML_TEMPLATE: &str = r##"
     <dialog id="vkTokenSettingsDlg">
         <h2 style="font-size: 20px; margin-bottom: 16px;">Настройка VK токенов</h2>
         <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin: 0 0 18px;">Если сохранить VK токен здесь, все reCSQTT-ссылки с включённой функцией VK токена будут автоматически использовать этот общий токен.</p>
-        <div class="input-group" style="margin-bottom: 0;">
-            <label for="vkTokenSettingsInput">Бессрочный VK токен</label>
-            <input id="vkTokenSettingsInput" type="password" maxlength="4096" autocomplete="off" spellcheck="false">
+        <div class="vk-token-paired-card">
+            <div class="input-group" style="margin-bottom: 0;">
+                <label for="vkTokenSettingsInput">Бессрочный VK токен</label>
+                <input id="vkTokenSettingsInput" type="password" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="Вставьте VK токен...">
+            </div>
+            <div class="vk-token-companion-field">
+                <div class="input-group" style="margin-bottom: 0;">
+                    <label for="vkTokenUserIdInput">VK user id (рекомендуется)</label>
+                    <input id="vkTokenUserIdInput" inputmode="numeric" maxlength="20" autocomplete="off" spellcheck="false" placeholder="например, 123456789">
+                    <div class="field-hint">Без него владелец звонков определяется по отпечатку токена и теряется при его перевыпуске.</div>
+                </div>
+            </div>
         </div>
         <div class="dlg-actions" style="margin-top: 20px;">
             <button class="btn btn-ghost" style="color: var(--danger);" onclick="clearVkTokenSettings()">Очистить</button>
@@ -7688,6 +7895,13 @@ const PANEL_HTML_TEMPLATE: &str = r##"
                         <button class="btn btn-primary hub-btn-apply" onclick="applyHubVkTokenDirect()"><span class="hide-mobile">Применить VK токен</span><span class="show-mobile">Применить токен</span></button>
                         <button class="btn btn-ghost hub-btn-clear" onclick="promptBatchAction('clear-token')"><span class="hide-mobile">Очистить токен</span><span class="show-mobile">Очистить</span></button>
                     </div>
+                </div>
+                <div class="hub-token-subrow">
+                    <div class="hub-user-id-wrap">
+                        <label for="hubVkUserIdInput" class="hub-subfield-label">VK user id (рекомендуется)</label>
+                        <input id="hubVkUserIdInput" class="hub-field-input hub-user-id-input" inputmode="numeric" maxlength="20" placeholder="например, 123456789" onchange="autoSaveHubVkUserId()" onblur="autoSaveHubVkUserId()">
+                    </div>
+                    <div class="hub-subfield-hint">Без него владелец звонков определяется по отпечатку токена и теряется при его перевыпуске.</div>
                 </div>
             </div>
 
@@ -8713,13 +8927,19 @@ const PANEL_HTML_TEMPLATE: &str = r##"
                 }
             }
             const toast = document.createElement('div');
-            toast.className = 'toast ' + (type === 'error' ? 'toast-error' : 'toast-success');
+            const isError = type === 'error' || type === true;
+            const isWarning = type === 'warning';
+            toast.className = 'toast ' + (isError ? 'toast-error' : isWarning ? 'toast-warning' : 'toast-success');
             const icon = document.createElement('div');
             icon.className = 'toast-icon';
-            if (type === 'error') {
+            if (isError) {
                 icon.style.color = 'var(--danger)';
                 icon.style.background = 'color-mix(in srgb, var(--danger) 15%, transparent)';
                 icon.textContent = '✗';
+            } else if (isWarning) {
+                icon.style.color = '#f59e0b';
+                icon.style.background = 'rgba(245, 158, 11, 0.15)';
+                icon.textContent = '⚠';
             } else {
                 icon.style.color = 'var(--primary)';
                 icon.style.background = 'var(--icon-bg)';
@@ -8729,7 +8949,8 @@ const PANEL_HTML_TEMPLATE: &str = r##"
             message.textContent = String(text);
             toast.append(icon, message);
             if (container) container.appendChild(toast);
-            setTimeout(() => { toast.classList.add('hide'); setTimeout(() => toast.remove(), 300); }, 3000);
+            const duration = isWarning ? 4000 : 3000;
+            setTimeout(() => { toast.classList.add('hide'); setTimeout(() => toast.remove(), 300); }, duration);
         }
 
         function showConfirm(title, message, btnText, btnClass, callback, cancelCallback) {
@@ -8825,6 +9046,7 @@ const PANEL_HTML_TEMPLATE: &str = r##"
         let savedManualDns = '';
         let savedAutoRestartInterval = 0;
         let sharedVkToken = '';
+        let sharedVkUserId = '';
         let sharedVkHashes = '';
 
         function syncDnsControls() {
@@ -8855,6 +9077,7 @@ const PANEL_HTML_TEMPLATE: &str = r##"
                 ? Number(x.auto_restart_interval_hours)
                 : 0;
             sharedVkToken = x.vk_token || '';
+            sharedVkUserId = x.vk_token_user_id || '';
             sharedVkHashes = x.vk_hashes || '';
             document.getElementById('dns_provider').value = savedDnsProvider;
             document.getElementById('dns_manual').value = savedManualDns;
@@ -8866,27 +9089,44 @@ const PANEL_HTML_TEMPLATE: &str = r##"
 
         function openVkTokenSettingsDlg() {
             document.getElementById('vkTokenSettingsInput').value = sharedVkToken;
+            document.getElementById('vkTokenUserIdInput').value = sharedVkUserId;
             document.getElementById('vkTokenSettingsDlg').showModal();
         }
 
         async function saveVkTokenSettings(clear = false) {
             const input = document.getElementById('vkTokenSettingsInput');
+            const userIdInput = document.getElementById('vkTokenUserIdInput');
             const token = clear ? '' : input.value.trim();
+            const userId = clear ? '' : userIdInput.value.trim();
             if (token && (/\s/.test(token) || token.length > 4096)) {
                 showToast('VK токен не должен содержать пробелы и должен быть короче 4097 символов', 'error');
                 return;
             }
+            if (userId && !/^[0-9]{1,20}$/.test(userId)) {
+                showToast('VK user id: только цифры, до 20 символов', 'error');
+                return;
+            }
+            if (userId && !token) {
+                showToast('VK user id имеет смысл только вместе с токеном', 'error');
+                return;
+            }
             const response = await api('/api/settings', {
-                method: 'POST', body: JSON.stringify({ vk_token: token })
+                method: 'POST', body: JSON.stringify({ vk_token: token, vk_token_user_id: userId })
             });
             if (!response.ok) {
                 showToast(await response.text(), 'error');
                 return;
             }
             sharedVkToken = token;
+            sharedVkUserId = userId;
             input.value = token;
+            userIdInput.value = userId;
             document.getElementById('vkTokenSettingsDlg').close();
-            showToast(token ? 'Общий VK токен сохранён' : 'Общий VK токен очищен');
+            if (token && !userId) {
+                showToast('Токен сохранён без user id — звонки потеряют владельца при перевыпуске', 'warning');
+            } else {
+                showToast(token ? 'Общий VK токен сохранён' : 'Общий VK токен очищен');
+            }
         }
 
         function clearVkTokenSettings() {
@@ -10023,6 +10263,7 @@ const PANEL_HTML_TEMPLATE: &str = r##"
                 filtered.dns_provider = data.dns_provider;
                 filtered.auto_restart_interval_hours = data.auto_restart_interval_hours;
                 filtered.vk_access_token = data.vk_access_token;
+                filtered.vk_access_token_user_id = data.vk_access_token_user_id;
                 filtered.vk_hashes = data.vk_hashes;
             }
             return filtered;
@@ -10509,6 +10750,8 @@ const PANEL_HTML_TEMPLATE: &str = r##"
 
             const tokenInput = document.getElementById('hubVkTokenInput');
             if (tokenInput) tokenInput.value = sharedVkToken || '';
+            const userIdInput = document.getElementById('hubVkUserIdInput');
+            if (userIdInput) userIdInput.value = sharedVkUserId || '';
             const hashesInput = document.getElementById('hubVkHashesInput');
             if (hashesInput) hashesInput.value = sharedVkHashes || '';
             const workersInput = document.getElementById('hubWorkersInput');
@@ -10532,6 +10775,26 @@ const PANEL_HTML_TEMPLATE: &str = r##"
             if (r.ok) {
                 sharedVkToken = token;
                 renderHubClientsList();
+                return true;
+            }
+            return false;
+        }
+
+        async function autoSaveHubVkUserId() {
+            const input = document.getElementById('hubVkUserIdInput');
+            const userId = input ? input.value.trim() : '';
+            if (userId && !/^[0-9]{1,20}$/.test(userId)) {
+                showToast('VK user id: только цифры, до 20 символов', 'error');
+                if (input) input.value = sharedVkUserId || '';
+                return false;
+            }
+            if (userId === sharedVkUserId) return true;
+            const r = await api('/api/settings', {
+                method: 'POST',
+                body: JSON.stringify({ vk_token_user_id: userId })
+            });
+            if (r.ok) {
+                sharedVkUserId = userId;
                 return true;
             }
             return false;
@@ -11265,11 +11528,12 @@ mod tests {
         LOGIN_HTML, MAX_CLIENT_NAME_BYTES, PANEL_HTML, PWA_ICON_192_PNG, PWA_ICON_512_PNG,
         PWA_MANIFEST, PWA_SERVICE_WORKER, THEME_TOKENS, batch_group_affected_passwords,
         count_active_sessions, decrypt_csqtt_link, deploy_dns_profile_or_yandex,
-        dns_provider_by_id, dns_provider_id, encrypt_csqtt_link, group_affected_passwords,
-        make_client_link, manual_dns, merge_affected_passwords, normalize_client_vk_hashes,
-        normalize_vk_access_token, process_memory, process_memory_rollup, provider_dns,
-        routing_rule_validation_response, rule_affected_passwords, validate_client_name,
-        validate_proxy_profile_name, validate_workers,
+        dns_provider_by_id, dns_provider_id, effective_vk_credentials, encrypt_csqtt_link,
+        group_affected_passwords, make_client_link, manual_dns, merge_affected_passwords,
+        normalize_client_vk_hashes, normalize_vk_access_token, normalize_vk_user_id,
+        process_memory, process_memory_rollup, provider_dns, routing_rule_validation_response,
+        rule_affected_passwords, validate_client_name, validate_proxy_profile_name,
+        validate_workers,
     };
 
     #[test]
@@ -11633,6 +11897,163 @@ mod tests {
             assert_eq!(db.passwords.len(), 1);
             assert!(!db.passwords.contains_key("InjectedOwnerPass1"));
             assert_eq!(db.dns, "1.1.1.1,1.0.0.1");
+        }
+
+        #[tokio::test]
+        async fn settings_post_saves_and_clears_vk_token_user_id() {
+            let fixture = Fixture::new(Database::default()).await;
+            let response = fixture
+                .request(
+                    "POST",
+                    "/api/settings",
+                    br#"{"vk_token":"vk1.token","vk_token_user_id":"123456"}"#.to_vec(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            {
+                let db = fixture.app.db.read().await;
+                assert_eq!(db.vk_access_token, "vk1.token");
+                assert_eq!(db.vk_access_token_user_id, "123456");
+            }
+
+            let response = fixture.request("GET", "/api/settings", Vec::new()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let settings: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(settings["vk_token"], "vk1.token");
+            assert_eq!(settings["vk_token_user_id"], "123456");
+
+            // an explicitly empty id clears the stored value but keeps the token
+            let response = fixture
+                .request(
+                    "POST",
+                    "/api/settings",
+                    br#"{"vk_token_user_id":""}"#.to_vec(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            {
+                let db = fixture.app.db.read().await;
+                assert_eq!(db.vk_access_token, "vk1.token");
+                assert_eq!(db.vk_access_token_user_id, "");
+            }
+        }
+
+        #[tokio::test]
+        async fn invalid_vk_user_id_is_rejected_without_partial_write() {
+            let fixture = Fixture::new(Database::default()).await;
+            let response = fixture
+                .request(
+                    "POST",
+                    "/api/settings",
+                    br#"{"vk_token":"vk1.old","vk_token_user_id":"777"}"#.to_vec(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let before = fixture.snapshots().await;
+
+            let response = fixture
+                .request(
+                    "POST",
+                    "/api/settings",
+                    br#"{"vk_token":"vk1.new","vk_token_user_id":"12a45"}"#.to_vec(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(fixture.snapshots().await, before);
+            let db = fixture.app.db.read().await;
+            assert_eq!(db.vk_access_token, "vk1.old");
+            assert_eq!(db.vk_access_token_user_id, "777");
+        }
+
+        #[tokio::test]
+        async fn group_create_and_update_persist_vk_token_user_id() {
+            let fixture = Fixture::new(Database::default()).await;
+            let response = fixture
+                .request(
+                    "POST",
+                    "/api/groups",
+                    br#"{"name":"Group","vk_token_user_id":"111222"}"#.to_vec(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let group: Value = serde_json::from_slice(&body).unwrap();
+            let group_id = group["id"].as_str().unwrap().to_owned();
+            assert_eq!(group["vk_token_user_id"], "111222");
+
+            let response = fixture.request("GET", "/api/groups", Vec::new()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let list: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(list[0]["vk_token_user_id"], "111222");
+
+            let response = fixture
+                .request(
+                    "PUT",
+                    &format!("/api/groups/{group_id}"),
+                    br#"{"vk_token_user_id":"333444"}"#.to_vec(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                fixture.app.db.read().await.groups[&group_id]
+                    .vk_token_user_id
+                    .as_deref(),
+                Some("333444")
+            );
+
+            let response = fixture
+                .request(
+                    "PUT",
+                    &format!("/api/groups/{group_id}"),
+                    br#"{"vk_token_user_id":"nope"}"#.to_vec(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                fixture.app.db.read().await.groups[&group_id]
+                    .vk_token_user_id
+                    .as_deref(),
+                Some("333444")
+            );
+        }
+
+        #[tokio::test]
+        async fn export_and_import_preserve_vk_user_ids() {
+            let mut db = Database {
+                vk_access_token: "vk1.global".to_owned(),
+                vk_access_token_user_id: "100200".to_owned(),
+                ..Database::default()
+            };
+            db.groups.insert(
+                "g1".to_owned(),
+                model::ClientGroup {
+                    id: "g1".to_owned(),
+                    name: "Group".to_owned(),
+                    vk_token: Some("vk1.group".to_owned()),
+                    vk_token_user_id: Some("300400".to_owned()),
+                    ..Default::default()
+                },
+            );
+            let source = Fixture::new(db).await;
+            let export = source.export().await;
+
+            let target = Fixture::new(Database::default()).await;
+            let response = target.request("POST", "/api/import", export).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            {
+                let db = target.app.db.read().await;
+                assert_eq!(db.vk_access_token, "vk1.global");
+                assert_eq!(db.vk_access_token_user_id, "100200");
+                assert_eq!(db.groups["g1"].vk_token_user_id.as_deref(), Some("300400"));
+            }
+            let persisted = model::load_database(&target.app.config_dir).unwrap();
+            assert_eq!(persisted.vk_access_token_user_id, "100200");
+            assert_eq!(
+                persisted.groups["g1"].vk_token_user_id.as_deref(),
+                Some("300400")
+            );
         }
 
         #[tokio::test]
@@ -12449,6 +12870,71 @@ mod tests {
     }
 
     #[test]
+    fn vk_user_id_accepts_digits_and_normalizes_empty_to_none() {
+        assert_eq!(
+            normalize_vk_user_id("  123456  ").unwrap().as_deref(),
+            Some("123456")
+        );
+        assert_eq!(normalize_vk_user_id("").unwrap(), None);
+        assert_eq!(normalize_vk_user_id("   ").unwrap(), None);
+        let twenty = "9".repeat(20);
+        assert_eq!(
+            normalize_vk_user_id(&twenty).unwrap().as_deref(),
+            Some(twenty.as_str())
+        );
+        assert!(normalize_vk_user_id("12a45").is_err());
+        assert!(normalize_vk_user_id("-123").is_err());
+        assert!(normalize_vk_user_id("12 345").is_err());
+        assert!(normalize_vk_user_id(&"9".repeat(21)).is_err());
+    }
+
+    #[test]
+    fn effective_vk_credentials_pair_group_token_with_its_own_user_id() {
+        let mut db = crate::model::Database {
+            vk_access_token: "global-token".to_owned(),
+            vk_access_token_user_id: "100".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(effective_vk_credentials("", &db), ("global-token", "100"));
+        assert_eq!(
+            effective_vk_credentials("missing", &db),
+            ("global-token", "100")
+        );
+
+        db.groups.insert(
+            "g1".to_owned(),
+            crate::model::ClientGroup {
+                id: "g1".to_owned(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(effective_vk_credentials("g1", &db), ("global-token", "100"));
+
+        db.groups.insert(
+            "g2".to_owned(),
+            crate::model::ClientGroup {
+                id: "g2".to_owned(),
+                vk_token: Some("group-token".to_owned()),
+                vk_token_user_id: Some("200".to_owned()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(effective_vk_credentials("g2", &db), ("group-token", "200"));
+
+        // A group token without its own id degrades to an empty id: inheriting the
+        // global one would name the wrong owner of the calls.
+        db.groups.insert(
+            "g3".to_owned(),
+            crate::model::ClientGroup {
+                id: "g3".to_owned(),
+                vk_token: Some("group-token-3".to_owned()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(effective_vk_credentials("g3", &db), ("group-token-3", ""));
+    }
+
+    #[test]
     fn mobile_panel_keeps_compact_labels_and_consistent_memory_value() {
         assert!(PANEL_HTML.contains("Использование памяти"));
         assert!(PANEL_HTML.contains("#ram_val { white-space: nowrap;"));
@@ -12609,7 +13095,7 @@ mod tests {
 
     #[test]
     fn make_client_link_contains_password_and_aes_roundtrip() {
-        let link = make_client_link("1.2.3.4", 46000, "abc1234567890123", "", false, "");
+        let link = make_client_link("1.2.3.4", 46000, "abc1234567890123", "", false, "", "");
         assert!(link.starts_with("csqtt://"));
         let decrypted = decrypt_csqtt_link(&link).expect("must decrypt");
         assert!(decrypted.contains("password=abc1234567890123"));
@@ -12619,11 +13105,49 @@ mod tests {
 
     #[test]
     fn owner_link_contains_owner_password_without_workers() {
-        let link = make_client_link("1.2.3.4", 46000, "ownerpass1234567", "", false, "");
+        let link = make_client_link("1.2.3.4", 46000, "ownerpass1234567", "", false, "", "");
         let decrypted = decrypt_csqtt_link(&link).expect("must decrypt");
         assert!(decrypted.contains("password=ownerpass1234567"));
         assert!(!decrypted.contains("client="));
         assert!(!decrypted.contains("&workers="));
+    }
+
+    #[test]
+    fn make_client_link_carries_user_id_only_with_token() {
+        let with_id = make_client_link("1.2.3.4", 46000, "pass1", "", true, "vk1.token", "123456");
+        let decoded = decrypt_csqtt_link(&with_id).expect("must decrypt");
+        assert!(decoded.contains("&token=vk1.token"));
+        assert!(decoded.contains("&user_id=123456"));
+        assert!(
+            decoded.find("&token=").unwrap() < decoded.find("&user_id=").unwrap(),
+            "user_id must follow token"
+        );
+
+        let without_id = make_client_link("1.2.3.4", 46000, "pass1", "", true, "vk1.token", "");
+        let decoded = decrypt_csqtt_link(&without_id).expect("must decrypt");
+        assert!(decoded.contains("&token=vk1.token"));
+        assert!(!decoded.contains("user_id="));
+
+        // A user id alone never reaches the link: the token is its precondition.
+        let without_token = make_client_link("1.2.3.4", 46000, "pass1", "", true, "", "123456");
+        let decoded = decrypt_csqtt_link(&without_token).expect("must decrypt");
+        assert!(!decoded.contains("token="));
+        assert!(!decoded.contains("user_id="));
+
+        // hashes and token are mutually exclusive, so the paired id stays out too.
+        let with_hashes = make_client_link(
+            "1.2.3.4",
+            46000,
+            "pass1",
+            "abcdef1234567890",
+            true,
+            "vk1.token",
+            "123456",
+        );
+        let decoded = decrypt_csqtt_link(&with_hashes).expect("must decrypt");
+        assert!(decoded.contains("&hashes=abcdef1234567890"));
+        assert!(!decoded.contains("token="));
+        assert!(!decoded.contains("user_id="));
     }
 
     #[test]

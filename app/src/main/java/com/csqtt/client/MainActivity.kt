@@ -123,6 +123,10 @@ class MainActivity : ComponentActivity() {
         val discardStaleUiState = UpdateLaunchGuard.consumeStaleSavedState(this)
         super.onCreate(if (discardStaleUiState) null else savedInstanceState)
 
+        lifecycleScope.launch {
+            appSettingsStore.migrateLinkCredentialsIfNeeded()
+        }
+
         importCsqttLink(intent)
 
         TunnelManager.initObservers(this)
@@ -200,28 +204,40 @@ class MainActivity : ComponentActivity() {
         if (intent?.action != Intent.ACTION_VIEW) return
         val raw = intent.dataString ?: return
         val link = parseCsqttLink(raw)
-        if (link == null) {
+        val decision = VkLinkImportPolicy.decide(raw)
+        if (link == null || decision == null) {
             showRaisedToast("Неверная ссылка reCSQTT", Toast.LENGTH_SHORT)
             return
         }
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Импорт конфигурации reCSQTT")
-            .setMessage("Хост: ${link.host}\nПорт: ${link.port}\n\nЗаменить текущую конфигурацию?")
-            .setPositiveButton("Импортировать") { _, _ ->
-                lifecycleScope.launch {
-                    // Ссылка — единственный способ задать подключение; роль всегда участник,
-                    // поэтому сообщение говорит только о факте записи.
-                    val outcome = try {
-                        appSettingsStore.saveCsqttParticipantLink(raw)
-                        LinkSaveNotice.outcomeForParticipantLink(saved = true)
-                    } catch (_: IOException) {
-                        LinkSaveNotice.outcomeForParticipantLink(saved = false)
-                    }
-                    showRaisedToast(LinkSaveNotice.configToast(outcome), Toast.LENGTH_SHORT)
-                }
+        lifecycleScope.launch {
+            val storedTokenExists = try {
+                appSettingsStore.vkAccessToken.first().isNotBlank()
+            } catch (_: IOException) {
+                false
             }
-            .setNegativeButton("Отмена", null)
-            .show()
+            val wipeWarning = if (decision.wipesStoredCredentials && storedTokenExists) {
+                "\n\nв ссылке нет токена — сохранённый доступ будет удалён"
+            } else {
+                ""
+            }
+            android.app.AlertDialog.Builder(this@MainActivity)
+                .setTitle("Импорт конфигурации reCSQTT")
+                .setMessage("Хост: ${link.host}\nПорт: ${link.port}\n\nЗаменить текущую конфигурацию?$wipeWarning")
+                .setPositiveButton("Импортировать") { _, _ ->
+                    lifecycleScope.launch {
+                        // Ссылка — единственный способ задать подключение; роль всегда участник,
+                        // поэтому сообщение говорит только о факте записи.
+                        val outcome = try {
+                            LinkSaveNotice.outcomeForParticipantLink(saved = appSettingsStore.importCsqttLink(raw))
+                        } catch (_: IOException) {
+                            LinkSaveNotice.outcomeForParticipantLink(saved = false)
+                        }
+                        showRaisedToast(LinkSaveNotice.configToast(outcome), Toast.LENGTH_SHORT)
+                    }
+                }
+                .setNegativeButton("Отмена", null)
+                .show()
+        }
     }
 
     private fun checkAndRequestNotifications() {

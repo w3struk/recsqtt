@@ -32,6 +32,11 @@ pub struct ClientGroup {
     pub workers: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vk_token: Option<String>,
+    /// VK user id paired with `vk_token`; unlike the token itself it is not a
+    /// secret, but it must not fall back to the global one when the group token
+    /// wins — otherwise the owner of the calls would be wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vk_token_user_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vk_hashes: Option<String>,
 }
@@ -244,6 +249,11 @@ pub struct Database {
     pub bot_token: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vk_access_token: String,
+    /// VK user id paired with the global `vk_access_token`. Empty while the
+    /// admin has not filled it in; the client then falls back to the token
+    /// fingerprint.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vk_access_token_user_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vk_hashes: String,
     #[serde(default, alias = "slots")]
@@ -811,6 +821,7 @@ CREATE TABLE IF NOT EXISTS client_groups (
     sub_uuid        TEXT NOT NULL DEFAULT '',
     workers         INTEGER,
     vk_token        TEXT,
+    vk_token_user_id TEXT,
     vk_hashes       TEXT
 );
 CREATE TABLE IF NOT EXISTS routing_rules (
@@ -911,6 +922,14 @@ fn ensure_client_group_columns(connection: &Connection) -> Result<()> {
         connection
             .execute("ALTER TABLE client_groups ADD COLUMN vk_token TEXT", [])
             .context("add vk_token column")?;
+    }
+    if !columns.iter().any(|column| column == "vk_token_user_id") {
+        connection
+            .execute(
+                "ALTER TABLE client_groups ADD COLUMN vk_token_user_id TEXT",
+                [],
+            )
+            .context("add vk_token_user_id column")?;
     }
     if !columns.iter().any(|column| column == "vk_hashes") {
         connection
@@ -1068,6 +1087,10 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
         ("admin_id", db.admin_id.as_str()),
         ("bot_token", db.bot_token.as_str()),
         ("vk_access_token", db.vk_access_token.as_str()),
+        (
+            "vk_access_token_user_id",
+            db.vk_access_token_user_id.as_str(),
+        ),
         ("vk_hashes", db.vk_hashes.as_str()),
     ] {
         transaction
@@ -1114,14 +1137,15 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
     {
         let mut insert = transaction
             .prepare(
-                "INSERT INTO client_groups (id, name, routing_rule_id, sub_uuid, workers, vk_token, vk_hashes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO client_groups (id, name, routing_rule_id, sub_uuid, workers, vk_token, vk_token_user_id, vk_hashes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     routing_rule_id = excluded.routing_rule_id,
                     sub_uuid = excluded.sub_uuid,
                     workers = excluded.workers,
                     vk_token = excluded.vk_token,
+                    vk_token_user_id = excluded.vk_token_user_id,
                     vk_hashes = excluded.vk_hashes",
             )
             .context("prepare client_groups insert")?;
@@ -1134,6 +1158,7 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                     group.sub_uuid,
                     group.workers.map(|w| w as i64),
                     group.vk_token.as_deref(),
+                    group.vk_token_user_id.as_deref(),
                     group.vk_hashes.as_deref(),
                 ])
                 .with_context(|| format!("write group {}", group.id))?;
@@ -1323,6 +1348,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
                 "admin_id" => db.admin_id = value,
                 "bot_token" => db.bot_token = value,
                 "vk_access_token" => db.vk_access_token = value,
+                "vk_access_token_user_id" => db.vk_access_token_user_id = value,
                 "vk_hashes" => db.vk_hashes = value,
                 "logging_active" => db.logging_active = Some(value == "1"),
                 _ => {}
@@ -1397,7 +1423,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
     }
     {
         let mut select = connection
-            .prepare("SELECT id, name, routing_rule_id, sub_uuid, workers, vk_token, vk_hashes FROM client_groups")
+            .prepare("SELECT id, name, routing_rule_id, sub_uuid, workers, vk_token, vk_token_user_id, vk_hashes FROM client_groups")
             .context("prepare client_groups select")?;
         let mut rows = select.query([]).context("read client_groups")?;
         while let Some(row) = rows.next()? {
@@ -1414,7 +1440,8 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
                 .flatten()
                 .and_then(|w| (3..=100).contains(&w).then_some(w as u32));
             let vk_token: Option<String> = row.get(5).ok().flatten();
-            let vk_hashes: Option<String> = row.get(6).ok().flatten();
+            let vk_token_user_id: Option<String> = row.get(6).ok().flatten();
+            let vk_hashes: Option<String> = row.get(7).ok().flatten();
             db.groups.insert(
                 id.clone(),
                 ClientGroup {
@@ -1424,6 +1451,7 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
                     sub_uuid,
                     workers,
                     vk_token,
+                    vk_token_user_id,
                     vk_hashes,
                 },
             );
@@ -2080,6 +2108,92 @@ mod tests {
     }
 
     #[test]
+    fn vk_access_token_user_id_survives_database_restart() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("csqtt-vk-user-id-test-{unique}"));
+        let mut database = Database {
+            vk_access_token: "vk1.shared-token".to_owned(),
+            ..Database::default()
+        };
+        assert_eq!(database.vk_access_token_user_id, "");
+        database.vk_access_token_user_id = "100200300".to_owned();
+
+        save_database(&directory, &database).expect("save database");
+        let restored = load_database(&directory).expect("load database");
+
+        assert_eq!(restored.vk_access_token, "vk1.shared-token");
+        assert_eq!(restored.vk_access_token_user_id, "100200300");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn client_group_vk_token_user_id_round_trips_and_defaults_to_none() {
+        let group = super::ClientGroup {
+            id: "g1".to_owned(),
+            name: "Group".to_owned(),
+            vk_token: Some("vk1.group-token".to_owned()),
+            vk_token_user_id: Some("123456".to_owned()),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&group).unwrap();
+        assert!(encoded.contains("\"vk_token_user_id\":\"123456\""));
+        let decoded: super::ClientGroup = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.vk_token_user_id.as_deref(), Some("123456"));
+
+        // a backup written before the field existed carries no user id
+        let legacy: super::ClientGroup =
+            serde_json::from_str(r#"{"id":"g1","name":"Group","vk_token":"vk1.t"}"#).unwrap();
+        assert_eq!(legacy.vk_token_user_id, None);
+        assert_eq!(legacy.vk_token.as_deref(), Some("vk1.t"));
+    }
+
+    #[test]
+    fn client_group_vk_token_user_id_column_migration_is_idempotent() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("csqtt-group-user-id-migration-test-{unique}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        // the client_groups table as it shipped before vk_token_user_id existed
+        let connection = rusqlite::Connection::open(directory.join(super::DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE client_groups (
+                    id              TEXT PRIMARY KEY,
+                    name            TEXT NOT NULL,
+                    routing_rule_id TEXT NOT NULL DEFAULT '',
+                    workers         INTEGER,
+                    vk_token        TEXT,
+                    vk_hashes       TEXT
+                );
+                INSERT INTO client_groups (id, name) VALUES ('g1', 'legacy group');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut first = load_database(&directory).expect("load old database");
+        assert_eq!(first.groups["g1"].vk_token_user_id, None);
+
+        // a second init on the migrated schema must not fail or recreate the column
+        let second = load_database(&directory).expect("second init on migrated schema");
+        assert_eq!(second.groups["g1"].vk_token_user_id, None);
+
+        first.groups.get_mut("g1").unwrap().vk_token_user_id = Some("777888999".to_owned());
+        save_database(&directory, &first).expect("save migrated database");
+        let third = load_database(&directory).expect("load migrated database");
+        assert_eq!(
+            third.groups["g1"].vk_token_user_id.as_deref(),
+            Some("777888999")
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn auto_restart_interval_defaults_to_disabled_and_persists_disabled() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2305,6 +2419,7 @@ mod tests {
                 sub_uuid: "sub-uuid-789".to_string(),
                 workers: Some(99),
                 vk_token: Some("vk1.a.group_custom_token".to_string()),
+                vk_token_user_id: Some("100200300".to_string()),
                 vk_hashes: Some("group_hash_1,group_hash_2".to_string()),
                 routing_rule_id: String::new(),
             },
@@ -2319,6 +2434,10 @@ mod tests {
         assert_eq!(
             restored_group.vk_token.as_deref(),
             Some("vk1.a.group_custom_token")
+        );
+        assert_eq!(
+            restored_group.vk_token_user_id.as_deref(),
+            Some("100200300")
         );
         assert_eq!(
             restored_group.vk_hashes.as_deref(),

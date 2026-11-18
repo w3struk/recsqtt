@@ -1,6 +1,7 @@
 package com.csqtt.client
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.io.IOException
 
 private fun <T> Flow<T>.onIo(): Flow<T> = flowOn(Dispatchers.IO)
 
@@ -582,6 +584,54 @@ class SettingsStore(context: Context) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(CSQTT_LINK, profile)] = link
+        }
+    }
+
+    /**
+     * Импорт ссылки из панели: `token`/`user_id` уходят в хранилище (токен — шифрованно),
+     * а ссылка переписывается без них. Ссылка без `token` очищает сохранённые креды.
+     * Возвращает `false` для невалидной ссылки, ничего не записывая.
+     */
+    suspend fun importCsqttLink(raw: String): Boolean {
+        val decision = VkLinkImportPolicy.decide(raw) ?: return false
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            applyLinkDecision(prefs, decision, profile)
+        }
+        return true
+    }
+
+    /**
+     * Одноразовая миграция ссылки, сохранённой до разделения кредов. Идемпотентна:
+     * после перезаписи токена в ссылке нет, и политика возвращает no-op. Ошибка
+     * ввода-вывода только логируется — ссылка и креды остаются как были.
+     */
+    suspend fun migrateLinkCredentialsIfNeeded() {
+        try {
+            dataStore.edit { prefs ->
+                val profile = prefs[ACTIVE_PROFILE] ?: 0
+                val stored = prefs[getProfileKey(CSQTT_LINK, profile)] ?: return@edit
+                val decision = VkLinkImportPolicy.migration(stored) ?: return@edit
+                applyLinkDecision(prefs, decision, profile)
+            }
+        } catch (error: IOException) {
+            Log.w("SettingsStore", "Не удалось мигрировать креды из ссылки", error)
+        }
+    }
+
+    private fun applyLinkDecision(
+        prefs: MutablePreferences,
+        decision: VkLinkImportPolicy.Decision,
+        profile: Int,
+    ) {
+        prefs[getProfileKey(CSQTT_LINK, profile)] = decision.sanitizedLink
+        if (decision.token.isNotEmpty()) {
+            prefs.putSecret(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, decision.token, profile)
+            prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] = decision.userId
+        } else {
+            prefs.remove(getProfileKey(VK_ACCESS_TOKEN_ENCRYPTED, profile))
+            prefs.remove(getProfileKey(VK_ACCESS_TOKEN, profile))
+            prefs.remove(getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile))
         }
     }
 

@@ -17,6 +17,7 @@ data class CsqttLink(
     val password: String = "",
     val hashes: List<String> = emptyList(),
     val vkAccessToken: String = "",
+    val userId: String = "",
 )
 
 private const val CSQTT_CIPHER_KEY_SEED = "csqtt-chiper-key"
@@ -129,7 +130,18 @@ private fun parseCsqttV2(uri: java.net.URI): CsqttLink? {
     val vkAccessToken = parameters["token"]?.let(::parseLinkVkAccessToken).orEmpty()
     if (parameters.containsKey("token") && vkAccessToken.isEmpty()) return null
     if (hashes.isNotEmpty() && vkAccessToken.isNotEmpty()) return null
-    return CsqttLink(host, port, password, hashes, vkAccessToken)
+    // Панель присылает user_id только вместе с токеном; без токена параметр смысла не
+    // имеет. Некорректный id — деградация, а не ошибка: ссылка остаётся рабочей.
+    val userId = if (vkAccessToken.isEmpty()) {
+        ""
+    } else {
+        parameters["user_id"]
+            ?.let(::decodeQueryComponent)
+            ?.trim()
+            ?.takeIf { it.length in 1..20 && it.all { ch -> ch in '0'..'9' } }
+            .orEmpty()
+    }
+    return CsqttLink(host, port, password, hashes, vkAccessToken, userId)
 }
 
 private fun parseRawQuery(rawQuery: String): Map<String, String>? {
@@ -153,7 +165,7 @@ private fun parseRawQuery(rawQuery: String): Map<String, String>? {
         }
     }
 
-    val pattern = Regex("(?:^|[&;]|(?<=[a-zA-Z0-9_]))(v|host|peer|password|client|hashes|token|workers)=([^&?]*?)(?=(?:v|host|peer|password|client|hashes|token|workers)=|$)", RegexOption.IGNORE_CASE)
+    val pattern = Regex("(?:^|[&;]|(?<=[a-zA-Z0-9_]))(v|host|peer|password|client|hashes|token|user_id|workers)=([^&?]*?)(?=(?:v|host|peer|password|client|hashes|token|user_id|workers)=|$)", RegexOption.IGNORE_CASE)
     val matches = pattern.findAll(sanitized).toList()
     if (matches.isNotEmpty()) {
         val extracted = linkedMapOf<String, String>()
@@ -249,12 +261,15 @@ fun formatCsqttLink(
     password: String,
     hashes: List<String> = emptyList(),
     token: String = "",
+    userId: String = "",
 ): String {
     val queryParts = mutableListOf("v=2", "host=$host", "peer=$peer", "password=" + java.net.URLEncoder.encode(password, Charsets.UTF_8.name()))
     if (hashes.isNotEmpty()) {
         queryParts.add("hashes=" + hashes.joinToString("+"))
     } else if (token.isNotEmpty()) {
         queryParts.add("token=$token")
+        // user_id существует только в паре с токеном — без него параметр не имеет смысла.
+        if (userId.isNotEmpty()) queryParts.add("user_id=$userId")
     }
     val plain = "connect?" + queryParts.joinToString("&")
     return "csqtt://" + encryptCsqttPayload(plain)

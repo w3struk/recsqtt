@@ -22,8 +22,10 @@ import androidx.core.content.ContextCompat
 import com.csqtt.client.LinkSaveNotice
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
+import com.csqtt.client.VkLinkImportPolicy
 import com.csqtt.client.ui.design.CsqttSizes
 import com.csqtt.client.ui.dialogs.QrScannerDialog
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @Composable
@@ -68,19 +70,29 @@ fun FloatingToolbar(
         QrScannerDialog(
             onDismissRequest = { showQrScanner = false },
             onQrCodeScanned = { rawLink ->
-                val parsed = com.csqtt.client.ui.utils.parseCsqttLink(rawLink)
-                if (parsed != null) {
+                val decision = VkLinkImportPolicy.decide(rawLink)
+                if (decision != null) {
                     showQrScanner = false
-                    val link = rawLink.trim()
                     scope.launch {
+                        val hadStoredToken = try {
+                            settingsStore.vkAccessToken.first().isNotBlank()
+                        } catch (_: java.io.IOException) {
+                            false
+                        }
                         val saved = try {
-                            settingsStore.saveCsqttParticipantLink(link)
-                            true
+                            settingsStore.importCsqttLink(rawLink)
                         } catch (_: java.io.IOException) {
                             false
                         }
                         val outcome = LinkSaveNotice.outcomeForParticipantLink(saved)
-                        Toast.makeText(context, LinkSaveNotice.linkToast(outcome), Toast.LENGTH_LONG).show()
+                        // У сканера нет диалога подтверждения, поэтому предупреждение
+                        // об очистке кредов идёт в тот же тост, что и результат.
+                        val warning = if (saved && decision.wipesStoredCredentials && hadStoredToken) {
+                            "\nв ссылке нет токена — сохранённый доступ будет удалён"
+                        } else {
+                            ""
+                        }
+                        Toast.makeText(context, LinkSaveNotice.linkToast(outcome) + warning, Toast.LENGTH_LONG).show()
                     }
                 } else {
                     Toast.makeText(context, "QR-код не содержит ссылку reCSQTT", Toast.LENGTH_SHORT).show()

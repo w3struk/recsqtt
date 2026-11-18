@@ -152,6 +152,9 @@ class TunnelService : Service() {
                 startJob = serviceScope.launch {
                     try {
                         val store = SettingsStore(applicationContext)
+                        // Старая ссылка могла нести token=; креды живут в хранилище,
+                        // поэтому миграция идёт до чтения настроек старта. Идемпотентна.
+                        store.migrateLinkCredentialsIfNeeded()
                         autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
                         TunnelManager.isLoggingEnabled = store.participantShowLogs.first()
                         if (reconcileWifiAutoPause()) {
@@ -316,6 +319,10 @@ class TunnelService : Service() {
         startJob = serviceScope.launch {
             try {
                 val store = SettingsStore(appContext)
+
+                // Ссылка могла сохраниться с token= до разделения кредов: переносим их
+                // в хранилище до resolveConnectionSource. Повторный прогон — no-op.
+                store.migrateLinkCredentialsIfNeeded()
 
                 val wasRunning = store.tunnelWasRunning.first()
                 if (!wasRunning) {

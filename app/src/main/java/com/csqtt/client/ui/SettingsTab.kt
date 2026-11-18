@@ -39,6 +39,7 @@ import com.csqtt.client.CsqttConstants
 import com.csqtt.client.WorkerCountPolicy
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.VkHashValidator
+import com.csqtt.client.VkLinkImportPolicy
 import com.csqtt.client.shouldConfirmAutoJsMode
 import com.csqtt.client.shouldConfirmTcpTransport
 import com.csqtt.client.vkAuthModeForHashMode
@@ -440,7 +441,16 @@ internal fun SettingsTabContent(
                         linkSaveJob?.cancel()
                         linkSaveJob = scope.launch {
                             delay(300)
-                            settingsStore.saveCsqttParticipantLink(linkText)
+                            when {
+                                // Пустая ссылка — явное удаление; импорт пустую отвергает.
+                                linkText.isBlank() -> settingsStore.saveCsqttParticipantLink("")
+                                // Импорт кредов — только для настоящей ссылки из панели. Правка
+                                // уже санитизированной ссылки (в ней токена нет) не должна
+                                // стирать сохранённый доступ: пишем только текст ссылки.
+                                VkLinkImportPolicy.decide(linkText)?.token?.isNotEmpty() == true ->
+                                    settingsStore.importCsqttLink(linkText)
+                                else -> settingsStore.saveCsqttParticipantLink(linkText)
+                            }
                         }
                     },
                     label = { Text("Ссылка csqtt://", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },
