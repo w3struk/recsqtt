@@ -83,6 +83,21 @@ class VkCallDurabilityTest {
     }
 
     @Test
+    fun claimStampsUnknownOwnerWithCurrentAccount() {
+        val unknown = entry(tokenFp = "fp-1", accountUserId = "")
+
+        assertEquals("user-1", VkCallOwnerPolicy.claim(unknown, "user-1").accountUserId)
+    }
+
+    @Test
+    fun claimKeepsKnownOwnerAndIgnoresBlankAccount() {
+        val known = entry(tokenFp = "fp-1", accountUserId = "user-1")
+
+        assertEquals("user-1", VkCallOwnerPolicy.claim(known, "user-2").accountUserId)
+        assertEquals("", VkCallOwnerPolicy.claim(known.copy(accountUserId = ""), "  ").accountUserId)
+    }
+
+    @Test
     fun eligibleRequiresAutoApiMode() {
         val autoApi = entry(callId = "auto-api", mode = CsqttConstants.VkAutoHash.MODE_AUTO_API)
         val autoJs = entry(callId = "auto-js", mode = CsqttConstants.VkAutoHash.MODE_AUTO_JS)

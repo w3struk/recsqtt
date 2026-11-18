@@ -73,6 +73,18 @@ internal object VkCallOwnerPolicy {
         userId.isBlank() && entry.accountUserId.isBlank() -> entry.tokenFp == tokenFp
         else -> true
     }
+
+    /**
+     * Присваивает запись аккаунту, если владелец записи ещё неизвестен, а текущий
+     * `userId` известен. Запись уже используется этим аккаунтом (правило выше), так что
+     * фиксируем факт: дальше другой аккаунт её не переиспользует.
+     */
+    fun claim(entry: VkCallEntry, userId: String): VkCallEntry =
+        if (userId.isNotBlank() && entry.accountUserId.isBlank()) {
+            entry.copy(accountUserId = userId)
+        } else {
+            entry
+        }
 }
 
 internal object VkCallReusePolicy {

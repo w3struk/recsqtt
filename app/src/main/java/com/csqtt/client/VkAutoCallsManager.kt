@@ -205,6 +205,7 @@ object VkAutoCallsManager {
         // Не-auto_api записи в реестре не наши: их не закрываем и оставляем на месте.
         // Счётчики падений берём из актуального реестра: параллельное восстановление
         // могло увеличить их, пока мы минчили, и стухший снимок не должен это затереть.
+        var claimed = 0
         persistStore(store, profile) { current ->
             val currentById = current.associateBy { it.callId }
             val mergedKept = kept.map { entry ->
@@ -217,6 +218,10 @@ object VkAutoCallsManager {
                         lastFailMs = listOfNotNull(entry.lastFailMs, stored.lastFailMs).maxOrNull(),
                     )
                 }
+            }.map { entry ->
+                val claimedEntry = VkCallOwnerPolicy.claim(entry, userId)
+                if (claimedEntry.accountUserId != entry.accountUserId) claimed += 1
+                claimedEntry
             }
             val foreign = current.filter { it.mode != CsqttConstants.VkAutoHash.MODE_AUTO_API }
             (mergedKept + minted + foreign)
@@ -243,7 +248,7 @@ object VkAutoCallsManager {
 
         val hashes = kept.map { it.hash } + minted.map { it.hash }
         if (BuildConfig.DEBUG) {
-            Log.i(TAG, "ensure requested=$requested reused=${kept.size} minted=${minted.size} pruned=${pruned.size}")
+            Log.i(TAG, "ensure requested=$requested reused=${kept.size} minted=${minted.size} pruned=${pruned.size} claimed=$claimed")
         }
         return if (hashes.isEmpty()) {
             null
