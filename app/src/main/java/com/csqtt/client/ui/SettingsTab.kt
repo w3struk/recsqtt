@@ -41,6 +41,8 @@ import com.csqtt.client.WorkerCountPolicy
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.VkHashValidator
 import com.csqtt.client.VkLinkImportPolicy
+import com.csqtt.client.VkTokenForgetUiPolicy
+import com.csqtt.client.BuildConfig
 import com.csqtt.client.shouldConfirmAutoJsMode
 import com.csqtt.client.shouldConfirmTcpTransport
 import com.csqtt.client.vkAuthModeForHashMode
@@ -114,6 +116,7 @@ internal fun SettingsTabContent(
     // Пока туннель жив или переходит между состояниями, креды не трогаем: закрытие
     // звонков оборвало бы сессию, а старт мог бы успеть создать новые.
     val vkTokenActionEnabled = !tunnelRunning && !tunnelStarting && !tunnelStopping
+    val showForgetTokenAction = VkTokenForgetUiPolicy.isVisible(BuildConfig.DEBUG)
     var showHashModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
     var showHashModeDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
     var showWorkModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
@@ -429,7 +432,7 @@ internal fun SettingsTabContent(
         )
     }
 
-    if (showForgetTokenDialog) {
+    if (showForgetTokenDialog && showForgetTokenAction) {
         AlertDialog(
             onDismissRequest = { showForgetTokenDialog = false },
             title = { Text("Забыть токен?") },
@@ -559,6 +562,7 @@ internal fun SettingsTabContent(
                     VkTokenStatusRow(
                         hasStoredToken = vkTokenActive,
                         storedUserId = storedVkUserId,
+                        showAction = showForgetTokenAction,
                         enabled = vkTokenActionEnabled,
                         onForgetToken = { showForgetTokenDialog = true },
                     )
@@ -829,6 +833,7 @@ internal fun SettingsTabContent(
 private fun VkTokenStatusRow(
     hasStoredToken: Boolean,
     storedUserId: String,
+    showAction: Boolean,
     enabled: Boolean,
     onForgetToken: () -> Unit,
 ) {
@@ -857,7 +862,7 @@ private fun VkTokenStatusRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (!enabled) {
+                if (showAction && !enabled) {
                     Text(
                         text = "Сначала отключите VPN",
                         style = MaterialTheme.typography.bodySmall,
@@ -865,7 +870,7 @@ private fun VkTokenStatusRow(
                     )
                 }
             }
-            OutlinedButton(
+            if (showAction) OutlinedButton(
                 onClick = onForgetToken,
                 enabled = enabled,
                 modifier = Modifier.height(36.dp),
