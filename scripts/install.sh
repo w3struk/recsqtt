@@ -740,7 +740,10 @@ pkg_update() {
     case "$PKG_MGR" in
         apt)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y >>"$LOG_FILE" 2>&1 || log_warn "apt update завершился с ошибкой, пробую продолжить"
+            # На свежем VPS первые минуты dpkg-блокировку держат cloud-init и
+            # unattended-upgrades; без ожидания apt падает мгновенно, и установка
+            # выглядит сломанной на шаге certbot.
+            apt-get update -y -o DPkg::Lock::Timeout=300 >>"$LOG_FILE" 2>&1 || log_warn "apt update завершился с ошибкой, пробую продолжить"
             ;;
         dnf)    dnf makecache -y >>"$LOG_FILE" 2>&1 || true ;;
         yum)    yum makecache -y >>"$LOG_FILE" 2>&1 || true ;;
@@ -754,7 +757,9 @@ pkg_install() {
     case "$PKG_MGR" in
         apt)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get install -y -qq --no-install-recommends "$@" >>"$LOG_FILE" 2>&1
+            # То же ожидание, что и в pkg_update: единственная попытка на свежем
+            # хосте упирается в чужой apt и роняет preflight.
+            apt-get install -y -qq --no-install-recommends -o DPkg::Lock::Timeout=300 "$@" >>"$LOG_FILE" 2>&1
             ;;
         dnf)    dnf install -y "$@" >>"$LOG_FILE" 2>&1 ;;
         yum)    yum install -y "$@" >>"$LOG_FILE" 2>&1 ;;
