@@ -34,7 +34,6 @@ class ConnectionSourceTest {
         assertEquals("client-pass", source.password)
         assertEquals("", source.hashes)
         assertTrue(source.hashesFromLink.not())
-        assertEquals("", source.vkAccessToken)
     }
 
     @Test
@@ -97,12 +96,13 @@ class ConnectionSourceTest {
     }
 
     @Test
-    fun `link token disables stored hashes`() {
+    fun `a token in the link no longer replaces stored hashes`() {
+        // После импорта кредов ссылка токена не несёт; даже старая ссылка с token=
+        // не должна обнулять сохранённые хеши — старт читает креды только из хранилища.
         val link = enc("connect?v=2&host=vps.example&peer=46000&token=vk1.aBc-_%2B9")
         val source = resolveConnectionSourceFrom(link = link, hashes = "zyxwvutsrqponmlk2")!!
 
-        assertEquals("", source.hashes)
-        assertEquals("vk1.aBc-_+9", source.vkAccessToken)
-        assertTrue(source.tokenFromLink)
+        assertEquals("zyxwvutsrqponmlk2", source.hashes)
+        assertTrue(source.hashesFromLink.not())
     }
 }

@@ -8,11 +8,10 @@ internal enum class ConnectionStartBlocker(val message: String) {
 internal object ConnectionStartPolicy {
     fun hasReadyVkCredentials(
         linkHashCount: Int,
-        linkTokenPresent: Boolean,
         autoHashMode: Boolean,
         storedTokenPresent: Boolean,
         manualHashCount: Int,
-    ): Boolean = linkHashCount > 0 || linkTokenPresent || manualHashCount > 0 ||
+    ): Boolean = linkHashCount > 0 || manualHashCount > 0 ||
         (autoHashMode && storedTokenPresent)
 
     fun blocker(

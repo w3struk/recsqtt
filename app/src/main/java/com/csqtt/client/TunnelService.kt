@@ -65,6 +65,13 @@ private data class ResolvedVkHashes(
     val accessToken: String = "",
 )
 
+/**
+ * Сколько живых хешей несёт строка — та же планка длины, что у `ConnectionSource`.
+ * Нужно только для сообщения политики кредов: считать ли у пользователя ручной путь.
+ */
+private fun countVkHashes(raw: String): Int =
+    raw.split(Regex("[,\\s\\n]+")).count { it.trim().length >= 16 }
+
 class TunnelService : Service() {
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Default)
@@ -173,20 +180,13 @@ class TunnelService : Service() {
                         val requestedVkAuthMode = sanitizeVkAuthMode(intent.getStringExtra("vk_auth_mode"))
                         val intentHashes = intent.getStringExtra("vk_hashes") ?: ""
                         val hashesFromLink = intent.getBooleanExtra("vk_hashes_from_link", false)
-                        val linkAccessToken = intent.getStringExtra("vk_access_token")
-                            .orEmpty()
-                            .takeIf { intent.getBooleanExtra("vk_token_from_link", false) && it.isNotBlank() }
                         val configuredHashMode = store.vkHashMode.first()
-                        val vkAuthMode = when {
-                            hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
-                            linkAccessToken != null -> {
-                                if (configuredHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS) {
-                                    CsqttConstants.VkAuth.MODE_AUTO_JS
-                                } else {
-                                    if (requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) CsqttConstants.VkAuth.MODE_CALLS else requestedVkAuthMode
-                                }
-                            }
-                            else -> requestedVkAuthMode
+                        val vkAuthMode = if (
+                            hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+                        ) {
+                            CsqttConstants.VkAuth.MODE_CALLS
+                        } else {
+                            requestedVkAuthMode
                         }
                         val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
                         val maxWorkers = CsqttConstants.Tunnel.MAX_WORKERS
@@ -197,25 +197,41 @@ class TunnelService : Service() {
                         } else if (hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) {
                             store.saveVkAuthMode(CsqttConstants.VkAuth.MODE_CALLS)
                         }
+                        val credentialBlocker = VkCredentialStartPolicy.blockedReason(
+                            hashMode = configuredHashMode,
+                            authMode = vkAuthMode,
+                            hasToken = store.vkAccessToken.first().isNotBlank(),
+                        )
+                        if (credentialBlocker != null) {
+                            TunnelManager.starting.value = false
+                            TunnelManager.updateLog(
+                                "vk_credentials_blocked",
+                                "[ПОДКЛЮЧЕНИЕ] Запуск не начат: $credentialBlocker",
+                                99,
+                                true,
+                            )
+                            launch(Dispatchers.Main) {
+                                if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
+                            }
+                            return@launch
+                        }
                         if (!awaitVkNetwork()) {
                             TunnelManager.starting.value = false
                             return@launch
                         }
                         if (!isCurrentStart(requestGeneration)) return@launch
-                        val resolvedHashes = if (hashesFromLink && linkAccessToken == null && !accountAutoJs) {
+                        val resolvedHashes = if (hashesFromLink && !accountAutoJs) {
                             ResolvedVkHashes(intentHashes, false)
                         } else {
                             resolveAutoHashes(
                                 store,
                                 intentHashes,
                                 workersPerHash,
-                                when {
-                                    accountAutoJs -> CsqttConstants.VkAutoHash.MODE_AUTO_JS
-                                    linkAccessToken != null -> CsqttConstants.VkAutoHash.MODE_AUTO_API
-                                    else -> null
+                                forcedMode = if (accountAutoJs) {
+                                    CsqttConstants.VkAutoHash.MODE_AUTO_JS
+                                } else {
+                                    null
                                 },
-                                linkAccessToken,
-                                tokenFromLink = linkAccessToken != null,
                             )
                         }
                         if (resolvedHashes == null) {
@@ -354,36 +370,48 @@ class TunnelService : Service() {
                 val workersPerHash = WorkerCountPolicy.normalize(store.workersPerHash.first())
                 TunnelManager.isLoggingEnabled = store.participantShowLogs.first()
                 val configuredHashMode = store.vkHashMode.first()
-                val vkAuthMode = when {
-                    source.hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> CsqttConstants.VkAuth.MODE_CALLS
-                    source.tokenFromLink -> {
-                        if (configuredHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS) {
-                            CsqttConstants.VkAuth.MODE_AUTO_JS
-                        } else {
-                            if (requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) CsqttConstants.VkAuth.MODE_CALLS else requestedVkAuthMode
-                        }
-                    }
-                    else -> requestedVkAuthMode
+                val vkAuthMode = if (
+                    source.hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+                ) {
+                    CsqttConstants.VkAuth.MODE_CALLS
+                } else {
+                    requestedVkAuthMode
                 }
                 val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+                val credentialBlocker = VkCredentialStartPolicy.blockedReason(
+                    hashMode = configuredHashMode,
+                    authMode = vkAuthMode,
+                    hasToken = store.vkAccessToken.first().isNotBlank(),
+                )
+                if (credentialBlocker != null) {
+                    TunnelManager.updateLog(
+                        "vk_credentials_blocked",
+                        "[ПОДКЛЮЧЕНИЕ] Запуск не начат: $credentialBlocker",
+                        99,
+                        true,
+                    )
+                    launch(Dispatchers.Main) {
+                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
+                    }
+                    return@launch
+                }
                 if (!awaitVkNetwork()) {
                     TunnelManager.starting.value = false
                     return@launch
                 }
                 if (!isCurrentStart(requestGeneration)) return@launch
-                val restoredHashes = when {
-                    source.hashesFromLink && !source.tokenFromLink && !accountAutoJs -> ResolvedVkHashes(source.hashes, false)
-                    else -> resolveAutoHashes(
+                val restoredHashes = if (source.hashesFromLink && !accountAutoJs) {
+                    ResolvedVkHashes(source.hashes, false)
+                } else {
+                    resolveAutoHashes(
                         store,
                         source.hashes,
                         workersPerHash,
-                        when {
-                            accountAutoJs -> CsqttConstants.VkAutoHash.MODE_AUTO_JS
-                            source.tokenFromLink -> CsqttConstants.VkAutoHash.MODE_AUTO_API
-                            else -> null
+                        forcedMode = if (accountAutoJs) {
+                            CsqttConstants.VkAutoHash.MODE_AUTO_JS
+                        } else {
+                            null
                         },
-                        source.vkAccessToken.takeIf { source.tokenFromLink },
-                        tokenFromLink = source.tokenFromLink,
                     )
                 }
                 val params = TunnelParams(
@@ -452,12 +480,11 @@ class TunnelService : Service() {
         fallbackHashes: String,
         workersPerHash: Int,
         forcedMode: String? = null,
-        accessTokenOverride: String? = null,
-        tokenFromLink: Boolean = false,
     ): ResolvedVkHashes? {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
             CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
-                val token = accessTokenOverride ?: store.vkAccessToken.first()
+                // Токен и user_id — только из хранилища: ссылка после импорта их не несёт.
+                val token = store.vkAccessToken.first()
                 val userId = store.vkAccessTokenUserId.first()
                 val result = VkAutoCallsManager.ensureCalls(
                     applicationContext,
@@ -465,7 +492,6 @@ class TunnelService : Service() {
                     workersPerHash,
                     profile = store.activeProfile.first(),
                     userId = userId,
-                    clearStoredTokenOnInvalid = !tokenFromLink,
                 )
                     ?: return null
                 ResolvedVkHashes(
@@ -476,7 +502,7 @@ class TunnelService : Service() {
             }
 
             CsqttConstants.VkAutoHash.MODE_AUTO_JS -> {
-                val token = accessTokenOverride ?: store.vkAccessToken.first()
+                val token = store.vkAccessToken.first()
                 if (token.isBlank()) return null
                 ResolvedVkHashes(
                     "",
@@ -495,8 +521,6 @@ class TunnelService : Service() {
             try {
                 val store = SettingsStore(applicationContext)
                 val token = store.vkAccessToken.first()
-                    .ifBlank { TunnelManager.getCurrentParams()?.vkAccessToken.orEmpty() }
-                    .ifBlank { resolveConnectionSource(store)?.vkAccessToken.orEmpty() }
                 val profile = store.activeProfile.first()
                 val closed = VkAutoCallsManager.closeAll(applicationContext, token, profile)
                 if (closed) {
@@ -544,11 +568,11 @@ class TunnelService : Service() {
                 val store = SettingsStore(applicationContext)
                 val vkHashMode = store.vkHashMode.first()
                 val source = resolveConnectionSource(store) ?: return@launch
-                if (vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL && !source.tokenFromLink) {
+                if (vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL) {
                     return@launch
                 }
                 val accountAutoJs = previous.vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS ||
-                    (source.tokenFromLink && vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS)
+                    vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS
                 val workers = WorkerCountPolicy.normalize(
                     store.workersPerHash.first(),
                     maximum = CsqttConstants.Tunnel.MAX_WORKERS,
@@ -559,10 +583,8 @@ class TunnelService : Service() {
                         fallbackHashes = "",
                         workersPerHash = workers,
                         forcedMode = CsqttConstants.VkAutoHash.MODE_AUTO_JS,
-                        accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
-                        tokenFromLink = source.tokenFromLink,
                     )
-                    vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API || source.tokenFromLink -> {
+                    vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
                         val profile = store.activeProfile.first()
                         val callStore = VkCallStore(applicationContext)
                         // Доменный код значит, что ссылка мертва. Иначе — сеть, застой без
@@ -651,9 +673,6 @@ class TunnelService : Service() {
                             store,
                             fallbackHashes = source.hashes,
                             workersPerHash = workers,
-                            forcedMode = if (source.tokenFromLink) CsqttConstants.VkAutoHash.MODE_AUTO_API else null,
-                            accessTokenOverride = source.vkAccessToken.takeIf { source.tokenFromLink },
-                            tokenFromLink = source.tokenFromLink,
                         )
                     }
                     else -> ResolvedVkHashes(source.hashes, false)

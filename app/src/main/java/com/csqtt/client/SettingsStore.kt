@@ -828,14 +828,6 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveVkAccessToken(token: String, userId: String) {
-        dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs.putSecret(VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN, token, profile)
-            prefs[getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile)] = userId
-        }
-    }
-
     suspend fun clearVkAccessToken() {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0

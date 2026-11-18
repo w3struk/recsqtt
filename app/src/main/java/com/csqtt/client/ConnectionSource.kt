@@ -9,8 +9,6 @@ data class ConnectionSource(
     val password: String,
     val hashes: String,
     val hashesFromLink: Boolean,
-    val vkAccessToken: String,
-    val tokenFromLink: Boolean,
 )
 
 /**
@@ -18,7 +16,9 @@ data class ConnectionSource(
  * адрес, порт и пароль приходят только из ссылки, а `hashes` — сохранённые в профиле
  * VK-хеши, которые используются, если ссылка их не несёт.
  *
- * Функция чистая и не читает `SettingsStore`, поэтому её можно проверить на JVM.
+ * VK-кредов здесь нет: токен приходит из ссылки один раз при импорте и дальше живёт
+ * только в `SettingsStore`, поэтому стартовый путь не может «включить» авто-режим
+ * ссылкой. Функция чистая, поэтому её можно проверить на JVM.
  */
 internal fun resolveConnectionSourceFrom(
     link: String?,
@@ -26,7 +26,6 @@ internal fun resolveConnectionSourceFrom(
     invalidHashes: Map<String, VkHashValidationStatus> = emptyMap(),
 ): ConnectionSource? {
     val parsed = link?.let(::parseCsqttLink) ?: return null
-    val tokenFromLink = parsed.vkAccessToken.isNotEmpty()
     fun activeHashes(raw: String): String {
         val rawList = raw
             .split(Regex("[,\\s\\n]+"))
@@ -43,10 +42,8 @@ internal fun resolveConnectionSourceFrom(
     return ConnectionSource(
         peer = parsed.peerAddress(),
         password = parsed.password,
-        hashes = if (tokenFromLink) "" else linkHashes.ifEmpty { activeHashes(hashes.orEmpty()) },
+        hashes = linkHashes.ifEmpty { activeHashes(hashes.orEmpty()) },
         hashesFromLink = linkHashes.isNotEmpty(),
-        vkAccessToken = parsed.vkAccessToken,
-        tokenFromLink = tokenFromLink,
     )
 }
 

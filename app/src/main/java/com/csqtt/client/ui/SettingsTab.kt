@@ -15,7 +15,6 @@ import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -36,6 +35,8 @@ import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.CsqttConstants
+import com.csqtt.client.VkAutoCallsManager
+import com.csqtt.client.VkCredentialStartPolicy
 import com.csqtt.client.WorkerCountPolicy
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.VkHashValidator
@@ -43,12 +44,12 @@ import com.csqtt.client.VkLinkImportPolicy
 import com.csqtt.client.shouldConfirmAutoJsMode
 import com.csqtt.client.shouldConfirmTcpTransport
 import com.csqtt.client.vkAuthModeForHashMode
+import com.csqtt.client.vkHashModeForAuthMode
 import com.csqtt.client.ui.components.CsqttScreen
 import com.csqtt.client.ui.components.CsqttSettingRow
 import com.csqtt.client.ui.design.CsqttShapes
 import com.csqtt.client.ui.design.CsqttSizes
 import com.csqtt.client.ui.dialogs.HashesDialog
-import com.csqtt.client.ui.dialogs.VkTokenRevokeDialog
 import com.csqtt.client.ui.tunnel.WorkersInfoDialog
 import com.csqtt.client.ui.utils.parseCsqttLink
 import com.csqtt.client.ui.utils.stripVkUrlStatic
@@ -57,8 +58,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.widget.Toast
 
 private const val WORKERS_PER_GROUP = CsqttConstants.Tunnel.WORKERS_PER_GROUP
@@ -69,7 +68,6 @@ internal fun SettingsTab(
     settingsStore: SettingsStore,
     tunnelAuthSettings: TunnelAuthSnapshot,
     validationRequest: Int = 0,
-    onVkAuthRequested: () -> Unit = {},
 ) {
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
@@ -79,7 +77,6 @@ internal fun SettingsTab(
         settingsStore,
         tunnelAuthSettings,
         validationRequest,
-        onVkAuthRequested,
     )
 }
 
@@ -91,7 +88,6 @@ internal fun SettingsTabContent(
     settingsStore: SettingsStore,
     tunnelAuthSettings: TunnelAuthSnapshot,
     validationRequest: Int,
-    onVkAuthRequested: () -> Unit,
 ) {
     val workersPerHash = remember(settingsStore) {
         settingsStore.workersPerHash
@@ -113,11 +109,17 @@ internal fun SettingsTabContent(
     val savedVkAccessToken by settingsStore.vkAccessToken.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedVkAccessToken)
 
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
+    val tunnelStarting by TunnelManager.starting.collectAsStateWithLifecycle()
+    val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
+    // Пока туннель жив или переходит между состояниями, креды не трогаем: закрытие
+    // звонков оборвало бы сессию, а старт мог бы успеть создать новые.
+    val vkTokenActionEnabled = !tunnelRunning && !tunnelStarting && !tunnelStopping
     var showHashModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
     var showHashModeDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
     var showWorkModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
     var showWorkModeDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
-    var showVkRevokeDialog by rememberSaveable { mutableStateOf(false) }
+    var showForgetTokenDialog by rememberSaveable { mutableStateOf(false) }
+    var vkModeBlockedMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var vkAuthMode by rememberSaveable { mutableStateOf(CsqttConstants.VkAuth.MODE_CALLS) }
     val autoJsRiskAcknowledged by settingsStore.autoJsRiskAcknowledged.collectAsStateWithLifecycle(initialValue = false)
     var showAutoJsRiskDialog by remember { mutableStateOf(false) }
@@ -174,10 +176,8 @@ internal fun SettingsTabContent(
     }
     val parsedCsqttLink = remember(linkText) { parseCsqttLink(linkText) }
     val linkHashes = parsedCsqttLink?.hashes.orEmpty()
-    val linkVkAccessToken = parsedCsqttLink?.vkAccessToken.orEmpty()
     val serverWorkers by TunnelManager.serverAssignedWorkers.collectAsState()
     val effectiveServerWorkers = serverWorkers.takeIf { tunnelRunning && it in 3..100 }
-    val linkTokenActive = linkVkAccessToken.isNotEmpty()
     val effectiveVkAuthMode = if (
         linkHashes.isNotEmpty() && vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
     ) {
@@ -185,19 +185,14 @@ internal fun SettingsTabContent(
     } else {
         vkAuthMode
     }
-    val effectiveHashMode = if (
-        linkTokenActive && savedHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL
-    ) {
-        CsqttConstants.VkAutoHash.MODE_AUTO_API
-    } else {
-        savedHashMode
-    }
     val accountAutoJsMode = effectiveVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+    // Режим хешей и наличие токена — только из хранилища. Ссылка после импорта кредов
+    // не несёт, поэтому её текст не может ни включить авто-режим, ни показать статус.
     val autoHashMode = accountAutoJsMode || (
-        effectiveHashMode != null && effectiveHashMode != CsqttConstants.VkAutoHash.MODE_MANUAL
+        savedHashMode != null && savedHashMode != CsqttConstants.VkAutoHash.MODE_MANUAL
     )
     val vkTokenActive = savedVkAccessToken?.isNotBlank() == true
-    val effectiveVkTokenActive = vkTokenActive || linkTokenActive
+    val storedVkUserId by settingsStore.vkAccessTokenUserId.collectAsStateWithLifecycle(initialValue = "")
     val filledHashCount = remember(vkHash1, vkHash2, vkHash3, vkHash4, vkHash5, vkHash6) { uniqueHashes.size }
     val combinedHashes = remember(vkHash1, vkHash2, vkHash3, vkHash4, vkHash5, vkHash6) {
         allHashes.filter { it.isNotBlank() && it.length >= 16 }.distinct().joinToString(",")
@@ -291,7 +286,50 @@ internal fun SettingsTabContent(
         }
     }
 
+    fun blockModeSelection(hashMode: String, authMode: String): Boolean {
+        val reason = VkCredentialStartPolicy.blockedReason(
+            hashMode = hashMode,
+            authMode = authMode,
+            hasToken = vkTokenActive,
+        ) ?: return false
+        // Тот же текст, что покажет сервис, если запуск всё-таки дойдёт до него.
+        vkModeBlockedMessage = reason
+        return true
+    }
+
+    fun forgetVkToken() {
+        // Пока туннель поднят, закрытие звонков оборвало бы живую сессию.
+        if (TunnelManager.running.value || TunnelManager.starting.value || TunnelManager.stopping.value) return
+        scope.launch {
+            val token = runCatching { settingsStore.vkAccessToken.first() }.getOrDefault("")
+            val closed = if (token.isNotBlank()) {
+                // Best effort: если VK недоступен, креды всё равно удаляем — иначе
+                // «Забыть токен» не сработает в офлайне.
+                runCatching { VkAutoCallsManager.closeAll(context, token, activeProfile) }
+                    .getOrDefault(false)
+            } else {
+                false
+            }
+            settingsStore.clearVkAccessToken()
+            TunnelManager.updateLog(
+                "vk_token_forgotten",
+                if (closed) {
+                    "[OK] VK-токен забыт: звонки закрыты, креды удалены"
+                } else {
+                    "[OK] VK-токен забыт: креды удалены, звонки закрыть не удалось"
+                },
+                40,
+                false,
+            )
+            context.showRaisedToast(
+                if (closed) "Токен забыт, звонки VK закрыты" else "Токен забыт",
+                Toast.LENGTH_SHORT,
+            )
+        }
+    }
+
     fun requestWorkMode(mode: String) {
+        if (blockModeSelection(vkHashModeForAuthMode(mode, savedHashMode, vkTokenActive), mode)) return
         if (shouldConfirmAutoJsMode(vkAuthMode, mode, autoJsRiskAcknowledged)) {
             pendingAutoJsSelection = { applyWorkMode(mode) }
             showAutoJsRiskDialog = true
@@ -302,6 +340,7 @@ internal fun SettingsTabContent(
 
     fun requestHashMode(mode: String) {
         val nextWorkMode = vkAuthModeForHashMode(mode, vkAuthMode)
+        if (blockModeSelection(mode, nextWorkMode)) return
         if (shouldConfirmAutoJsMode(vkAuthMode, nextWorkMode, autoJsRiskAcknowledged)) {
             pendingAutoJsSelection = { applyHashMode(mode) }
             showAutoJsRiskDialog = true
@@ -310,15 +349,10 @@ internal fun SettingsTabContent(
         }
     }
 
-    LaunchedEffect(initialized, linkHashes, linkTokenActive, vkAuthMode, savedHashMode) {
+    LaunchedEffect(initialized, linkHashes, vkAuthMode) {
         if (!initialized) return@LaunchedEffect
-        when {
-            linkHashes.isNotEmpty() && vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS -> {
-                applyWorkMode(CsqttConstants.VkAuth.MODE_CALLS)
-            }
-            linkTokenActive && savedHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL -> {
-                applyHashMode(CsqttConstants.VkAutoHash.MODE_AUTO_API)
-            }
+        if (linkHashes.isNotEmpty() && vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS) {
+            applyWorkMode(CsqttConstants.VkAuth.MODE_CALLS)
         }
     }
 
@@ -333,8 +367,7 @@ internal fun SettingsTabContent(
 
     val hashesReadyForTunnel = when {
         linkHashes.isNotEmpty() -> true
-        linkTokenActive -> true
-        autoHashMode -> effectiveVkTokenActive
+        autoHashMode -> vkTokenActive
         else -> filledHashCount > 0
     }
     val linkRequiredError = showRequiredFieldErrors && parsedCsqttLink == null
@@ -396,25 +429,46 @@ internal fun SettingsTabContent(
         )
     }
 
-    if (showVkRevokeDialog) {
-        VkTokenRevokeDialog(
-            onCancel = { showVkRevokeDialog = false },
-            onCopyToken = {
-                val token = savedVkAccessToken.orEmpty()
-                if (token.isNotBlank()) {
-                    val clipboard = context.getSystemService(ClipboardManager::class.java)
-                    if (clipboard != null) {
-                        clipboard.setPrimaryClip(ClipData.newPlainText("VK token", token))
-                        context.showRaisedToast("Бессрочный VK токен скопирован", Toast.LENGTH_SHORT)
-                    } else {
-                        context.showRaisedToast("Не удалось скопировать VK токен", Toast.LENGTH_SHORT)
-                    }
+    if (showForgetTokenDialog) {
+        AlertDialog(
+            onDismissRequest = { showForgetTokenDialog = false },
+            title = { Text("Забыть токен?") },
+            text = {
+                Text(
+                    "Сохранённый VK-токен и user_id будут удалены, а звонки VK — закрыты, " +
+                        "если токен ещё работает. Вернуть доступ можно только новой ссылкой " +
+                        "из панели.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showForgetTokenDialog = false
+                        forgetVkToken()
+                    },
+                    enabled = vkTokenActionEnabled,
+                ) {
+                    Text("Забыть", color = MaterialTheme.colorScheme.error)
                 }
             },
-            onRevokeToken = {
-                showVkRevokeDialog = false
-                scope.launch { settingsStore.clearVkAccessToken() }
-            }
+            dismissButton = {
+                TextButton(onClick = { showForgetTokenDialog = false }) {
+                    Text("Отмена")
+                }
+            },
+        )
+    }
+
+    vkModeBlockedMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { vkModeBlockedMessage = null },
+            title = { Text("Режим недоступен") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { vkModeBlockedMessage = null }) {
+                    Text("Понятно")
+                }
+            },
         )
     }
 
@@ -486,33 +540,27 @@ internal fun SettingsTabContent(
                         fontWeight = FontWeight.SemiBold,
                     )
                 } else {
-                    if (linkTokenActive) {
-                        Text(
-                            text = "VK токен из ссылки",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(bottom = 12.dp),
-                        )
-                    }
                     VkHashModeControls(
                         hashSettingsLoaded = hashSettingsLoaded,
                         autoHashMode = autoHashMode,
-                        savedHashMode = effectiveHashMode,
-                        vkTokenActive = effectiveVkTokenActive,
-                        tunnelRunning = tunnelRunning,
-                        filledHashCount = filledHashCount,
+                        savedHashMode = savedHashMode,
                         hasInputHashErrors = hasInputHashErrors || hashesRequiredError,
                         hashErrorTexts = hashErrors.filter { !it.contains("короткий") },
                         onOpenHashes = { showHashesDialog = true },
                         onTitleInfo = { showHashModeGeneralDialog = true },
                         onInfo = { mode -> showHashModeDetailDialog = mode },
                         onSelected = ::requestHashMode,
-                        onLogin = onVkAuthRequested,
-                        onRevokeToken = { showVkRevokeDialog = true },
-                        authorizationRequiredError = hashesRequiredError && autoHashMode,
-                        manualAllowed = !linkTokenActive,
-                        tokenFromLink = linkTokenActive,
+                    )
+                }
+
+                // «Забыть токен» доступен и когда ссылка несёт хеши: иначе сохранённые
+                // креды нельзя было бы убрать из приложения.
+                if (vkTokenActive || linkHashes.isEmpty()) {
+                    VkTokenStatusRow(
+                        hasStoredToken = vkTokenActive,
+                        storedUserId = storedVkUserId,
+                        enabled = vkTokenActionEnabled,
+                        onForgetToken = { showForgetTokenDialog = true },
                     )
                 }
 
@@ -778,75 +826,74 @@ internal fun SettingsTabContent(
 }
 
 @Composable
-private fun VkHashAuthControls(
-    tunnelRunning: Boolean,
-    tokenActive: Boolean,
-    tokenFromLink: Boolean,
-    isError: Boolean,
-    onLogin: () -> Unit,
-    onRevokeToken: () -> Unit,
+private fun VkTokenStatusRow(
+    hasStoredToken: Boolean,
+    storedUserId: String,
+    enabled: Boolean,
+    onForgetToken: () -> Unit,
 ) {
-    if (tokenFromLink) {
-        OutlinedButton(
-            onClick = {},
-            enabled = false,
-            modifier = Modifier.height(44.dp),
-            shape = CsqttShapes.Pill,
-            colors = ButtonDefaults.outlinedButtonColors(
-                containerColor = Color.Transparent,
-                disabledContainerColor = Color.Transparent,
-                disabledContentColor = MaterialTheme.colorScheme.primary,
-            ),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
-            contentPadding = PaddingValues(horizontal = 10.dp),
-        ) {
-            Text("Из ссылки", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-        }
-    } else if (tokenActive) {
-        OutlinedButton(
-            onClick = onRevokeToken,
-            enabled = true,
-            modifier = Modifier.height(44.dp),
-            shape = CsqttShapes.Pill,
-            colors = ButtonDefaults.outlinedButtonColors(
-                containerColor = Color.Transparent,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                disabledContainerColor = Color.Transparent,
-                disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-            ),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
-            contentPadding = PaddingValues(horizontal = 10.dp),
-        ) {
-            Text("Активно", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-        }
-    } else if (isError) {
-        OutlinedButton(
-            onClick = onLogin,
-            modifier = Modifier.height(44.dp),
-            shape = CsqttShapes.Pill,
-            colors = ButtonDefaults.outlinedButtonColors(
-                containerColor = Color.Transparent,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-            ),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-            contentPadding = PaddingValues(horizontal = 14.dp),
-        ) {
-            Text("Вход", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-        }
-    } else {
-        Button(
-            onClick = onLogin,
-            enabled = true,
-            modifier = Modifier.height(44.dp),
-            shape = CsqttShapes.Pill,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            ),
-            contentPadding = PaddingValues(horizontal = 14.dp),
-            elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp, pressedElevation = 0.dp),
-        ) {
-            Text("Вход", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+    // Статус читается только из хранилища: ссылка после импорта кредов их не несёт.
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (hasStoredToken) {
+            Icon(
+                Icons.Filled.CheckCircle,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Токен из ссылки", fontWeight = FontWeight.SemiBold)
+                val maskedUserId = VkCredentialStartPolicy.maskedUserId(storedUserId)
+                Text(
+                    text = if (maskedUserId.isNotEmpty()) {
+                        "ID $maskedUserId"
+                    } else {
+                        "ID не указан — владелец звонков определится по отпечатку токена"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!enabled) {
+                    Text(
+                        text = "Сначала отключите VPN",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    )
+                }
+            }
+            OutlinedButton(
+                onClick = onForgetToken,
+                enabled = enabled,
+                modifier = Modifier.height(36.dp),
+                shape = CsqttShapes.Pill,
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+            ) {
+                Text("Забыть токен", fontWeight = FontWeight.SemiBold, maxLines = 1)
+            }
+        } else {
+            Icon(
+                Icons.Filled.Link,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Токен приходит из ссылки панели", fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = "Без него «Авто API» и «Авто ВК» недоступны: импортируйте ссылку csqtt:// заново.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -856,20 +903,12 @@ private fun VkHashModeControls(
     hashSettingsLoaded: Boolean,
     autoHashMode: Boolean,
     savedHashMode: String?,
-    vkTokenActive: Boolean,
-    tunnelRunning: Boolean,
-    filledHashCount: Int,
     hasInputHashErrors: Boolean,
     hashErrorTexts: List<String>,
     onOpenHashes: () -> Unit,
     onTitleInfo: () -> Unit,
     onInfo: (String) -> Unit,
     onSelected: (String) -> Unit,
-    onLogin: () -> Unit,
-    onRevokeToken: () -> Unit,
-    authorizationRequiredError: Boolean = false,
-    manualAllowed: Boolean = true,
-    tokenFromLink: Boolean = false,
 ) {
     if (!hashSettingsLoaded) return
 
@@ -899,69 +938,6 @@ private fun VkHashModeControls(
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-        } else if (tokenFromLink) {
-            OutlinedButton(
-                onClick = {},
-                enabled = false,
-                modifier = Modifier.fillMaxWidth().height(CsqttSizes.ControlHeight),
-                shape = CsqttShapes.Pill,
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = Color.Transparent,
-                    disabledContainerColor = Color.Transparent,
-                    disabledContentColor = MaterialTheme.colorScheme.primary,
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
-            ) {
-                Icon(Icons.Filled.Link, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Из ссылки", fontWeight = FontWeight.SemiBold)
-            }
-        } else if (vkTokenActive) {
-            OutlinedButton(
-                onClick = onRevokeToken,
-                enabled = true,
-                modifier = Modifier.fillMaxWidth().height(CsqttSizes.ControlHeight),
-                shape = CsqttShapes.Pill,
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = Color.Transparent,
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
-            ) {
-                Icon(Icons.Filled.CheckCircle, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurface)
-                Spacer(Modifier.width(8.dp))
-                Text("Сессия VK активна", fontWeight = FontWeight.SemiBold)
-            }
-        } else if (authorizationRequiredError) {
-            OutlinedButton(
-                onClick = onLogin,
-                modifier = Modifier.fillMaxWidth().height(CsqttSizes.ControlHeight),
-                shape = CsqttShapes.Pill,
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = Color.Transparent,
-                    contentColor = MaterialTheme.colorScheme.error,
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Login, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Вход", fontWeight = FontWeight.Bold)
-            }
-        } else {
-            Button(
-                onClick = onLogin,
-                enabled = true,
-                modifier = Modifier.fillMaxWidth().height(CsqttSizes.ControlHeight),
-                shape = CsqttShapes.Pill,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF1475FD),
-                    contentColor = Color.White,
-                ),
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Login, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Вход", fontWeight = FontWeight.SemiBold)
-            }
         }
 
         if (!autoHashMode && hashErrorTexts.isNotEmpty()) {
@@ -975,16 +951,12 @@ private fun VkHashModeControls(
 
     CompactDropdownSetting(
         title = "Режим хешей",
-        selectedKey = if (!manualAllowed && savedHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL) {
-            CsqttConstants.VkAutoHash.MODE_AUTO_API
-        } else {
-            savedHashMode ?: CsqttConstants.VkAutoHash.MODE_MANUAL
-        },
+        selectedKey = savedHashMode ?: CsqttConstants.VkAutoHash.MODE_MANUAL,
         options = listOf(
             CsqttConstants.VkAutoHash.MODE_MANUAL to "Ручной",
             CsqttConstants.VkAutoHash.MODE_AUTO_API to "Авто API",
             CsqttConstants.VkAutoHash.MODE_AUTO_JS to "Авто ВК",
-        ).filterNot { (mode, _) -> !manualAllowed && mode == CsqttConstants.VkAutoHash.MODE_MANUAL },
+        ),
         enabled = true,
         indicatorProvider = { mode ->
             when (mode) {

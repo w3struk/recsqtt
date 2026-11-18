@@ -74,7 +74,6 @@ import com.csqtt.client.CsqttConstants
 import com.csqtt.client.ui.components.LocalCsqttHeaderActions
 import com.csqtt.client.ui.design.CsqttMotion
 import com.csqtt.client.ui.design.CsqttShapes
-import com.csqtt.client.ui.dialogs.VkAuthDialog
 import com.csqtt.client.ui.utils.parseCsqttLink
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -85,7 +84,6 @@ import kotlin.math.abs
 class MainActivity : ComponentActivity() {
     private val appSettingsStore by lazy { SettingsStore(applicationContext) }
     private var renderUi by mutableStateOf(false)
-    private var showVkAuthDialog by mutableStateOf(false)
     private var batteryPromptInFlight = false
 
     private val batteryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -136,8 +134,6 @@ class MainActivity : ComponentActivity() {
         checkAndRequestNotifications()
 
         setContent {
-            val authContext = LocalContext.current.applicationContext
-            val authScope = rememberCoroutineScope()
             val uiStateHolder = rememberSaveableStateHolder()
             val settingsStore = remember { appSettingsStore }
             val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Theme.MODE_SYSTEM)
@@ -172,24 +168,11 @@ class MainActivity : ComponentActivity() {
                                     onFingerprintChange = { fp ->
                                         scope.launch { settingsStore.saveFingerprint(fp) }
                                     },
-                                    onVkAuthRequested = { showVkAuthDialog = true },
                                 )
                             }
                         }
                     }
                 }
-            }
-            if (showVkAuthDialog) {
-                VkAuthDialog(
-                    onToken = { payload ->
-                        showVkAuthDialog = false
-                        authScope.launch {
-                            appSettingsStore.saveVkAccessToken(payload.token, payload.userId)
-                            authContext.showRaisedToast("Вечный VK access token сохранен", Toast.LENGTH_SHORT)
-                        }
-                    },
-                    onDismiss = { showVkAuthDialog = false },
-                )
             }
         }
     }
@@ -318,7 +301,6 @@ fun MainScreen(
     onThemeChange: (String) -> Unit = {},
     activeFingerprint: String = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT,
     onFingerprintChange: (String) -> Unit = {},
-    onVkAuthRequested: () -> Unit = {},
 ) {
     val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
@@ -524,7 +506,6 @@ fun MainScreen(
                                         settingsStore = settingsStore,
                                         tunnelAuthSettings = tunnelAuthSettings,
                                         validationRequest = tunnelValidationRequest,
-                                        onVkAuthRequested = onVkAuthRequested,
                                     )
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())

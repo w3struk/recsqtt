@@ -6,12 +6,26 @@ import org.junit.Test
 
 class ConnectionStartPolicyTest {
     @Test
-    fun tokenFromParticipantLinkIsReadyWithoutStoredToken() {
+    fun storedTokenIsReadyForAutoModesWithoutHashes() {
+        // Токен живёт в хранилище: ссылка его больше не несёт, поэтому готовность
+        // авто-режима считается только по сохранённому токену.
         assertEquals(
             true,
             ConnectionStartPolicy.hasReadyVkCredentials(
                 linkHashCount = 0,
-                linkTokenPresent = true,
+                autoHashMode = true,
+                storedTokenPresent = true,
+                manualHashCount = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun autoModeWithoutStoredTokenIsBlocked() {
+        assertEquals(
+            false,
+            ConnectionStartPolicy.hasReadyVkCredentials(
+                linkHashCount = 0,
                 autoHashMode = true,
                 storedTokenPresent = false,
                 manualHashCount = 0,
@@ -25,7 +39,6 @@ class ConnectionStartPolicyTest {
             true,
             ConnectionStartPolicy.hasReadyVkCredentials(
                 linkHashCount = 0,
-                linkTokenPresent = false,
                 autoHashMode = false,
                 storedTokenPresent = false,
                 manualHashCount = 1,
@@ -39,7 +52,6 @@ class ConnectionStartPolicyTest {
             false,
             ConnectionStartPolicy.hasReadyVkCredentials(
                 linkHashCount = 0,
-                linkTokenPresent = false,
                 autoHashMode = false,
                 storedTokenPresent = false,
                 manualHashCount = 0,

@@ -58,12 +58,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ConnectionSource
 import com.csqtt.client.ConnectionStartBlocker
 import com.csqtt.client.ConnectionStartPolicy
+import com.csqtt.client.BuildConfig
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelService
+import com.csqtt.client.VkCallCloseUiPolicy
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.newTunnelSessionId
 import com.csqtt.client.resolveConnectionSource
@@ -109,7 +111,8 @@ internal fun ConnectionTab(
     var pendingStartAfterVpnPermission by remember { mutableStateOf(false) }
     var isClosingVkCalls by remember { mutableStateOf(false) }
     var showCloseVkCallsConfirm by remember { mutableStateOf(false) }
-    val showCloseVkCalls = savedHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API
+    // Ручной рычаг закрытия звонков нужен только тестировщику: в release его нет.
+    val showCloseVkCalls = VkCallCloseUiPolicy.isVisible(BuildConfig.DEBUG)
     val isTunnelActive = tunnelRunning || tunnelStarting || tunnelStopping || autoPausedForWifi
 
     fun closeVkCalls() {
@@ -136,7 +139,6 @@ internal fun ConnectionTab(
 
     val parsedLink = remember(csqttLink) { parseCsqttLink(csqttLink) }
     val linkHashes = parsedLink?.hashes.orEmpty()
-    val linkTokenActive = parsedLink?.vkAccessToken?.isNotEmpty() == true
     val rawManualHashes = remember(vkHashes) {
         vkHashes.split(Regex("[,\\s\\n]+"))
             .map(String::trim)
@@ -161,7 +163,6 @@ internal fun ConnectionTab(
     val vkTokenActive = savedVkAccessToken?.isNotBlank() == true
     val hashesReady = hashSettingsLoaded && ConnectionStartPolicy.hasReadyVkCredentials(
         linkHashCount = linkHashes.size,
-        linkTokenPresent = linkTokenActive,
         autoHashMode = autoHashMode,
         storedTokenPresent = vkTokenActive,
         manualHashCount = manualHashes.size,
@@ -178,8 +179,6 @@ internal fun ConnectionTab(
             putExtra("peer", source.peer)
             putExtra("vk_hashes", source.hashes)
             putExtra("vk_hashes_from_link", source.hashesFromLink)
-            putExtra("vk_access_token", source.vkAccessToken)
-            putExtra("vk_token_from_link", source.tokenFromLink)
             putExtra("workers_per_hash", workersPerHash)
             putExtra("port", 0)
             putExtra("sni", sni)
@@ -288,7 +287,7 @@ internal fun ConnectionTab(
         }
     }
 
-    if (showCloseVkCallsConfirm) {
+    if (showCloseVkCalls && showCloseVkCallsConfirm) {
         CloseVkCallsDialog(
             isTunnelActive = isTunnelActive,
             onDismiss = { showCloseVkCallsConfirm = false },
