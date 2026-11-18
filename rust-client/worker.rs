@@ -899,6 +899,14 @@ impl GroupCredentials {
     }
 }
 
+/// Воркер выведен за текущую цель: уволен лимитом сервера или снижением числа
+/// потоков. `configured_workers` здесь больше не участвует: цель (`params.workers`)
+/// — единственный авторитет, её ставит и приложение, и сервер (`apply_workers_limit`).
+/// Порог 3 защищает от транзиентного нуля в момент пересборки параметров.
+pub(crate) fn worker_retired(id: usize, target: usize) -> bool {
+    target >= 3 && id > target
+}
+
 async fn supervise_worker(
     id: usize,
     context: Arc<GroupContext>,
@@ -909,8 +917,7 @@ async fn supervise_worker(
     loop {
         if worker_cancel.is_cancelled()
             || context.cancel.is_cancelled()
-            || (id > context.params.workers.load(Ordering::Acquire)
-                && id > context.params.configured_workers)
+            || worker_retired(id, context.params.workers.load(Ordering::Acquire))
         {
             return;
         }
@@ -925,8 +932,7 @@ async fn supervise_worker(
             Ok(()) => {
                 if worker_cancel.is_cancelled()
                     || context.cancel.is_cancelled()
-                    || (id > context.params.workers.load(Ordering::Acquire)
-                        && id > context.params.configured_workers)
+                    || worker_retired(id, context.params.workers.load(Ordering::Acquire))
                 {
                     return;
                 }
@@ -972,8 +978,7 @@ async fn worker_loop(
     loop {
         if worker_cancel.is_cancelled()
             || context.cancel.is_cancelled()
-            || (id > context.params.workers.load(Ordering::Acquire)
-                && id > context.params.configured_workers)
+            || worker_retired(id, context.params.workers.load(Ordering::Acquire))
         {
             return;
         }
@@ -1133,8 +1138,7 @@ async fn worker_loop(
             let lower = message.to_ascii_lowercase();
             if lower.contains("invalid_worker_count")
                 || message.contains("превышен лимит потоков")
-                || (id > context.params.workers.load(Ordering::Acquire)
-                    && id > context.params.configured_workers)
+                || worker_retired(id, context.params.workers.load(Ordering::Acquire))
             {
                 return;
             }

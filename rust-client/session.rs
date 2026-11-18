@@ -1712,8 +1712,7 @@ async fn run_allocated_session(
         }
     };
     if let Some(target) = &runtime.target_workers
-        && config.id > target.load(Ordering::Acquire)
-        && config.id > runtime.configured_workers
+        && crate::worker::worker_retired(config.id, target.load(Ordering::Acquire))
     {
         return Ok(false);
     }
@@ -1788,7 +1787,7 @@ async fn run_allocated_session(
                     tokio::pin!(notified);
                     notified.as_mut().enable();
                     let current_target = target.load(Ordering::Acquire);
-                    if config.id > current_target && config.id > runtime.configured_workers {
+                    if crate::worker::worker_retired(config.id, current_target) {
                         break;
                     }
                     notified.await;
@@ -2006,6 +2005,21 @@ async fn request_configuration(
                             if config.get_config && message.contains("FATAL_") {
                                 events.error("handshake_rejected", &message, true);
                                 bail!("{message}");
+                            }
+                            if message.contains("превышен лимит потоков") {
+                                // Этот воркер не влезает в лимит сервера: спрашиваем
+                                // лимит один раз и завершаем ожидание, иначе сессия
+                                // будет повторять GETCONF, пока её не остановят.
+                                let request = crate::protocol::workers_request(
+                                    &config.password,
+                                    scale.configured,
+                                );
+                                let _ = writer.send_bytes(request.as_bytes()).await;
+                                crate::log_error!(
+                                    "[ВОРКЕР #{}] сервер ограничил число потоков; запрошен лимит у сервера",
+                                    config.id
+                                );
+                                bail!("превышен лимит потоков");
                             }
                             crate::log_error!(
                                 "[ВОРКЕР #{}] Нефатальная ошибка разбора TUNCONF: {message}, продолжаем ожидание",
