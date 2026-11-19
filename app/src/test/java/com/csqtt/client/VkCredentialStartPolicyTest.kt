@@ -18,7 +18,10 @@ class VkCredentialStartPolicyTest {
 
     @Test
     fun `the message names the panel link`() {
-        assertEquals("токен приходит из ссылки панели", VkCredentialStartPolicy.TOKEN_FROM_PANEL_MESSAGE)
+        assertEquals(
+            "Этот режим доступен со свежей ссылкой из панели: импортируйте её",
+            VkCredentialStartPolicy.TOKEN_FROM_PANEL_MESSAGE,
+        )
     }
 
     @Test

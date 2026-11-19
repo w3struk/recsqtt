@@ -10,7 +10,8 @@ package com.csqtt.client
  */
 internal object VkCredentialStartPolicy {
 
-    const val TOKEN_FROM_PANEL_MESSAGE = "токен приходит из ссылки панели"
+    const val TOKEN_FROM_PANEL_MESSAGE =
+        "Этот режим доступен со свежей ссылкой из панели: импортируйте её"
 
     /**
      * `null` — запуск не блокируется этим правилом. Ручной режим проверяется отдельно

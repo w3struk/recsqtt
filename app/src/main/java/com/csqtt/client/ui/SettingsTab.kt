@@ -41,7 +41,7 @@ import com.csqtt.client.WorkerCountPolicy
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.VkHashValidator
 import com.csqtt.client.VkLinkImportPolicy
-import com.csqtt.client.VkTokenForgetUiPolicy
+import com.csqtt.client.VkCredentialUiPolicy
 import com.csqtt.client.BuildConfig
 import com.csqtt.client.shouldConfirmAutoJsMode
 import com.csqtt.client.shouldConfirmTcpTransport
@@ -116,7 +116,8 @@ internal fun SettingsTabContent(
     // Пока туннель жив или переходит между состояниями, креды не трогаем: закрытие
     // звонков оборвало бы сессию, а старт мог бы успеть создать новые.
     val vkTokenActionEnabled = !tunnelRunning && !tunnelStarting && !tunnelStopping
-    val showForgetTokenAction = VkTokenForgetUiPolicy.isVisible(BuildConfig.DEBUG)
+    val showCredentialUi = VkCredentialUiPolicy.statusVisible(BuildConfig.DEBUG)
+    val showForgetTokenAction = VkCredentialUiPolicy.forgetTokenVisible(BuildConfig.DEBUG)
     var showHashModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
     var showHashModeDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
     var showWorkModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
@@ -556,9 +557,9 @@ internal fun SettingsTabContent(
                     )
                 }
 
-                // «Забыть токен» доступен и когда ссылка несёт хеши: иначе сохранённые
-                // креды нельзя было бы убрать из приложения.
-                if (vkTokenActive || linkHashes.isEmpty()) {
+                // Статус кредов и «Забыть токен» — инструменты отладки: в release
+                // пользователь видит только результат (режимы/блокер запуска).
+                if (showCredentialUi && (vkTokenActive || linkHashes.isEmpty())) {
                     VkTokenStatusRow(
                         hasStoredToken = vkTokenActive,
                         storedUserId = storedVkUserId,
