@@ -32,6 +32,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -73,6 +75,19 @@ private fun countVkHashes(raw: String): Int =
     raw.split(Regex("[,\\s\\n]+")).count { it.trim().length >= 16 }
 
 class TunnelService : Service() {
+    private sealed interface PrepareResult {
+        data class Ready(val params: TunnelParams) : PrepareResult
+
+        /** Сеть не дождались / автопауза: процесс не трогаем, повтор решит обычный путь. */
+        data object Transient : PrepareResult
+
+        /** Ссылка, креды или хеши не годятся: туннель останавливается. */
+        data object Fatal : PrepareResult
+
+        /** Подготовка устарела (новый старт/переключение): молча выходим, ничего не трогая. */
+        data object Stale : PrepareResult
+    }
+
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(serviceJob + Dispatchers.Default)
 
@@ -102,10 +117,14 @@ class TunnelService : Service() {
     private val vkProbeJobs = mutableMapOf<Network, Job>()
     private val vkProbeLock = Any()
     private var vkRecoveryJob: Job? = null
+    @Volatile
+    private var callRecoveryJob: Job? = null
     private val vkCallReplacementBudget = VkCallReplacementBudget()
     private val vkCallStallBudget = VkCallReplacementBudget(max = 3)
     private var autoPauseSettingsJob: Job? = null
     private var autoPauseWifiWatchJob: Job? = null
+    @Volatile
+    private var profileSwitchJob: Job? = null
     private val autoPauseMutex = Mutex()
     private val wifiNetworkLock = Any()
     private val physicalWifiNetworks = mutableSetOf<Network>()
@@ -127,6 +146,7 @@ class TunnelService : Service() {
         registerPackageChangeReceiver()
         registerPhysicalNetworkCallback()
         observeAutoPauseOnWifi()
+        observeActiveProfile()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -220,6 +240,9 @@ class TunnelService : Service() {
                             return@launch
                         }
                         if (!isCurrentStart(requestGeneration)) return@launch
+                        // Один снимок профиля на весь старт: хеши, звонки и параметры
+                        // должны принадлежать одному профилю даже если его сменят в полёте.
+                        val activeProfile = store.activeProfile.first()
                         val resolvedHashes = if (hashesFromLink && !accountAutoJs) {
                             ResolvedVkHashes(intentHashes, false)
                         } else {
@@ -227,6 +250,7 @@ class TunnelService : Service() {
                                 store,
                                 intentHashes,
                                 workersPerHash,
+                                profile = activeProfile,
                                 forcedMode = if (accountAutoJs) {
                                     CsqttConstants.VkAutoHash.MODE_AUTO_JS
                                 } else {
@@ -252,6 +276,7 @@ class TunnelService : Service() {
                             secondaryVkHash = intent.getStringExtra("secondary_vk_hash") ?: "",
                             workersPerHash = workersPerHash,
                             port = intent.getIntExtra("port", 0),
+                            profile = activeProfile,
                             sni = intent.getStringExtra("sni") ?: "",
                             password = intent.getStringExtra("connection_password") ?: "",
                             protocol = intent.getStringExtra("protocol") ?: "udp",
@@ -336,10 +361,6 @@ class TunnelService : Service() {
             try {
                 val store = SettingsStore(appContext)
 
-                // Ссылка могла сохраниться с token= до разделения кредов: переносим их
-                // в хранилище до resolveConnectionSource. Повторный прогон — no-op.
-                store.migrateLinkCredentialsIfNeeded()
-
                 val wasRunning = store.tunnelWasRunning.first()
                 if (!wasRunning) {
                     Log.d("TunnelService", "restoreTunnel: tunnelWasRunning=false, автостарт отменён — чужой VPN не нужно убивать")
@@ -347,113 +368,20 @@ class TunnelService : Service() {
                     return@launch
                 }
                 autoPauseRequested = true
-                autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
-                TunnelManager.isLoggingEnabled = store.participantShowLogs.first()
-                if (reconcileWifiAutoPause()) return@launch
-
-                val source = resolveConnectionSource(store)
-                if (source == null) {
-                    TunnelManager.updateLog(
-                        "connection_source_error",
-                        "[ПОДКЛЮЧЕНИЕ] Не удалось разобрать сохранённую ссылку CSQTT. Откройте настройки подключения.",
-                        99,
-                        true,
-                    )
-                    launch(Dispatchers.Main) {
-                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
+                when (val prepared = prepareTunnelParams(store) { isCurrentStart(requestGeneration) }) {
+                    is PrepareResult.Ready -> {
+                        if (!isCurrentStart(requestGeneration)) return@launch
+                        launch(Dispatchers.Main) {
+                            if (!isCurrentStart(requestGeneration)) return@launch
+                            // Флаг журнала профильный: без него автовосстановление
+                            // вернулось бы к дефолту `true` и писало поверх выключенного.
+                            TunnelManager.isLoggingEnabled = store.participantShowLogs.first()
+                            startTunnel(prepared.params)
+                        }
                     }
-                    return@launch
-                }
-                val genId = store.reserveConnectionGeneration()
-                val salt = newTunnelSessionId()
-                val requestedVkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first())
-                val workersPerHash = WorkerCountPolicy.normalize(store.workersPerHash.first())
-                TunnelManager.isLoggingEnabled = store.participantShowLogs.first()
-                val configuredHashMode = store.vkHashMode.first()
-                val vkAuthMode = if (
-                    source.hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
-                ) {
-                    CsqttConstants.VkAuth.MODE_CALLS
-                } else {
-                    requestedVkAuthMode
-                }
-                val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
-                val credentialBlocker = VkCredentialStartPolicy.blockedReason(
-                    hashMode = configuredHashMode,
-                    authMode = vkAuthMode,
-                    hasToken = store.vkAccessToken.first().isNotBlank(),
-                )
-                if (credentialBlocker != null) {
-                    TunnelManager.updateLog(
-                        "vk_credentials_blocked",
-                        "[ПОДКЛЮЧЕНИЕ] Запуск не начат: $credentialBlocker",
-                        99,
-                        true,
-                    )
-                    launch(Dispatchers.Main) {
-                        if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
-                    }
-                    return@launch
-                }
-                if (!awaitVkNetwork()) {
-                    TunnelManager.starting.value = false
-                    return@launch
-                }
-                if (!isCurrentStart(requestGeneration)) return@launch
-                val restoredHashes = if (source.hashesFromLink && !accountAutoJs) {
-                    ResolvedVkHashes(source.hashes, false)
-                } else {
-                    resolveAutoHashes(
-                        store,
-                        source.hashes,
-                        workersPerHash,
-                        forcedMode = if (accountAutoJs) {
-                            CsqttConstants.VkAutoHash.MODE_AUTO_JS
-                        } else {
-                            null
-                        },
-                    )
-                }
-                val params = TunnelParams(
-                    peer = source.peer,
-                    vkHashes = restoredHashes?.value ?: "",
-                    secondaryVkHash = store.secondaryVkHash.first(),
-                    workersPerHash = workersPerHash,
-                    port = 0,
-                    sni = store.sni.first(),
-                    password = source.password,
-                    obfsMode = store.obfsMode.first(),
-                    turnTransport = store.turnTransport.first(),
-                    customTurnIps = store.customTurnIps.first(),
-                    vkAuthMode = vkAuthMode,
-                    captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
-                    captchaSolveMethod = store.captchaSolveMethod.first(),
-                    fingerprint = store.selectedFingerprint.first(),
-                    clientIds = store.activeClientIds.first(),
-                    generationId = genId,
-                    sessionSalt = salt,
-                    allowHashRedistribution = restoredHashes?.allowWorkerRedistribution == true,
-                    vkHashMode = restoredHashes?.mode ?: CsqttConstants.VkAutoHash.MODE_MANUAL,
-                    vkAccessToken = restoredHashes?.accessToken.orEmpty(),
-                )
-                if (
-                    params.peer.isNotEmpty() &&
-                    (
-                        params.vkHashes.isNotEmpty() ||
-                            params.vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS
-                    )
-                ) {
-                    launch(Dispatchers.Main) {
-                        if (isCurrentStart(requestGeneration)) startTunnel(params)
-                    }
-                } else {
-                    TunnelManager.updateLog(
-                        "connection_credentials_error",
-                        "[ПОДКЛЮЧЕНИЕ] В ссылке и настройках нет действующих VK-хэшей или VK-токена.",
-                        99,
-                        true,
-                    )
-                    launch(Dispatchers.Main) {
+                    PrepareResult.Stale -> return@launch
+                    PrepareResult.Transient -> return@launch
+                    PrepareResult.Fatal -> launch(Dispatchers.Main) {
                         if (isCurrentStart(requestGeneration)) stopTunnel(finishVkCalls = false)
                     }
                 }
@@ -475,10 +403,135 @@ class TunnelService : Service() {
         return true
     }
 
+    /**
+     * Снимок параметров туннеля из текущих настроек активного профиля.
+     * Туннель здесь не останавливается: решение принимает вызывающий, у которого есть
+     * своя генерация старта и guard `isCurrentStart`.
+     */
+    private suspend fun prepareTunnelParams(
+        store: SettingsStore,
+        isCurrent: () -> Boolean,
+    ): PrepareResult {
+        // Ссылка могла сохраниться с token= до разделения кредов: переносим их
+        // в хранилище до resolveConnectionSource. Повторный прогон — no-op.
+        store.migrateLinkCredentialsIfNeeded()
+        if (!isCurrent()) return PrepareResult.Stale
+
+        autoPauseOnWifiEnabled = store.autoPauseOnWifi.first()
+        if (reconcileWifiAutoPause()) return PrepareResult.Transient
+
+        val source = resolveConnectionSource(store)
+        if (source == null) {
+            TunnelManager.updateLog(
+                "connection_source_error",
+                "[ПОДКЛЮЧЕНИЕ] Не удалось разобрать сохранённую ссылку CSQTT. Откройте настройки подключения.",
+                99,
+                true,
+            )
+            return PrepareResult.Fatal
+        }
+        val genId = store.reserveConnectionGeneration()
+        val salt = newTunnelSessionId()
+        val requestedVkAuthMode = sanitizeVkAuthMode(store.vkAuthMode.first())
+        val vkAuthMode = if (
+            source.hashesFromLink && requestedVkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+        ) {
+            CsqttConstants.VkAuth.MODE_CALLS
+        } else {
+            requestedVkAuthMode
+        }
+        val accountAutoJs = vkAuthMode == CsqttConstants.VkAuth.MODE_AUTO_JS
+        val workersPerHash = WorkerCountPolicy.normalize(store.workersPerHash.first())
+        val configuredHashMode = store.vkHashMode.first()
+        val credentialBlocker = VkCredentialStartPolicy.blockedReason(
+            hashMode = configuredHashMode,
+            authMode = vkAuthMode,
+            hasToken = store.vkAccessToken.first().isNotBlank(),
+        )
+        if (credentialBlocker != null) {
+            TunnelManager.updateLog(
+                "vk_credentials_blocked",
+                "[ПОДКЛЮЧЕНИЕ] Запуск не начат: $credentialBlocker",
+                99,
+                true,
+            )
+            return PrepareResult.Fatal
+        }
+        if (!awaitVkNetwork()) {
+            // 60-секундное ожидание сети не повод убивать живой старый процесс.
+            TunnelManager.starting.value = false
+            return PrepareResult.Transient
+        }
+        // Долгое ожидание — ещё и окно, в котором профиль могли сменить или туннель
+        // остановить: без этой проверки мы выпустили бы звонки VK и потратили
+        // generation для старта, который уже никто не ждёт.
+        if (!isCurrent()) return PrepareResult.Stale
+        // Профиль читается один раз: если его сменят посреди подготовки, хеши и звонки
+        // должны остаться от того же профиля, что попадёт в снимок параметров.
+        val activeProfile = store.activeProfile.first()
+        // null здесь не выходим сразу: пустой хеш доходит до проверки ниже и даёт тот же
+        // connection_credentials_error, что и раньше.
+        val resolvedHashes = if (source.hashesFromLink && !accountAutoJs) {
+            ResolvedVkHashes(source.hashes, false)
+        } else {
+            resolveAutoHashes(
+                store,
+                source.hashes,
+                workersPerHash,
+                profile = activeProfile,
+                forcedMode = if (accountAutoJs) {
+                    CsqttConstants.VkAutoHash.MODE_AUTO_JS
+                } else {
+                    null
+                },
+            )
+        }
+        val params = TunnelParams(
+            peer = source.peer,
+            vkHashes = resolvedHashes?.value ?: "",
+            secondaryVkHash = store.secondaryVkHash.first(),
+            workersPerHash = workersPerHash,
+            port = 0,
+            profile = activeProfile,
+            sni = store.sni.first(),
+            password = source.password,
+            obfsMode = store.obfsMode.first(),
+            turnTransport = store.turnTransport.first(),
+            customTurnIps = store.customTurnIps.first(),
+            vkAuthMode = vkAuthMode,
+            captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
+            captchaSolveMethod = store.captchaSolveMethod.first(),
+            fingerprint = store.selectedFingerprint.first(),
+            clientIds = store.activeClientIds.first(),
+            generationId = genId,
+            sessionSalt = salt,
+            allowHashRedistribution = resolvedHashes?.allowWorkerRedistribution == true,
+            vkHashMode = resolvedHashes?.mode ?: CsqttConstants.VkAutoHash.MODE_MANUAL,
+            vkAccessToken = resolvedHashes?.accessToken.orEmpty(),
+        )
+        if (
+            params.peer.isNotEmpty() &&
+            (
+                params.vkHashes.isNotEmpty() ||
+                    params.vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_JS
+            )
+        ) {
+            return PrepareResult.Ready(params)
+        }
+        TunnelManager.updateLog(
+            "connection_credentials_error",
+            "[ПОДКЛЮЧЕНИЕ] В ссылке и настройках нет действующих VK-хэшей или VK-токена.",
+            99,
+            true,
+        )
+        return PrepareResult.Fatal
+    }
+
     private suspend fun resolveAutoHashes(
         store: SettingsStore,
         fallbackHashes: String,
         workersPerHash: Int,
+        profile: Int,
         forcedMode: String? = null,
     ): ResolvedVkHashes? {
         return when (val mode = forcedMode ?: store.vkHashMode.first()) {
@@ -490,7 +543,7 @@ class TunnelService : Service() {
                     applicationContext,
                     token,
                     workersPerHash,
-                    profile = store.activeProfile.first(),
+                    profile = profile,
                     userId = userId,
                 )
                     ?: return null
@@ -521,7 +574,8 @@ class TunnelService : Service() {
             try {
                 val store = SettingsStore(applicationContext)
                 val token = store.vkAccessToken.first()
-                val profile = store.activeProfile.first()
+                val profile = TunnelManager.getCurrentParams()?.profile?.takeIf { it >= 0 }
+                    ?: store.activeProfile.first()
                 val closed = VkAutoCallsManager.closeAll(applicationContext, token, profile)
                 if (closed) {
                     TunnelManager.updateLog(
@@ -561,11 +615,21 @@ class TunnelService : Service() {
             TunnelManager.completeVkCallRecovery()
             return
         }
-        serviceScope.launch {
+        callRecoveryJob = serviceScope.launch {
             var restartScheduled = false
             try {
                 val previous = TunnelManager.getCurrentParams() ?: return@launch
                 val store = SettingsStore(applicationContext)
+                val activeProfile = store.activeProfile.first()
+                // Профиль сменили, а процесс всё ещё на старом снимке: переключение,
+                // скорее всего, упало транзиентно (нет сети). Хоронить восстановление
+                // нельзя — повторяем переключение: prepare либо поднимет новый профиль,
+                // либо снова оставит старое подключение живым.
+                if (previous.profile >= 0 && previous.profile != activeProfile) {
+                    TunnelManager.completeVkCallRecovery()
+                    reconnectForProfile(activeProfile)
+                    return@launch
+                }
                 val vkHashMode = store.vkHashMode.first()
                 val source = resolveConnectionSource(store) ?: return@launch
                 if (vkHashMode == CsqttConstants.VkAutoHash.MODE_MANUAL) {
@@ -582,10 +646,11 @@ class TunnelService : Service() {
                         store,
                         fallbackHashes = "",
                         workersPerHash = workers,
+                        profile = activeProfile,
                         forcedMode = CsqttConstants.VkAutoHash.MODE_AUTO_JS,
                     )
                     vkHashMode == CsqttConstants.VkAutoHash.MODE_AUTO_API -> {
-                        val profile = store.activeProfile.first()
+                        val profile = previous.profile
                         val callStore = VkCallStore(applicationContext)
                         // Доменный код значит, что ссылка мертва. Иначе — сеть, застой без
                         // credential'а или чужая ошибка: ссылка, скорее всего, жива, и её
@@ -673,6 +738,7 @@ class TunnelService : Service() {
                             store,
                             fallbackHashes = source.hashes,
                             workersPerHash = workers,
+                            profile = activeProfile,
                         )
                     }
                     else -> ResolvedVkHashes(source.hashes, false)
@@ -706,6 +772,7 @@ class TunnelService : Service() {
                 restartScheduled = true
             } finally {
                 if (!restartScheduled) TunnelManager.completeVkCallRecovery()
+                if (callRecoveryJob === coroutineContext[Job]) callRecoveryJob = null
             }
         }
     }
@@ -1181,7 +1248,8 @@ class TunnelService : Service() {
                     VkAutoCallsManager.closeAll(
                         appContext,
                         store.vkAccessToken.first(),
-                        store.activeProfile.first(),
+                        TunnelManager.getCurrentParams()?.profile?.takeIf { it >= 0 }
+                            ?: store.activeProfile.first(),
                     )
                 } catch (e: CancellationException) {
                     throw e
@@ -1201,6 +1269,124 @@ class TunnelService : Service() {
             SettingsStore(applicationContext).autoPauseOnWifi.collect { enabled ->
                 autoPauseOnWifiEnabled = enabled
                 reconcileWifiAutoPause()
+            }
+        }
+    }
+
+    private fun observeActiveProfile() {
+        profileSwitchJob?.cancel()
+        profileSwitchJob = serviceScope.launch {
+            SettingsStore(applicationContext).activeProfile
+                .distinctUntilChanged()
+                // Первое значение — состояние на момент подписки, а не переключение.
+                .drop(1)
+                .collect { profile -> onActiveProfileChanged(profile) }
+        }
+    }
+
+    private fun onActiveProfileChanged(profile: Int) {
+        // Снимка ещё нет, но туннель поднимается: старт в полёте собран со СТАРОГО
+        // профиля. Неизвестный профиль считается другим, иначе переключение в окне
+        // старта потеряется и процесс поднимется не с тем профилем.
+        val sessionProfile = TunnelManager.getCurrentParams()?.profile?.takeIf { it >= 0 }
+            ?: if (TunnelManager.wantsTunnel()) Int.MIN_VALUE else profile
+        when (
+            profileSwitchAction(
+                sessionProfile = sessionProfile,
+                nextProfile = profile,
+                stopping = isStopping,
+                pausedForWifi = autoPausedForWifi,
+                tunnelWanted = TunnelManager.wantsTunnel(),
+            )
+        ) {
+            ProfileSwitchAction.IGNORE -> Unit
+            // Автопауза Wi-Fi: процесса нет, выход из паузы пересоберёт параметры сам.
+            ProfileSwitchAction.DEFER_TO_RESUME -> Unit
+            ProfileSwitchAction.RECONNECT -> reconnectForProfile(profile)
+        }
+    }
+
+    private fun reconnectForProfile(profile: Int) {
+        startJob?.cancel()
+        startJob = null
+        // Восстановление звонка могло уснуть на 30 с со старым профилем — его отложенный
+        // старт не должен перезаписать новый снимок.
+        callRecoveryJob?.cancel()
+        val generation = ++startGeneration
+        updateNotification("Подключение...")
+        startJob = serviceScope.launch {
+            try {
+                val store = SettingsStore(applicationContext)
+                val name = store.profileNames.first()[profile] ?: "Профиль $profile"
+                TunnelManager.updateLog(
+                    "profile_switch",
+                    "[ПРОФИЛЬ] Переключение на «$name» — переподключение",
+                    30,
+                    false,
+                )
+                when (val prepared = prepareTunnelParams(store) { isCurrentStart(generation) }) {
+                    is PrepareResult.Ready -> launch(Dispatchers.Main) {
+                        if (!isCurrentStart(generation)) return@launch
+                        ManlCaptchaWebViewManager.cancelCaptcha()
+                        vkCallReplacementBudget.reset()
+                        vkCallStallBudget.reset()
+                        TunnelManager.isLoggingEnabled = store.participantShowLogs.first()
+                        if (TunnelManager.hasRunRequest()) {
+                            // Смена профиля — граница сессии в журнале: маркер ставит
+                            // `start` после выгрузки буфера, иначе строки старого профиля
+                            // попали бы в новую сессию и слились бы по ключу.
+                            TunnelManager.switchTo(
+                                applicationContext,
+                                prepared.params,
+                                sessionMarker = "[ПРОФИЛЬ] «$name» — новое подключение",
+                            )
+                        } else {
+                            // Процесса ещё не было: обычный старт, иначе requestRestart
+                            // вернёт null. Но только если туннель всё ещё нужен: за время
+                            // подготовки его могли остановить насовсем (бюджеты/застой).
+                            if (!TunnelManager.wantsTunnel()) {
+                                TunnelManager.starting.value = false
+                                return@launch
+                            }
+                            TunnelManager.starting.value = true
+                            startTunnel(prepared.params)
+                        }
+                    }
+                    PrepareResult.Stale -> Unit
+                    PrepareResult.Transient -> {
+                        TunnelManager.starting.value = false
+                        TunnelManager.updateLog(
+                            "profile_switch_transient",
+                            "[ПРОФИЛЬ] Не удалось переподключиться на «$name» — оставляем текущее подключение",
+                            60,
+                            false,
+                        )
+                    }
+                    PrepareResult.Fatal -> {
+                        TunnelManager.updateLog(
+                            "profile_switch_stopped",
+                            "[ПРОФИЛЬ] Профиль «$name» не готов к подключению — туннель остановлен",
+                            99,
+                            true,
+                        )
+                        launch(Dispatchers.Main) {
+                            if (isCurrentStart(generation)) stopTunnel(finishVkCalls = false)
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("TunnelService", "Unable to switch profile", e)
+                TunnelManager.updateLog(
+                    "profile_switch_error",
+                    "[ERR] Не удалось переключить профиль: ${e.message ?: e.javaClass.simpleName}",
+                    99,
+                    true,
+                )
+                launch(Dispatchers.Main) {
+                    if (isCurrentStart(generation)) stopTunnel(finishVkCalls = false)
+                }
             }
         }
     }

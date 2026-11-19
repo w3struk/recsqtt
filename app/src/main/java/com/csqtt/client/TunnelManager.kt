@@ -269,6 +269,27 @@ object TunnelManager {
 
     fun getCurrentParams(): TunnelParams? = currentParams
 
+    /** Туннель должен быть поднят: уже работает, стартует или ждёт перезапуска после сбоя. */
+    internal fun wantsTunnel(): Boolean =
+        lifecycleState.isDesiredRunning() || starting.value || running.value
+
+    /** Туннель уже запрошен к запуску (работает, стартует или ждёт перезапуска). */
+    internal fun hasRunRequest(): Boolean = lifecycleState.isDesiredRunning()
+
+    /**
+     * Замена снимка параметров на живом туннеле. Только restart-семантика:
+     * `requestRestart` возвращает null, если запуск не запрошен, и тогда вызов
+     * ничего не делает — воскрешать остановленный пользователем туннель нельзя.
+     *
+     * [sessionMarker] отделяет журнал нового профиля от строк предыдущего.
+     */
+    fun switchTo(context: Context, params: TunnelParams, sessionMarker: String? = null) {
+        // Свежий старт выставляет это поле сам, switching-ветка — нет: без него
+        // профиль с другим способом решения капчи унаследовал бы старый.
+        currentCaptchaSolveMethod = params.captchaSolveMethod
+        start(context, params, isSwitching = true, sessionMarker = sessionMarker)
+    }
+
     private fun processIdOf(activeProcess: Process): Int? {
         return runCatching {
             val field = activeProcess.javaClass.getDeclaredField("pid")
@@ -1243,11 +1264,11 @@ object TunnelManager {
         }
     }
 
-    private fun appendSessionMarker() {
+    private fun appendSessionMarker(message: String = "[СЕССИЯ] Новое подключение") {
         appendLogEntry(
             LogEntry(
                 key = "session_${nextSessionId.getAndIncrement()}",
-                message = "[СЕССИЯ] Новое подключение",
+                message = message,
                 count = 1,
                 priority = 0,
                 isError = false,
@@ -1257,7 +1278,12 @@ object TunnelManager {
         )
     }
 
-    fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false) {
+    fun start(
+        context: Context,
+        params: TunnelParams,
+        isSwitching: Boolean = false,
+        sessionMarker: String? = null,
+    ) {
         val command = lifecycleCommand.incrementAndGet()
         autoPausedForWifi.value = false
         stopping.value = false
@@ -1304,7 +1330,15 @@ object TunnelManager {
                 if (isSwitching) currentParams = params
                 withContext(Dispatchers.Main) {
                     flushPendingLogs()
-                    if (!isSwitching && isLoggingEnabled && logs.isNotEmpty()) appendSessionMarker()
+                    // Маркер ставится только после выгрузки буфера: иначе строки
+                    // предыдущей сессии (включая терминальные записи старого процесса)
+                    // оказались бы после него и слились бы с новой сессией по ключу.
+                    when {
+                        !isSwitching && isLoggingEnabled && logs.isNotEmpty() ->
+                            appendSessionMarker()
+                        isSwitching && sessionMarker != null && isLoggingEnabled ->
+                            appendSessionMarker(sessionMarker)
+                    }
                 }
                 startProcessLocked(appContext, params, epoch)
             }
@@ -2129,6 +2163,10 @@ object TunnelManager {
         notifyController: Boolean = true,
     ) {
         stopping.value = true
+        // Остановка — конец и для «стартует»: иначе прямой `stop()` (восстановление
+        // звонка, бюджеты) оставил бы `wantsTunnel()` истинным и следующий
+        // наблюдатель профиля воскресил бы остановленный запуск.
+        starting.value = false
         synchronized(pendingRoutingReload) {
             lifecycleState.requestStop()
             pendingRoutingReload.clear()
@@ -2670,6 +2708,8 @@ data class TunnelParams(
     val secondaryVkHash: String = "",
     val workersPerHash: Int,
     val port: Int,
+    /** Профиль конфигурации, из которого собран этот снимок; -1 — снимок без профиля (неизвестен). */
+    val profile: Int = -1,
     val sni: String = "",
     val password: String = "",
     val protocol: String = "udp",
