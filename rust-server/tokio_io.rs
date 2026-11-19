@@ -21,7 +21,10 @@ pub const TUN_RX_DRAIN_BATCH: usize = 32;
 const UDP_CONTROL_BYTES: usize = 128;
 const URGENCY_FLUSH_SYSCALLS: usize = 1;
 pub const UDP_RECV_BUFFER_BYTES: usize = 512 * 1024;
-pub const UDP_SEND_BUFFER_BYTES: usize = 64 * 1024;
+// 64 КБ вмещали ~46 пакетов: любой всплеск на 100 воркерах переполнял сокет и давал
+// UdpSndbufErrors. 512 КБ — это ~2.1 с буферизации на поток при 2 Мбит/с, в пределах
+// бюджета теста packet_queues_and_socket_buffers_have_bounded_latency_budgets.
+pub const UDP_SEND_BUFFER_BYTES: usize = 512 * 1024;
 pub const RESERVED_CONTROL_SLOTS: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
