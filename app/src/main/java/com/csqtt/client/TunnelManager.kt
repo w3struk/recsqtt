@@ -141,6 +141,8 @@ object TunnelManager {
         val readyWorkers = mutableSetOf<Int>()
         val dtlsWorkers = mutableSetOf<Int>()
         val unavailableManualHashes = mutableSetOf<String>()
+        /** Последнее правило, доведённое до клиента в этом поколении. `null` — ничего не отправлено либо отправлена очистка; любой будущий путь, стирающий маршрутизацию клиента внутри поколения, обязан его обнулить. */
+        var routingPushedRule: ServerRoutingRule? = null
     }
 
     /**
@@ -2409,6 +2411,7 @@ object TunnelManager {
                 ipIsWhitelist = false,
                 directIps = "",
             )
+            identity.routingPushedRule = null
             if (previousRule != null) {
                 requestRoutingReload(identity, clientIp, dns, "routing_cleared")
             }
@@ -2431,9 +2434,16 @@ object TunnelManager {
             }
         }
 
+        // Повторный кадр CONFIG от другого воркера: правило уже доведено до клиента
+        // в этом поколении, второй раз его не отправляем и не журналируем.
+        if (RoutingApplyDedupPolicy.isRepeat(identity.routingPushedRule, newServerRule)) {
+            return RoutingApplyResult.Applied
+        }
+
         // Решение по доменам/приложениям — до мутации состояния и до любых
         // команд клиенту: терминальный исход не должен оставить полуприменённое
         // правило (см. RoutingContentPolicy).
+        var contentSource = RoutingLogPolicy.ContentSource.UNCACHED
         val rule = when (val contentDecision =
             RoutingContentPolicy.decide(newServerRule, cachedContent)) {
             is RoutingContentDecision.Terminal -> {
@@ -2465,19 +2475,11 @@ object TunnelManager {
                             )
                         }
                 }
-                updateLog(
-                    "routing_content_updated",
-                    routingContentLog("Домены и приложения сервера обновлены", contentDecision.rule),
-                    20,
-                )
+                contentSource = RoutingLogPolicy.ContentSource.UPDATED
                 contentDecision.rule
             }
             is RoutingContentDecision.FromCache -> {
-                updateLog(
-                    "routing_content_cached",
-                    routingContentLog("Домены и приложения сервера из кеша", contentDecision.rule),
-                    20,
-                )
+                contentSource = RoutingLogPolicy.ContentSource.CACHED
                 contentDecision.rule
             }
             is RoutingContentDecision.Uncached -> contentDecision.rule
@@ -2490,6 +2492,31 @@ object TunnelManager {
             previous
         }
         val decision = RoutingIpsPolicy.decide(rule, cachedIps)
+        val ipsSource = when (decision) {
+            is RoutingIpsPolicy.Decision.Update -> RoutingLogPolicy.IpsSource.UPDATED
+            is RoutingIpsPolicy.Decision.FromCache -> RoutingLogPolicy.IpsSource.CACHED
+            else -> RoutingLogPolicy.IpsSource.NONE
+        }
+        val ipsCount = when (decision) {
+            is RoutingIpsPolicy.Decision.Update -> decision.count
+            is RoutingIpsPolicy.Decision.FromCache -> decision.count
+            else -> null
+        }
+        val ipsSha = when (decision) {
+            is RoutingIpsPolicy.Decision.Update -> decision.sha
+            is RoutingIpsPolicy.Decision.FromCache -> decision.sha
+            else -> null
+        }
+        // Одна строка на фактическое применение, до любых записей клиенту и в
+        // кеш: при ошибке записи она остаётся выше строки ошибки. Терминальное
+        // решение строки не пишет — причину называет сама ошибка.
+        if (decision !is RoutingIpsPolicy.Decision.Terminal) {
+            updateLog(
+                "routing_applied",
+                RoutingLogPolicy.applyLine(rule, contentSource, ipsSource, ipsCount, ipsSha),
+                20,
+            )
+        }
         when (decision) {
             is RoutingIpsPolicy.Decision.Update -> {
                 cache?.let {
@@ -2506,21 +2533,11 @@ object TunnelManager {
                 if (!updateTemplateIps(identity, decision.sha, decision.text)) {
                     return routingWriteFailure(identity, "не удалось отправить список адресов сервера")
                 }
-                updateLog(
-                    "routing_ips_updated",
-                    "Список адресов сервера обновлён: ${decision.count} записей, sha ${decision.sha}",
-                    20,
-                )
             }
             is RoutingIpsPolicy.Decision.FromCache -> {
                 if (!updateTemplateIps(identity, decision.sha, decision.text)) {
                     return routingWriteFailure(identity, "не удалось отправить список адресов сервера")
                 }
-                updateLog(
-                    "routing_ips_cached",
-                    "Список адресов сервера из кеша: ${decision.count} записей, sha ${decision.sha}",
-                    20,
-                )
             }
             is RoutingIpsPolicy.Decision.Terminal -> {
                 synchronized(pendingRoutingReload) {
@@ -2570,12 +2587,9 @@ object TunnelManager {
         if (context != null && vpnInputsChanged) {
             requestRoutingReload(identity, clientIp, dns, "routing_changed")
         }
+        identity.routingPushedRule = rule
         return RoutingApplyResult.Applied
     }
-
-    private fun routingContentLog(prefix: String, rule: ServerRoutingRule): String =
-        "$prefix: доменов ${rule.domains.size}, приложений " +
-            (rule.packages.size + rule.presetRed.size + rule.presetOrange.size)
 
     private fun routingWriteFailure(identity: ProcessIdentity, message: String): RoutingApplyResult =
         synchronized(pendingRoutingReload) {

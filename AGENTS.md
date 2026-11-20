@@ -337,3 +337,16 @@ NDK ищется строго по пину; `ALLOW_NEWEST_NDK=1` — осозн
 `release.yml` и `beta.yml` их нет и быть не должно, иначе шаги размножатся. CI на pull request'ах
 нет, поэтому в повседневной работе гейты по-прежнему соблюдает тот, кто здесь работает; секреты и
 порядок первого релиза — в [BUILDING.md](BUILDING.md#релизный-ci-github-actions).
+
+
+## Референсы
+
+https://github.com/romanrublev/turnrelay
+https://github.com/pythoneer-dev-q/NotAWDTT-panel
+https://github.com/ildarmaga/wdtt
+https://github.com/TheAirBlow/Turnable
+https://github.com/spkprsnts/WireTurn
+https://github.com/Ivan4537/WDTT-Plus
+https://github.com/kulikov0/whitelist-bypass
+https://github.com/SanityProtocol/swg-panel
+https://github.com/cacggghp/vk-turn-proxy
