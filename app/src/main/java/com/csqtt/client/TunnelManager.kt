@@ -2359,22 +2359,13 @@ object TunnelManager {
         identity: ProcessIdentity,
     ): RoutingApplyResult {
         if (!isCurrent(identity)) return RoutingApplyResult.Applied
-        // Чтение диска может задержаться. Оно не держит монитор подключения;
-        // перед любой мутацией повторно проверяем identity под этим монитором.
         val context = if (newServerRule != null) activeContext() else null
-        val contentCache = context?.let(::routingContentCache)
-        val cachedContent = contentCache?.read()
-        val cache = context?.let(::routingCache)
-        val cachedIps = cache?.readSnapshot()
         // Блокирующий I/O (файловый кеш и stdin Rust) сериализуем на процесс:
         // общий монитор pendingRoutingReload держим только для проверки identity
         // и публикации состояния. Иначе забитый stdin не даёт stopLocked снять
         // VPN, а обработка логов на main thread ждёт монитор (ANR).
         return synchronized(identity.routingApplyLock) {
-            applyServerRoutingRuleSerialized(
-                newServerRule, clientIp, dns, identity,
-                context, contentCache, cachedContent, cache, cachedIps,
-            )
+            applyServerRoutingRuleSerialized(newServerRule, clientIp, dns, identity, context)
         }
     }
 
@@ -2384,10 +2375,6 @@ object TunnelManager {
         dns: String,
         identity: ProcessIdentity,
         context: Context?,
-        contentCache: RoutingContentCache?,
-        cachedContent: CachedRoutingContent?,
-        cache: RoutingIpsCache?,
-        cachedIps: CachedRoutingIps?,
     ): RoutingApplyResult {
         if (newServerRule == null) {
             val previousRule = synchronized(pendingRoutingReload) {
@@ -2434,16 +2421,23 @@ object TunnelManager {
             }
         }
 
-        // Повторный кадр CONFIG от другого воркера: правило уже доведено до клиента
-        // в этом поколении, второй раз его не отправляем и не журналируем.
+        // Повторный кадр: правило уже доведено до клиента в этом поколении, второй
+        // раз его не отправляем и не журналируем. Проверка стоит до чтения кешей:
+        // периодическая сверка правила (раз в 5 минут) не должна трогать диск.
         if (RoutingApplyDedupPolicy.isRepeat(identity.routingPushedRule, newServerRule)) {
             return RoutingApplyResult.Applied
         }
+
+        val contentCache = context?.let(::routingContentCache)
+        val cachedContent = contentCache?.read()
+        val cache = context?.let(::routingCache)
+        val cachedIps = cache?.readSnapshot()
 
         // Решение по доменам/приложениям — до мутации состояния и до любых
         // команд клиенту: терминальный исход не должен оставить полуприменённое
         // правило (см. RoutingContentPolicy).
         var contentSource = RoutingLogPolicy.ContentSource.UNCACHED
+        var contentChange = RoutingLogPolicy.ContentChange.FIRST
         val rule = when (val contentDecision =
             RoutingContentPolicy.decide(newServerRule, cachedContent)) {
             is RoutingContentDecision.Terminal -> {
@@ -2462,6 +2456,9 @@ object TunnelManager {
                 return RoutingApplyResult.Terminal(contentDecision.code, contentDecision.message)
             }
             is RoutingContentDecision.Updated -> {
+                // Сравнение идёт с кешем до его перезаписи: он и есть то, что
+                // применено сейчас, поэтому строка журнала называет изменение.
+                contentChange = RoutingLogPolicy.change(cachedContent, contentDecision.content)
                 // Кеш пишется вне общего монитора: диск может тормозить, а монитор
                 // нужен остановке VPN и обработке логов.
                 contentCache?.let { cache ->
@@ -2513,7 +2510,7 @@ object TunnelManager {
         if (decision !is RoutingIpsPolicy.Decision.Terminal) {
             updateLog(
                 "routing_applied",
-                RoutingLogPolicy.applyLine(rule, contentSource, ipsSource, ipsCount, ipsSha),
+                RoutingLogPolicy.applyLine(rule, contentSource, contentChange, ipsSource, ipsCount, ipsSha),
                 20,
             )
         }

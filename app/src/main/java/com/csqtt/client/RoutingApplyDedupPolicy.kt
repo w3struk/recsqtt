@@ -10,10 +10,34 @@ package com.csqtt.client
  * раз не отправляем.
  *
  * Сравнение идёт по значению (`==`), а не по ссылке: кадры разбираются в разные
- * экземпляры [ServerRoutingRule]. `null` на входе — очистка, она отправляется
- * всегда.
+ * экземпляры [ServerRoutingRule], а кешированный кадр ещё и приходит без
+ * «тяжёлой» части — её подставляет [normalize]. `null` на входе — очистка, она
+ * отправляется всегда.
  */
 internal object RoutingApplyDedupPolicy {
-    fun isRepeat(pushed: ServerRoutingRule?, incoming: ServerRoutingRule?): Boolean =
-        incoming != null && pushed == incoming
+    fun isRepeat(pushed: ServerRoutingRule?, incoming: ServerRoutingRule?): Boolean {
+        if (pushed == null || incoming == null) return false
+        return normalize(incoming, pushed) == pushed
+    }
+
+    /**
+     * Кадр с кешированной «тяжёлой» частью приходит без доменов и приложений:
+     * сервер отдаёт только `content_sha`, а сами списки приложение подставляет
+     * из кеша. Применённое правило поэтому хранит уже заполненные списки, и
+     * сравнение «как есть» не совпадало никогда — каждая периодическая сверка
+     * правила (раз в 5 минут) выглядела новым правилом и применялась заново.
+     *
+     * Для сравнения подставляем в кадр то, что уже применено, но только когда
+     * sha тот же: при другом sha это действительно другое правило.
+     */
+    private fun normalize(incoming: ServerRoutingRule, pushed: ServerRoutingRule): ServerRoutingRule {
+        if (!incoming.contentCached) return incoming
+        if (incoming.contentSha == null || incoming.contentSha != pushed.contentSha) return incoming
+        return incoming.copy(
+            domains = pushed.domains,
+            packages = pushed.packages,
+            presetRed = pushed.presetRed,
+            presetOrange = pushed.presetOrange,
+        )
+    }
 }

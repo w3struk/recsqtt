@@ -330,6 +330,55 @@ class RoutingManagerRegressionTest {
         }
     }
 
+    /**
+     * Периодическая сверка правила (GETCONF раз в 5 минут) приносит тот же
+     * кешированный кадр, что и первичное применение. Повтор обязан отсекаться до
+     * любых команд клиенту: иначе каждые 5 минут уходит полный UPDATE_IPS с
+     * gzip 6710 CIDR и строка «Маршрутизация сервера из кеша» с растущим (xN).
+     */
+    @Test fun `repeated cached delivery is applied to the client once`() {
+        val output = ByteArrayOutputStream()
+        val identity = attachProcess(output)
+        val context = Mockito.mock(Context::class.java)
+        Mockito.`when`(context.filesDir).thenReturn(dir)
+        field("strongAppContext").set(null, context)
+        val content = CachedRoutingContent(
+            sha = "a".repeat(64),
+            domains = listOf("example.ru"),
+            packages = listOf("com.example.app"),
+            presetRed = emptyList(),
+            presetOrange = emptyList(),
+        )
+        RoutingContentCache(dir).write(content)
+        val ipsText = "192.0.2.0/24\n"
+        val ipsSha = RoutingIpsPolicy.sha256Hex(ipsText.toByteArray(Charsets.UTF_8))
+        RoutingIpsCache(dir).write(ipsText, ipsSha)
+        val delivery = ServerRoutingRule(
+            isWhite = false,
+            packages = emptyList(),
+            domains = emptyList(),
+            ipsSha = ipsSha,
+            contentSha = content.sha,
+            contentCached = true,
+        )
+
+        assertEquals(
+            RoutingApplyResult.Applied,
+            invoke("applyServerRoutingRule", delivery, "10.0.0.2", "1.1.1.1", identity),
+        )
+        val afterFirst = output.toString(Charsets.UTF_8.name())
+        assertTrue(afterFirst.contains("UPDATE_IPS|"))
+        assertTrue(afterFirst.contains("UPDATE_DOMAINS|"))
+
+        assertEquals(
+            RoutingApplyResult.Applied,
+            invoke("applyServerRoutingRule", delivery, "10.0.0.2", "1.1.1.1", identity),
+        )
+
+        assertEquals("повтор кадра не должен повторно применяться", afterFirst, output.toString(Charsets.UTF_8.name()))
+        assertEquals(listOf("example.ru"), TunnelManager.activeServerRoutingRule.value?.domains)
+    }
+
     @Test fun `ready before rule changes sends once and queued changes use the latest snapshot`() {
         attachProcess()
         val context = Mockito.mock(Context::class.java)
