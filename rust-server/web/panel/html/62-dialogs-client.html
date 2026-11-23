@@ -1,0 +1,76 @@
+    <dialog id="newDlg">
+        <h2>Создание доступа</h2>
+        <div id="newDlgGroupNotice" style="display: none; font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+            Группа: <span id="newDlgGroupName" style="font-weight: 600; color: var(--text-muted);"></span>
+        </div>
+        <input type="hidden" id="newDlgGroupId" value="">
+        <div class="input-group">
+            <label for="cname">Имя клиента</label>
+            <input id="cname" maxlength="128">
+        </div>
+        <div class="input-group">
+            <label for="days">Срок действия (0 = Бессрочно, 1-365 Ручной лимит)</label>
+            <input type="number" id="days" value="30" min="0" max="365">
+        </div>
+        <div class="input-group">
+            <label for="new_workers">Число потоков (0 = Клиентские настройки, 3-100 Ручной лимит)</label>
+            <input type="number" id="new_workers" min="0" max="100" value="0" placeholder="0 (Клиентские)">
+        </div>
+
+        <div class="dlg-actions">
+            <button class="btn btn-ghost" onclick="document.getElementById('newDlg').close()">Отмена</button>
+            <button class="btn btn-primary" onclick="createClient()" id="createBtn">Создать</button>
+        </div>
+    </dialog>
+
+    <dialog id="editDlg">
+        <div class="dlg-header">
+            <h2>Управление доступом</h2>
+            <button class="close-btn" onclick="document.getElementById('editDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+
+        <div class="input-group">
+            <label for="edit_name">Имя клиента</label>
+            <input id="edit_name" maxlength="128">
+        </div>
+
+        <div class="input-group">
+            <label for="edit_group">Группа</label>
+            <select id="edit_group">
+                <option value="">Без группы</option>
+            </select>
+        </div>
+
+        <div class="input-group">
+            <label for="edit_pass">Пароль (ключ)</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <input id="edit_pass" readonly style="background: var(--surface-hover); color: var(--text-muted); cursor: not-allowed; flex: 1; font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace; height: 48px;">
+                <button class="btn btn-ghost" onclick="copyPasswordText()" style="width: 48px; height: 48px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0;" title="Копировать"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
+                <button class="btn btn-ghost" onclick="openQrModalForActiveClient()" style="width: 48px; height: 48px; padding: 0; display: flex; align-items: center; justify-content: center; flex-shrink: 0;" title="QR-код"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M7 7h.01M17 7h.01M7 17h.01M17 17h.01"></path></svg></button>
+            </div>
+        </div>
+
+        <div class="input-group">
+            <label for="edit_days">Срок действия (0 = Бессрочно, 1-365 Ручной лимит)</label>
+            <input type="number" id="edit_days" min="0" max="365">
+        </div>
+
+        <div class="input-group">
+            <label for="edit_workers">Число потоков (0 = Клиентские настройки, 3-100 Ручной лимит)</label>
+            <input type="number" id="edit_workers" min="0" max="100" value="0" placeholder="0 (Клиентские)">
+        </div>
+
+        <!-- Info Section -->
+        <div style="border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-top: 16px; font-size: 13px; display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; justify-content: space-between;"><span style="color: var(--text-muted);">IP-адрес:</span><span id="edit_ip_info" style="font-weight: 500;">—</span></div>
+            <div style="display: flex; justify-content: space-between;"><span style="color: var(--text-muted);">Трафик:</span><span id="edit_traffic_info" style="font-weight: 500; font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;">↑ 0 B / ↓ 0 B</span></div>
+        </div>
+
+        <div class="dlg-actions" style="margin-top: 16px;">
+            <button class="btn btn-ghost" id="edit_deleteBtn" style="color: var(--danger);" onclick="executeDelete()"><span class="hide-mobile">Удалить</span><span class="show-mobile">Удал.</span></button>
+            <button class="btn btn-ghost" id="edit_statusBtn" style="color: var(--primary);" onclick="executeToggle()">Выкл</button>
+            <button class="btn btn-primary" onclick="saveClientChanges()" id="edit_saveBtn"><span class="hide-mobile">Сохранить</span><span class="show-mobile">Сохр.</span></button>
+        </div>
+    </dialog>

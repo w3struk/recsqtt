@@ -1,0 +1,137 @@
+        .rule-targets-container {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--bg-color);
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .rule-target-section-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 4px 6px 2px;
+        }
+        .rule-target-item {
+            display: flex !important;
+            align-items: center !important;
+            gap: 10px !important;
+            padding: 8px 12px !important;
+            border-radius: 10px !important;
+            background: var(--surface) !important;
+            border: 1px solid var(--border) !important;
+            cursor: pointer !important;
+            transition: background 0.15s, border-color 0.15s !important;
+            user-select: none;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .rule-target-item:hover {
+            background: var(--surface-hover) !important;
+            border-color: color-mix(in srgb, var(--primary) 40%, transparent) !important;
+        }
+        .rule-target-item input[type="checkbox"] {
+            width: 18px !important;
+            min-width: 18px !important;
+            max-width: 18px !important;
+            height: 18px !important;
+            min-height: 18px !important;
+            max-height: 18px !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            accent-color: var(--primary);
+            cursor: pointer;
+            flex-shrink: 0;
+            border-radius: 4px;
+        }
+        .rule-target-info {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex: 1;
+            min-width: 0;
+        }
+        .rule-target-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-main);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .rule-target-meta {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .rule-target-badge {
+            display: inline-flex;
+            align-items: center;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: var(--icon-bg);
+            color: var(--primary);
+            flex-shrink: 0;
+        }
+        .client-card-body {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .client-card-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+        }
+        .client-card-label {
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+        .client-card-value {
+            color: var(--text-main);
+            font-weight: 500;
+        }
+        .client-sub-btn {
+            width: 100%;
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            font-size: 12px;
+            padding: 7px 10px;
+            border: 1px solid var(--border) !important;
+            color: var(--text-main) !important;
+            background: transparent !important;
+            border-radius: 8px;
+            font-weight: 500;
+            transition: all 0.15s ease;
+            cursor: pointer;
+            box-sizing: border-box;
+        }
+        .client-sub-btn:hover {
+            background: var(--surface-hover) !important;
+            border-color: var(--primary) !important;
+            color: var(--primary) !important;
+        }
+        [data-theme="dark"] .client-sub-btn {
+            border-color: rgba(255, 255, 255, 0.25) !important;
+            color: #ffffff !important;
+        }
+        [data-theme="dark"] .client-sub-btn:hover {
+            border-color: var(--primary) !important;
+            color: var(--primary) !important;
+            background: rgba(255, 255, 255, 0.05) !important;
+        }
+

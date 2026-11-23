@@ -1,0 +1,30 @@
+:root {
+            --bg-color: #f8fafc;
+            --surface: #ffffff;
+            --surface-hover: #f1f5f9;
+            --primary: #0077ff;
+            --primary-hover: #0060cc;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --danger: #ef4444;
+            --success: #10b981;
+            --icon-bg: rgba(0, 119, 255, 0.1);
+            --glass: rgba(255, 255, 255, 0.9);
+            --header-glass: rgba(255, 255, 255, 0.8);
+        }
+        [data-theme="dark"] {
+            --bg-color: #000000;
+            --surface: #0a0a0c;
+            --surface-hover: #161619;
+            --primary: #0077ff;
+            --primary-hover: #0060cc;
+            --text-main: #f4f4f5;
+            --text-muted: #9ca3af;
+            --border: #1f1f23;
+            --danger: #ef4444;
+            --success: #10b981;
+            --icon-bg: rgba(0, 119, 255, 0.15);
+            --glass: rgba(10, 10, 12, 0.85);
+            --header-glass: rgba(0, 0, 0, 0.8);
+        }

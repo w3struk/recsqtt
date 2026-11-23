@@ -265,7 +265,7 @@ test_integrity_and_features_fail_closed() {
         done
     done
 
-    for mutation in payload-size payload-sha size sha target elf-class elf-machine source-hash source cargo-toml cargo-lock; do
+    for mutation in payload-size payload-sha size sha target elf-class elf-machine source-hash source web-asset cargo-toml cargo-lock; do
         restore_valid_fixture
         case "$mutation" in
             payload-size)
@@ -302,6 +302,11 @@ test_integrity_and_features_fail_closed() {
                 ;;
             source)
                 printf '\n// provenance fixture mutation\n' >>"$ROOT/rust-server/main.rs"
+                fragment="source changed after the production server build"
+                ;;
+            web-asset)
+                printf '\n/* provenance fixture mutation */\n' \
+                    >>"$ROOT/rust-server/web/panel/css/00-base.css"
                 fragment="source changed after the production server build"
                 ;;
             cargo-toml)
@@ -416,13 +421,32 @@ test_strict_toolchain_pins() {
     printf '[OK] strict mode fails closed without scripts/toolchain.env\n'
 }
 
+# Случайный файл рядом с ассетами не должен ломать verify, а незнакомый формат
+# и пропавший каталог обязаны падать громко: хеш не должен сужаться молча.
+test_web_assets_are_bounded() {
+    restore_valid_fixture
+    printf 'leftover from a merge\n' >"$ROOT/rust-server/web/panel/css/00-base.css.orig"
+    expect_success "verify ignores a stray file next to the web assets" verify "${VALID_ARGS[@]}"
+
+    restore_valid_fixture
+    mkdir -p "$ROOT/rust-server/web/panel/img"
+    printf '<svg xmlns="http://www.w3.org/2000/svg"/>\n' >"$ROOT/rust-server/web/panel/img/logo.svg"
+    expect_failure "write rejects an unknown web asset type" \
+        "Unexpected file under rust-server/web" write "${VALID_ARGS[@]}"
+
+    restore_valid_fixture
+    rm -rf "$ROOT/rust-server/web"
+    expect_failure "write fails closed without the web assets" \
+        "Web assets directory is missing" write "${VALID_ARGS[@]}"
+}
+
 # Keep running the named cases during red so default/selection failures are
 # visible alongside the unchanged fail-closed integrity behavior.
 failed=0
 for test_case in test_default_amd64_manifest test_invalid_asset_selection \
     test_legacy_manifest_rejected test_stale_arm_assets_rejected \
-    test_integrity_and_features_fail_closed test_toolchain_recorded_and_compared \
-    test_strict_toolchain_pins; do
+    test_integrity_and_features_fail_closed test_web_assets_are_bounded \
+    test_toolchain_recorded_and_compared test_strict_toolchain_pins; do
     set +e
     ( trap - EXIT; set -e; "$test_case" )
     status=$?
@@ -435,4 +459,4 @@ for test_case in test_default_amd64_manifest test_invalid_asset_selection \
     fi
 done
 [[ "$failed" -eq 0 ]] || exit 1
-printf 'server-asset-provenance: 7 cases OK\n'
+printf 'server-asset-provenance: 8 cases OK\n'

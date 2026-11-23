@@ -1,0 +1,115 @@
+    <dialog id="routingRulesDlg" style="max-width: 680px; width: min(680px, calc(100% - 24px)); max-height: 85vh; overflow-y: auto;">
+        <div class="dlg-header" style="align-items: center; justify-content: space-between; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                <h2 style="margin: 0;">Управление маршрутизацией</h2>
+                <button class="btn btn-primary" style="font-size: 13px; padding: 4px 12px; height: 32px; white-space: nowrap;" onclick="openEditRoutingRuleDlg(null)">+ Создать правило</button>
+            </div>
+            <button class="close-btn" onclick="document.getElementById('routingRulesDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <p style="font-size: 13px; color: var(--text-muted); margin: 8px 0 16px; line-height: 1.5;">
+            Правила маршрутизации автоматически передаются клиенту Android при подключении (через TUNCONF). При назначении правила клиенту вкладка «Исключения» в приложении скрывается, а правила применяются сервером.
+        </p>
+        <div id="routingRulesList" style="display: flex; flex-direction: column; gap: 12px;"></div>
+    </dialog>
+
+    <dialog id="editRoutingRuleDlg" style="max-width: 620px; width: min(620px, calc(100% - 24px)); max-height: 85vh; overflow-y: auto;">
+        <div class="dlg-header">
+            <h2 id="editRoutingRuleTitle">Правило маршрутизации</h2>
+            <button class="close-btn" onclick="document.getElementById('editRoutingRuleDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <input type="hidden" id="ruleId">
+        <div class="input-group">
+            <label for="ruleName">Имя правила</label>
+            <input id="ruleName" maxlength="128" placeholder="Например: Обход блокировок">
+        </div>
+        <div class="input-group">
+            <label for="ruleMode">Режим исключения приложений</label>
+            <select id="ruleMode" onchange="onRuleAppsModeChange()">
+                <option value="blacklist">Чёрный список</option>
+                <option value="whitelist">Белый список</option>
+            </select>
+        </div>
+        <div class="input-group">
+            <label for="rulePackages">Список пакетов приложений</label>
+            <textarea id="rulePackages" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="com.instagram.android&#10;org.telegram.messenger"></textarea>
+        </div>
+        <div class="toggle-row" id="rulePresetAppsRow" style="margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <label for="rulePresetApps" style="cursor: pointer;">Готовый список RU приложений</label>
+                <button type="button" class="btn-icon" style="padding: 2px; border: none; background: transparent; cursor: pointer; color: var(--primary); display: flex; align-items: center;" onclick="openPresetAppsDlg()" title="Посмотреть список RU приложений">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                </button>
+            </div>
+            <label class="switch">
+                <input type="checkbox" id="rulePresetApps">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="input-group">
+            <label for="ruleDomainsMode">Режим исключения доменов</label>
+            <select id="ruleDomainsMode" onchange="onRuleDomainsModeChange()">
+                <option value="blacklist">Чёрный список</option>
+                <option value="whitelist">Белый список</option>
+            </select>
+        </div>
+        <div class="input-group">
+            <label for="ruleDomains">Список доменов</label>
+            <textarea id="ruleDomains" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="gosuslugi.ru&#10;*.ru&#10;vk.com"></textarea>
+        </div>
+        <div class="toggle-row" id="ruleTemplateDomainsRow" style="margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <label for="ruleTemplateDomains" style="cursor: pointer;">Готовый список RU доменов</label>
+                <button type="button" class="btn-icon" style="padding: 2px; border: none; background: transparent; cursor: pointer; color: var(--primary); display: flex; align-items: center;" onclick="openTemplateDomainsDlg()" title="Посмотреть список RU доменов">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                </button>
+            </div>
+            <label class="switch">
+                <input type="checkbox" id="ruleTemplateDomains">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="input-hint">Вместе с готовым списком RU — до 1024 доменов; правило, которое не влезает в одно событие, сохранить нельзя.</div>
+        <div class="input-group">
+            <label for="ruleIpMode">Режим исключения адресов</label>
+            <select id="ruleIpMode" onchange="onRuleIpModeChange()">
+                <option value="blacklist">Чёрный список</option>
+                <option value="whitelist">Белый список</option>
+            </select>
+        </div>
+        <div class="input-group">
+            <label for="ruleIps">Список адресов</label>
+            <textarea id="ruleIps" rows="3" style="width: 100%; background: var(--surface); color: var(--text-main); border: 1px solid var(--border); border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px;" placeholder="1.2.3.4/32&#10;1.2.3.4&#10;1.2.3.4-1.2.3.255"></textarea>
+        </div>
+        <div class="input-hint">До 512 адресов.</div>
+        <div class="toggle-row" id="ruleTemplateIpsRow" style="margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <label for="ruleTemplateIps" style="cursor: pointer;">Готовый список RU адресов</label>
+                <button type="button" class="btn-icon" style="padding: 2px; border: none; background: transparent; cursor: pointer; color: var(--primary); display: flex; align-items: center;" onclick="openTemplateIpsDlg()" title="Посмотреть список RU адресов">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                </button>
+            </div>
+            <label class="switch">
+                <input type="checkbox" id="ruleTemplateIps">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="input-group">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; flex-wrap: wrap; gap: 6px;">
+                <label style="margin: 0;">Применить правило к:</label>
+                <div style="display: flex; gap: 6px;">
+                    <button type="button" class="btn btn-ghost" style="font-size: 11px; height: 26px; padding: 0 8px; border: 1px solid var(--border);" onclick="selectAllRuleTargets(true)">Выбрать все</button>
+                    <button type="button" class="btn btn-ghost" style="font-size: 11px; height: 26px; padding: 0 8px; border: 1px solid var(--border);" onclick="selectAllRuleTargets(false)">Снять все</button>
+                </div>
+            </div>
+            <div id="ruleTargetsContainer" class="rule-targets-container" style="user-select: none; -webkit-user-select: none; touch-action: pan-y;"></div>
+        </div>
+        <div class="dlg-actions">
+            <button class="btn btn-ghost" onclick="document.getElementById('editRoutingRuleDlg').close()">Отмена</button>
+            <button class="btn btn-ghost" id="ruleDeleteBtn" style="color: var(--danger); display: none;" onclick="deleteCurrentRoutingRule()">Удалить</button>
+            <button class="btn btn-primary" onclick="saveRoutingRule()" id="ruleSaveBtn">Сохранить</button>
+        </div>
+    </dialog>

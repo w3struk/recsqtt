@@ -1,0 +1,60 @@
+    <dialog id="templateDomainsDlg" style="max-width: 540px; width: min(540px, calc(100% - 24px)); max-height: 80vh; overflow-y: auto;">
+        <div class="dlg-header">
+            <h2>Список RU доменов</h2>
+            <button class="close-btn" onclick="document.getElementById('templateDomainsDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.5;">
+            Эти <span id="templateDomainsCount">503</span> домена направляются напрямую без VPN при включении функции:
+        </p>
+        <div style="margin-bottom: 10px;">
+            <input id="templateDomainsFilter" placeholder="Быстрый поиск по доменам..." style="width: 100%; height: 38px; font-size: 13px; padding: 0 12px;" oninput="filterTemplateDomains(this.value)">
+        </div>
+        <div id="templateDomainsList" style="max-height: 320px; overflow-y: auto; background: var(--bg-color); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--text-main);"></div>
+        <div class="dlg-actions" style="margin-top: 16px;">
+            <button class="btn btn-primary" onclick="document.getElementById('templateDomainsDlg').close()">Понятно</button>
+        </div>
+    </dialog>
+
+    <dialog id="templateIpsDlg" style="max-width: 540px; width: min(540px, calc(100% - 24px)); max-height: 80vh; overflow-y: auto;">
+        <div class="dlg-header">
+            <h2>Список RU адресов</h2>
+            <button class="close-btn" onclick="document.getElementById('templateIpsDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.5;">
+            Эти <span id="templateIpsCount"></span> адресов направляются напрямую без VPN при включении функции:
+        </p>
+        <div style="margin-bottom: 10px;">
+            <input id="templateIpsFilter" placeholder="Быстрый поиск по адресам..." style="width: 100%; height: 38px; font-size: 13px; padding: 0 12px;" oninput="filterTemplateIps(this.value)">
+        </div>
+        <div id="templateIpsList" style="max-height: 320px; overflow-y: auto; background: var(--bg-color); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--text-main);"></div>
+        <div class="dlg-actions" style="margin-top: 16px;">
+            <button class="btn btn-primary" onclick="document.getElementById('templateIpsDlg').close()">Понятно</button>
+        </div>
+    </dialog>
+
+    <dialog id="presetAppsDlg" style="max-width: 540px; width: min(540px, calc(100% - 24px)); max-height: 80vh; overflow-y: auto;">
+        <div class="dlg-header">
+            <h2>Готовый список RU приложений</h2>
+            <button class="close-btn" onclick="document.getElementById('presetAppsDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.5;">
+            Приложения, направляемые мимо туннеля по пресету. Список только для чтения.
+        </p>
+        <div id="presetRedGroup" style="margin-bottom: 12px;">
+            <h4 style="font-size: 13px; color: var(--text-main); margin-bottom: 6px;">Всегда мимо туннеля (<span id="presetRedCount">0</span>)</h4>
+            <div id="presetRedList" style="max-height: 220px; overflow-y: auto; background: var(--bg-color); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--text-main);"></div>
+        </div>
+        <div id="presetOrangeGroup" style="margin-bottom: 12px;">
+            <h4 style="font-size: 13px; color: var(--text-main); margin-bottom: 6px;">Можно отключить (<span id="presetOrangeCount">0</span>)</h4>
+            <div id="presetOrangeList" style="max-height: 220px; overflow-y: auto; background: var(--bg-color); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--text-main);"></div>
+        </div>
+        <div class="dlg-actions" style="margin-top: 16px;">
+            <button class="btn btn-primary" onclick="document.getElementById('presetAppsDlg').close()">Понятно</button>
+        </div>
+    </dialog>

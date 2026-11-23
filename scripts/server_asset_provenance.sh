@@ -336,8 +336,21 @@ wire_protocol_revision() {
     printf '%s\n' "$revision"
 }
 
+# Форматы, которые встраиваются в бинарник через include_str!. Новый формат
+# ассета добавляется сюда — и сразу попадает в хеш провенанса и в проверку дерева.
+WEB_ASSET_GLOBS=('*.css' '*.js' '*.html')
+
+is_web_asset() {
+    local rel="$1" glob
+    for glob in "${WEB_ASSET_GLOBS[@]}"; do
+        # shellcheck disable=SC2053  # глоб справа — намеренное сравнение по шаблону
+        [[ "$rel" == $glob ]] && return 0
+    done
+    return 1
+}
+
 build_input_files() {
-    local prefix
+    local prefix rel
     printf '%s\n' \
         rust-server/build_linux.sh \
         rust-server/build_linux_variants.sh \
@@ -352,6 +365,16 @@ build_input_files() {
 
     find "$ROOT/rust-server" -maxdepth 1 -type f -name '*.rs' -printf 'rust-server/%P\n'
     find "$ROOT/rust-server/data" -maxdepth 1 -type f -name '*.txt' -printf 'rust-server/data/%P\n'
+
+    # Веб-ассеты панели скомпилированы в бинарник через include_str!, поэтому их
+    # правка обязана менять хеш провенанса: иначе установленный сервер остался бы
+    # со старым UI при «свежих» исходниках. Хешируются только встраиваемые
+    # форматы; допустимость дерева проверяет verify_web_asset_tree.
+    while IFS= read -r rel; do
+        if is_web_asset "$rel"; then
+            printf '%s\n' "$rel"
+        fi
+    done < <(find "$ROOT/rust-server/web" -type f -printf 'rust-server/web/%P\n')
     find "$ROOT/shared" -maxdepth 1 -type f -name '*.rs' -printf 'shared/%P\n'
 
     # Cargo config files, same reasoning as on the client side: they set the build
@@ -360,6 +383,22 @@ build_input_files() {
         [[ -d "$ROOT/$prefix" ]] || continue
         ( cd "$ROOT/$prefix" && find . -type f -printf "$prefix/%P\n" )
     done
+}
+
+# Допустимость дерева веб-ассетов проверяется отдельным шагом, а не внутри
+# build_input_files: `die` из конвейера (`build_input_files | sort`) убивает
+# только подоболочку конвейера, скрипт продолжил бы работу с усечённым списком
+# входов. Остатки редакторов и слияний хеш не меняют, незнакомый формат — ошибка.
+verify_web_asset_tree() {
+    local rel
+    [[ -d "$ROOT/rust-server/web" ]] || die "Web assets directory is missing: rust-server/web"
+    while IFS= read -r rel; do
+        is_web_asset "$rel" && continue
+        case "$rel" in
+            .DS_Store | */.DS_Store | .* | */.* | *~ | *.orig | *.rej | *.swp | *.bak) continue ;;
+            *) die "Unexpected file under rust-server/web (add its extension to WEB_ASSET_GLOBS): $rel" ;;
+        esac
+    done < <(find "$ROOT/rust-server/web" -type f -printf 'rust-server/web/%P\n')
 }
 
 canonical_build_input_hash() {
@@ -643,6 +682,8 @@ for stale_asset in csqtt-linux-arm64 csqtt-linux-armv7; do
     [[ ! -e "$ASSET_DIR/$stale_asset" && ! -L "$ASSET_DIR/$stale_asset" ]] ||
         die "stale ARM server asset: $ASSET_DIR/$stale_asset"
 done
+
+verify_web_asset_tree
 
 if [[ "$MODE" == "write" ]]; then
     write_manifest

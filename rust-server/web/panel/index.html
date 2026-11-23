@@ -1,0 +1,73 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" id="themeColorMeta" content="#0a0a0c">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" type="image/svg+xml" href="/pwa-icon.svg">
+    <link rel="apple-touch-icon" href="/pwa-icon.svg">
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-icon-192.png">
+    <meta property="og:title" content="reCSQTT">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="/pwa-icon.svg">
+    <title>reCSQTT</title>
+    <script src="/qrcode.min.js"></script>
+    <style>
+        /*__PANEL_CSS__*/
+    </style>
+</head>
+<body>
+    <!--__PANEL_HEADER__-->
+    <main>
+        <div class="tabs-container">
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="monitoring" onclick="switchTab('monitoring')">Мониторинг</button>
+                <button class="tab-btn" data-tab="clients" onclick="switchTab('clients')">Клиенты</button>
+                <button class="tab-btn" data-tab="logs" onclick="switchTab('logs')">Логи</button>
+                <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Настройки</button>
+            </div>
+        </div>
+
+    <!--__PANEL_MONITORING__-->
+
+    <!--__PANEL_CLIENTS__-->
+
+    <!--__PANEL_LOGS__-->
+
+    <!--__PANEL_SETTINGS__-->
+    </main>
+
+    <!--__PANEL_DIALOGS_MISC__-->
+
+    <!--__PANEL_DIALOGS_CLIENT__-->
+
+    <!--__PANEL_DIALOGS_GROUP__-->
+
+    <!--__PANEL_DIALOGS_ROUTING__-->
+
+    <!--__PANEL_DIALOGS_TEMPLATES__-->
+
+    <!--__PANEL_DIALOGS_HUB__-->
+
+    <!--__PANEL_DIALOGS_QR__-->
+
+    <!--__PANEL_DIALOGS_IMPORT_EXPORT__-->
+
+    <!-- API Documentation Modal -->
+    <!--__PANEL_DIALOGS_API_DOCS__-->
+
+    <!--__PANEL_DIALOGS_REBOOT__-->
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        //__PANEL_JS__
+    </script>
+</body>
+</html>
+

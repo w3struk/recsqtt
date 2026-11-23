@@ -1,0 +1,26 @@
+        .dlg-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .dlg-header h2 {
+            margin: 0;
+            font-size: 22px;
+        }
+        .close-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            outline: none;
+        }
+        .close-btn:hover {
+            background: var(--surface-hover);
+            color: var(--text-main);
+        }
+

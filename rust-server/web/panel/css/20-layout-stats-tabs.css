@@ -1,0 +1,23 @@
+        main { max-width: 1300px; width: 100%; margin: 0 auto; padding: 32px 24px 80px; display: flex; flex-direction: column; gap: 32px; }
+
+        .dashboard { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; }
+        .stat-card { padding: 24px; display: flex; flex-direction: column; gap: 12px; position: relative; overflow: hidden; }
+        .stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--primary); opacity: 0.8; }
+        .stat-header { display: flex; align-items: center; justify-content: space-between; }
+        .stat-icon { width: 40px; height: 40px; border-radius: 12px; background: var(--icon-bg); color: var(--primary); display: grid; place-items: center; }
+        .stat-icon svg { width: 20px; height: 20px; fill: currentColor; stroke: currentColor; }
+        .stat-label { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        .stat-value { font-size: 28px; font-weight: 700; color: var(--text-main); line-height: 1.1; }
+        #ram_val { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+        #ram_detail { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+        #traffic_ingress { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+        .stat-sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+        .progress-bar { width: 100%; height: 6px; background: var(--surface-hover); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+        .progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width 0.5s ease-out; }
+
+        .tabs-container { display: flex; justify-content: center; margin-bottom: 8px; }
+        .tabs { display: inline-flex; background: var(--surface); border: 1px solid var(--border); padding: 4px; border-radius: 14px; gap: 4px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+        .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 20px; font-size: 14px; font-weight: 600; border-radius: 10px; cursor: pointer; display: flex; align-items: center; gap: 8px; outline: none; white-space: nowrap; }
+        .tab-btn:hover { color: var(--text-main); }
+        .tab-btn.active { background: var(--primary); color: #ffffff; box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 20%, transparent); }
+

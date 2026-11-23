@@ -1,0 +1,62 @@
+    <dialog id="importExportDlg" style="max-width: 640px; width: min(640px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
+        <div class="dlg-header">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div style="width: 36px; height: 36px; border-radius: 10px; background: var(--icon-bg); color: var(--primary); display: grid; place-items: center;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
+                    </svg>
+                </div>
+                <div>
+                    <h2 style="font-size: 20px; font-weight: 700; margin: 0;">Импорт и Экспорт</h2>
+                    <p style="font-size: 12px; color: var(--text-muted); margin: 0;">Резервная копия, перенос клиентов и настроек</p>
+                </div>
+            </div>
+            <button class="close-btn" onclick="document.getElementById('importExportDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+            <button id="btnTabExport" class="btn btn-primary" style="flex: 1;" onclick="switchImportExportTab('export')">Экспорт</button>
+            <button id="btnTabImport" class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border);" onclick="switchImportExportTab('import')">Импорт</button>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 16px; align-items: center;">
+            <label style="flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                <input type="checkbox" id="ieOptClients" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary);">
+                <span>Клиенты</span>
+            </label>
+            <label style="flex: 1; display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                <input type="checkbox" id="ieOptSettings" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary);">
+                <span>Настройки</span>
+            </label>
+        </div>
+
+        <div id="iePaneExport" style="display: flex; flex-direction: column; gap: 12px;">
+            <div style="display: flex; gap: 10px;">
+                <button class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); gap: 8px; justify-content: center;" onclick="executeExportDownload()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    <span>Скачать</span>
+                </button>
+                <button class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); gap: 8px; justify-content: center;" onclick="executeExportCopy()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    <span>Копировать</span>
+                </button>
+            </div>
+        </div>
+
+        <div id="iePaneImport" style="display: none; flex-direction: column; gap: 12px;">
+            <div style="display: flex; gap: 10px;">
+                <label class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); cursor: pointer; gap: 8px; justify-content: center; display: inline-flex; align-items: center;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+                    <span>Загрузить файл</span>
+                    <input type="file" id="ieFileInput" accept=".json" style="display: none;" onchange="handleImportFile(event)">
+                </label>
+                <button class="btn btn-ghost" style="flex: 1; border: 1px solid var(--border); gap: 8px; justify-content: center;" onclick="executeImportFromClipboard()">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+                    <span>Вставить из буфера</span>
+                </button>
+            </div>
+            <div id="ieImportStatus" style="font-size: 13px; font-weight: 600; display: none; text-align: center;"></div>
+        </div>
+    </dialog>

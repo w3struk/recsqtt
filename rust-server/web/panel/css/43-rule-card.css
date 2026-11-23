@@ -1,0 +1,29 @@
+        .rule-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .rule-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .rule-card-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+        .rule-chip {
+            display: inline-flex;
+            align-items: center;
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 6px;
+            background: var(--surface-hover);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+        }

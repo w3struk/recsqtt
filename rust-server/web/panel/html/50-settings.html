@@ -1,0 +1,65 @@
+        <div id="settings-section" style="display: none;">
+            <section>
+                <div class="settings-actions-grid">
+                    <button class="settings-action-btn reboot" onclick="document.getElementById('rebootDlg').showModal()">Перезагрузить</button>
+                    <button class="settings-action-btn danger" onclick="logout()">Выйти</button>
+                </div>
+                <div class="settings-grid">
+                    <div class="glass-panel setting-card" style="display: flex; flex-direction: column; justify-content: space-between;">
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label for="dns_provider">DNS Адреса</label>
+                            <div id="dns_selection" class="dns-selection">
+                            <select id="dns_provider">
+                                <option value="custom">Ручной DNS</option>
+                                <option value="yandex" selected>Yandex DNS</option>
+                                <option value="cloudflare">Cloudflare DNS</option>
+                                <option value="google">Google DNS</option>
+                                <option value="adguard">AdGuard DNS</option>
+                                <option value="xbox">Xbox DNS</option>
+                                <option value="comms">Comms DNS</option>
+                                <option value="geohide">Geohide DNS</option>
+                                <option value="quad9">Quad9 DNS</option>
+                                <option value="opendns">OpenDNS</option>
+                                <option value="rostelecom">Rostelecom DNS</option>
+                                <option value="nextdns">NextDNS</option>
+                                <option value="bizone">BI.ZONE DNS</option>
+                                <option value="nsdi">НСДИ DNS</option>
+                            </select>
+                            <input id="dns_manual" class="dns-manual-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="ipv4,ipv4" aria-label="Ручной DNS">
+                            </div>
+                        </div>
+                        <button id="saveDnsBtn" class="btn btn-primary" style="width: 100%; margin-top: 22px;" onclick="saveDnsSettings()" disabled>Применить DNS</button>
+                    </div>
+                    <div class="glass-panel setting-card" style="display: flex; flex-direction: column; justify-content: space-between;">
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label for="auto_restart_interval">Интервал перезагрузок</label>
+                            <select id="auto_restart_interval">
+                                <option value="0" selected>Отключено (по умолчанию)</option>
+                                <option value="12">12 часов</option>
+                                <option value="24">24 часа</option>
+                                <option value="48">48 часов</option>
+                                <option value="72">72 часа</option>
+                            </select>
+                        </div>
+                        <button id="saveAutoRestartIntervalBtn" class="btn btn-primary" style="width: 100%; margin-top: 22px;" onclick="saveAutoRestartInterval()" disabled>Сохранить интервал</button>
+                    </div>
+                </div>
+            </section>
+
+            <section style="margin-top: 20px;">
+                <div class="glass-panel routing-panel local-proxy-panel" style="padding: 24px;">
+                    <div class="routing-header" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; gap: 12px;">
+                        <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+                            <h3 style="margin: 0; font-size: 16px; font-weight: 600; white-space: nowrap;">
+                                <span class="hide-mobile">Локальный прокси SOCKS5 UDP</span><span class="show-mobile">SOCKS5 UDP</span>
+                            </h3>
+                            <button class="proxy-info-btn" type="button" aria-label="Что такое локальный SOCKS5 UDP" title="Что такое локальный SOCKS5 UDP" onclick="document.getElementById('localProxyInfoDlg').showModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg></button>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <button class="proxy-add-btn" type="button" aria-label="Добавить профиль" title="Добавить профиль" onclick="openProfileDlg()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+                        </div>
+                    </div>
+                    <div id="proxyProfilesList" class="proxy-profiles"></div>
+                </div>
+            </section>
+        </div>

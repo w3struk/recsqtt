@@ -1,0 +1,43 @@
+        header { position: sticky; top: 0; z-index: 40; height: 72px; background: var(--header-glass); backdrop-filter: blur(16px); border-bottom: 1px solid var(--border); width: 100%; }
+        .header-container { max-width: 1300px; width: 100%; margin: 0 auto; padding: 0 24px; height: 100%; display: flex; align-items: center; justify-content: space-between; }
+        .brand { display: flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; }
+        .brand-logo { display: block; width: 165px; height: auto; }
+
+        .header-actions { display: flex; gap: 16px; align-items: center; }
+
+        .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; border-radius: 12px; border: none; cursor: pointer; transition: all 0.2s; outline: none; }
+        .btn:active { transform: scale(0.96); }
+        .btn-primary { background: var(--primary); color: #fff; box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 25%, transparent); }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 35%, transparent); }
+        .btn:disabled { cursor: not-allowed; opacity: 0.42; transform: none !important; box-shadow: none; }
+        .btn.save-success { background: var(--success); opacity: 1; }
+        .btn-ghost { background: transparent; color: var(--text-muted); }
+        .btn-ghost:hover { background: var(--surface-hover); color: var(--text-main); }
+        .btn-icon { padding: 8px; border-radius: 10px; }
+        .btn-api {
+            background: transparent;
+            color: var(--text-muted);
+            border: none;
+            border-radius: 8px;
+            padding: 6px 10px;
+            height: 36px;
+            font-size: 14px;
+            font-weight: 500;
+            gap: 6px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            transition: all 0.2s ease;
+        }
+        .btn-api:hover {
+            background: var(--surface-hover);
+            color: var(--text-main);
+            transform: translateY(-1px);
+        }
+        .btn-api:active {
+            transform: scale(0.96);
+        }
+        .btn-api svg {
+            color: var(--primary);
+        }
+

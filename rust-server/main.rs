@@ -34,6 +34,7 @@ mod routing_assets;
 mod tokio_io;
 mod tproxy;
 mod tun_device;
+mod web_assets;
 mod web_panel;
 #[path = "../shared/wire_protocol.rs"]
 mod wire_protocol;

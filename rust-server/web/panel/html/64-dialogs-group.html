@@ -1,0 +1,45 @@
+    <dialog id="newGroupDlg">
+        <div class="dlg-header">
+            <h2>Создание группы</h2>
+            <button class="close-btn" onclick="document.getElementById('newGroupDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+        <div class="input-group">
+            <label for="groupNameInput">Имя группы</label>
+            <input id="groupNameInput" maxlength="128" placeholder="Введите название группы">
+        </div>
+        <div class="dlg-actions">
+            <button class="btn btn-ghost" onclick="document.getElementById('newGroupDlg').close()">Отмена</button>
+            <button class="btn btn-primary" onclick="createGroup()" id="createGroupBtn">Создать</button>
+        </div>
+    </dialog>
+
+    <dialog id="groupDlg" style="max-width: 720px; width: min(720px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
+        <div class="dlg-header" style="align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;">
+            <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
+                <h2 id="groupDlgTitle" style="font-size: 22px; margin: 0; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Группа</h2>
+                <input id="groupDlgTitleInput" style="display: none; font-size: 18px; font-weight: 700; height: 32px; padding: 0 8px; border-radius: 8px; width: 200px; max-width: 100%;" maxlength="128">
+                <button id="groupDlgEditBtn" onclick="toggleGroupInlineEdit()" style="background: none; border: 1px solid var(--border); cursor: pointer; color: var(--text-muted); display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0; transition: all 0.2s;" title="Переименовать">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                </button>
+            </div>
+            <button class="close-btn" onclick="document.getElementById('groupDlg').close()" style="margin: 0; flex-shrink: 0;">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+
+        <div class="group-dlg-actions">
+            <button class="btn btn-primary group-act-btn" onclick="createClientInCurrentGroup()">Создать пароль</button>
+            <button id="groupDeleteBtn" class="btn group-act-btn group-delete-btn" onclick="deleteCurrentGroup()" title="Удалить группу">Удалить группу</button>
+            <div class="group-search-wrapper">
+                <input type="text" id="groupSearchInput" class="group-search-input" placeholder="Поиск в группе..." oninput="handleGroupSearch(this.value)">
+                <svg class="group-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <button id="groupSearchClearBtn" onclick="clearGroupSearch()" style="display: none; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 4px;" title="Очистить">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+        </div>
+
+        <div id="groupClientsCards" class="client-cards-grid" style="margin-top: 12px;"></div>
+    </dialog>

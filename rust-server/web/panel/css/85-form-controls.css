@@ -1,0 +1,42 @@
+        select {
+            background: var(--surface);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 6px 12px;
+            font-size: 13px;
+            font-weight: 500;
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent);
+        }
+
+        input[type=number]::-webkit-outer-spin-button,
+        input[type=number]::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type=number] {
+            -moz-appearance: textfield;
+        }
+
+        .dlg-row {
+            display: flex;
+            gap: 8px !important;
+            width: 100%;
+        }
+        .dlg-row .input-group {
+            flex: 1 1 0% !important;
+            min-width: 0;
+            margin-bottom: 0;
+        }
+        .dlg-row input {
+            text-align: center;
+            font-size: 13px !important;
+            padding: 0 4px !important;
+            font-family: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;
+        }

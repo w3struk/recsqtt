@@ -1,0 +1,143 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" id="themeColorMeta" content="#0a0a0c">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" type="image/svg+xml" href="/pwa-icon.svg">
+    <link rel="apple-touch-icon" href="/pwa-icon.svg">
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-icon-192.png">
+    <meta property="og:title" content="reCSQTT">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="/pwa-icon.svg">
+    <title>reCSQTT — Вход</title>
+    <style>
+        /*__THEME_TOKENS__*/
+
+        html { -webkit-text-size-adjust: none; text-size-adjust: none; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+
+        main {
+            position: relative;
+            z-index: 1; width: min(420px, calc(100% - 40px)); background: var(--glass);
+            backdrop-filter: blur(20px); border: 1px solid var(--border); border-radius: 24px;
+            padding: 48px 40px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.05);
+            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(40px); } to { opacity: 1; transform: translateY(0); } }
+
+        h1 { text-align: center; font-size: 28px; font-weight: 700; margin-bottom: 36px; color: var(--text-main); }
+
+        .input-group { margin-bottom: 20px; }
+        .input-group label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
+        .input-group input, .input-group select { width: 100%; height: 52px; background: var(--bg-color); border: 1px solid var(--border); border-radius: 14px; padding: 0 16px; font-size: 15px; color: var(--text-main); outline: none; transition: all 0.2s; }
+        .input-group input:focus, .input-group select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 10%, transparent); }
+
+        button { width: 100%; height: 52px; background: var(--primary); color: white; border: none; border-radius: 14px; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s; margin-top: 12px; box-shadow: 0 8px 16px color-mix(in srgb, var(--primary) 25%, transparent); }
+        button:hover { transform: translateY(-2px); box-shadow: 0 12px 20px color-mix(in srgb, var(--primary) 35%, transparent); }
+        button:active { transform: translateY(0); }
+
+        button.theme-toggle {
+            position: absolute; top: 16px; right: 16px; width: 36px; height: 36px;
+            margin: 0; padding: 0; display: flex; align-items: center; justify-content: center;
+            background: transparent; color: var(--text-muted); border: 1px solid var(--border);
+            border-radius: 10px; box-shadow: none; transform: none; transition: color 0.2s, border-color 0.2s;
+        }
+        button.theme-toggle:hover { color: var(--text-main); background: transparent; box-shadow: none; transform: none; }
+        button.theme-toggle:active { color: var(--text-main); transform: none; }
+
+        #e { min-height: 20px; color: var(--danger); font-size: 14px; font-weight: 500; text-align: center; margin-top: 16px; opacity: 0; }
+    </style>
+    <script>
+        if (localStorage.getItem('csqtt-theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+        document.querySelector('meta[name="theme-color"]').setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg-color').trim());
+    </script>
+</head>
+<body>
+    <main>
+        <button class="theme-toggle" type="button" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему">
+            <svg id="themeIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        </button>
+        <h1>Вход</h1>
+        <form id="f">
+            <div class="input-group">
+                <label for="u">Пользователь</label>
+                <input id="u" required>
+            </div>
+            <div class="input-group">
+                <label for="p">Пароль</label>
+                <input id="p" type="password" required>
+            </div>
+            <button id="submitBtn" type="submit">Войти</button>
+            <div id="e"></div>
+        </form>
+    </main>
+    <script>
+        const basePath = window.location.pathname.replace(/\/$/, '');
+        if (basePath) {
+            document.querySelectorAll('link[rel="manifest"], link[rel="icon"], link[rel="apple-touch-icon"]').forEach(el => {
+                const href = el.getAttribute('href');
+                if (href && href.startsWith('/')) {
+                    el.setAttribute('href', basePath + href);
+                }
+            });
+        }
+        function caesarEncode(s) {
+            const bytes = new TextEncoder().encode(s);
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode((bytes[i] + 47) & 0xff);
+            return 'c1:' + btoa(bin);
+        }
+        const MOON_ICON = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>';
+        const SUN_ICON = '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>';
+        function syncThemeColorMeta() {
+            const meta = document.getElementById('themeColorMeta');
+            if (!meta) return;
+            meta.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg-color').trim());
+        }
+        function updateThemeIcon() {
+            const icon = document.getElementById('themeIcon');
+            if (!icon) return;
+            icon.innerHTML = document.documentElement.getAttribute('data-theme') === 'dark' ? SUN_ICON : MOON_ICON;
+        }
+        function toggleTheme() {
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            document.documentElement.setAttribute('data-theme', isDark ? 'light' : 'dark');
+            localStorage.setItem('csqtt-theme', isDark ? 'light' : 'dark');
+            updateThemeIcon();
+            syncThemeColorMeta();
+        }
+        updateThemeIcon();
+        syncThemeColorMeta();
+        f.onsubmit = async x => {
+            x.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            const err = document.getElementById('e');
+            err.style.opacity = '0';
+            try {
+                let r = await fetch((basePath || '') + "/api/login", {
+                    method: "POST",
+                    headers: {"content-type": "application/json"},
+                    credentials: "include",
+                    body: JSON.stringify({user: caesarEncode(u.value), pass: caesarEncode(p.value)})
+                });
+                if (r.ok) {
+                    btn.innerHTML = 'Успешно!'; btn.style.background = 'var(--primary)';
+                    setTimeout(() => {
+                        window.location.href = (basePath || '') + '/';
+                    }, 150);
+                } else {
+                    err.textContent = r.status === 429 ? "Подождите 3 минуты." : "Неверный логин или пароль"; err.style.opacity = '1';
+                }
+            } catch (error) { err.textContent = "Ошибка сети"; err.style.opacity = '1'; }
+        };
+    </script>
+</body>
+</html>
+

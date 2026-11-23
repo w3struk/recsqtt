@@ -1,0 +1,8 @@
+    <dialog id="rebootDlg">
+        <h2>Перезапуск сервера</h2>
+        <p style="color: var(--text-muted); font-size: 15px; margin-bottom: 24px;">Вы уверены, что хотите перезапустить reCSQTT? Активные соединения будут прерваны на несколько секунд.</p>
+        <div class="dlg-actions">
+            <button class="btn btn-ghost" onclick="document.getElementById('rebootDlg').close()">Отмена</button>
+            <button class="btn btn-primary" onclick="executeReboot()">Перезапустить</button>
+        </div>
+    </dialog>

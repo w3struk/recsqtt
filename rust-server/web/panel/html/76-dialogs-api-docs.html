@@ -1,0 +1,734 @@
+    <dialog id="apiDocsDlg" style="max-width: 940px; width: min(940px, calc(100% - 24px)); max-height: 88vh; overflow-y: auto;">
+        <div class="dlg-header">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div style="width: 36px; height: 36px; border-radius: 10px; background: var(--icon-bg); color: var(--primary); display: grid; place-items: center;">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="16 18 22 12 16 6"></polyline>
+                        <polyline points="8 6 2 12 8 18"></polyline>
+                    </svg>
+                </div>
+                <div>
+                    <h2 style="font-size: 20px; font-weight: 700; margin: 0;">Документация REST API</h2>
+                    <p style="font-size: 12px; color: var(--text-muted); margin: 0;">Интеграция с Telegram-ботами, панелями управления и биллингом</p>
+                </div>
+            </div>
+            <button class="close-btn" onclick="document.getElementById('apiDocsDlg').close()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 16px;">
+            <div style="background: var(--surface-hover); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">
+                    <div style="display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px; color: var(--text-main);">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="stroke:var(--primary)" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                        Базовый адрес API (Base URL)
+                    </div>
+                    <button class="btn btn-ghost" onclick="copyText(document.getElementById('apiBaseUrlDisplay').textContent, this)" style="padding: 2px 8px; font-size: 11px; height: 22px; min-height: auto;">Копировать</button>
+                </div>
+                <div style="font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; color: var(--primary); background: var(--bg-color); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); word-break: break-all;" id="apiBaseUrlDisplay"></div>
+            </div>
+            <div style="background: var(--surface-hover); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;">
+                <div style="display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13px; margin-bottom: 6px; color: var(--text-main);">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="stroke:var(--primary)" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                    Авторизация запросов (Headers)
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 4px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px;">
+                    <div style="background: var(--bg-color); padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
+                        <code>X-API-Key: &lt;пароль_панели&gt;</code>
+                        <span style="color: var(--text-muted); font-size: 10px;">Рекомендуемый</span>
+                    </div>
+                    <div style="background: var(--bg-color); padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
+                        <code>Authorization: Bearer &lt;пароль&gt;</code>
+                        <span style="color: var(--text-muted); font-size: 10px;">Стандарт Bearer</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <div class="api-tabs-nav">
+            <button id="btnApiTabClients" class="api-tab-btn active" onclick="switchApiDocsTab('clients')">
+                👥 Клиенты
+            </button>
+            <button id="btnApiTabGroups" class="api-tab-btn" onclick="switchApiDocsTab('groups')">
+                📁 Группы
+            </button>
+            <button id="btnApiTabSubs" class="api-tab-btn" onclick="switchApiDocsTab('subs')">
+                🔗 Подписки
+            </button>
+            <button id="btnApiTabRouting" class="api-tab-btn" onclick="switchApiDocsTab('routing')">
+                🔀 Маршрутизация & Прокси
+            </button>
+            <button id="btnApiTabSystem" class="api-tab-btn" onclick="switchApiDocsTab('system')">
+                ⚙️ Система & Бэкап
+            </button>
+        </div>
+
+        <!-- TAB 1: Clients -->
+        <div id="apiPaneClients" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients</span>
+                    <span class="api-desc">Создание нового клиента (ключа)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        Создает ключ доступа. Если <code>password</code> не указан, сервер сгенерирует надежный криптостойкий пароль. В ответе возвращаются готовая ссылка <code>link</code> (<code>csqtt://...</code>) и срок <code>expires</code>.
+                    </p>
+                    <div class="api-code-label">Тело запроса (JSON):</div>
+                    <pre class="api-code-block"><code>{
+  "name": "Пользователь @username",
+  "days": 30,                     // 0 = бессрочно, 1..3650 = дней
+  "password": "custom_pass",       // опционально (мин. 4 символа)
+  "peer_port": 46000,             // опционально (UDP порт)
+  "group_id": "group_id_here",     // опционально (привязка к группе)
+  "vk_token": false,               // опционально (общий VK токен)
+  "hash": "hash1,hash2"            // опционально (VK хеши)
+}</code></pre>
+                    <div class="api-code-label" style="margin-top: 8px;">Пример curl:</div>
+                    <pre class="api-code-block"><code>curl -X POST https://example.com/api/clients \
+  -H "X-API-Key: YOUR_PASSWORD" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"TelegramUser","days":30}'</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/clients</span>
+                    <span class="api-desc">Список всех клиентов (с фильтрацией)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 6px;">
+                        Возвращает массив клиентов: расход трафика, статус активности, срок, <code>ip</code>, <code>sub_uuid</code> и <code>link</code>.
+                    </p>
+                    <p style="font-size: 11px; color: var(--primary);">
+                        Фильтры (Query): <code>?group_id={id|root}</code>, <code>?active=true|false</code>, <code>?search=текст</code>.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/clients/{password}</span>
+                    <span class="api-desc">Информация по одному клиенту</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Возвращает объект клиента по его паролю (трафик, активные сессии, IP-адреса, скорость, срок, ссылка подписки и <code>link</code>).
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/{password}</span>
+                    <span class="api-desc">Обновление параметров клиента</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        Изменение имени, срока, пароля, UDP-порта, группы или VK параметров:
+                    </p>
+                    <pre class="api-code-block"><code>{ "name": "Новое Имя", "days": 60, "peer_port": 46000, "group_id": "" }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/{password}/extend</span>
+                    <span class="api-desc">Продление срока действия ключа</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        Продлевает ключ на указанное число дней. Если ключ истёк — отсчет от текущего момента; если активен — дни прибавляются к дате окончания:
+                    </p>
+                    <pre class="api-code-block"><code>{ "days": 30 }</code></pre>
+                    <div class="api-code-label" style="margin-top: 8px;">Ответ: <code>{ "ok": true, "expires": 1791600000 }</code></div>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/{password}/toggle</span>
+                    <span class="api-desc">Блокировка / разблокировка</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Переключает статус клиента. При деактивации активные туннели ключа мгновенно сбрасываются. Ответ: <code>{ "ok": true, "active": false }</code>.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/{password}/unbind</span>
+                    <span class="api-desc">Сброс привязки клиента</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Сбрасывает эпоху пароля и активные сессии клиента, позволяя подключиться заново.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/{password}/reset-traffic</span>
+                    <span class="api-desc">Сброс расхода трафика в 0</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Сбрасывает счетчики отправленного и принятого трафика в базе данных и у активных сессий в ноль.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/{password}/sub-link/regenerate</span>
+                    <span class="api-desc">Перегенерация ссылки подписки</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        Генерирует новый постоянный <code>sub_uuid</code> для клиента, мгновенно аннулируя старый адрес подписки.
+                    </p>
+                    <pre class="api-code-block"><code>Ответ: { "ok": true, "sub_uuid": "e2a3b4c5-..." }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method put">PUT</span>
+                    <span class="api-path">/api/clients/{password}/vk</span>
+                    <span class="api-desc">Персональная настройка VK токена и хешей</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "vk_token": true, "vk_hashes": "hash1,hash2" }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method delete">DELETE</span>
+                    <span class="api-path">/api/clients/{password}</span>
+                    <span class="api-desc">Удаление клиента</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Полностью удаляет ключ с сервера и немедленно разрывает активные соединения.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/links</span>
+                    <span class="api-desc">Массив всех готовых ссылок csqtt://</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Возвращает компактный массив объектов всех клиентов и мастер-пароля с готовыми ссылками <code>csqtt://...</code> и <code>sub_link</code> для ботов.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/links/batch-vk</span>
+                    <span class="api-desc">Пакетная настройка VK токенов и хешей</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "vk_token": "vk1.a...", "vk_hashes": "hash1,hash2", "apply_to_all_clients": true }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/batch-toggle</span>
+                    <span class="api-desc">Массовое переключение активности</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "passwords": ["p1", "p2"], "active": true }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/batch-extend</span>
+                    <span class="api-desc">Массовое продление срока ключей</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "passwords": ["p1", "p2"], "days": 30 }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/batch-reset-traffic</span>
+                    <span class="api-desc">Массовый сброс расхода трафика</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "passwords": ["p1", "p2"] }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/batch-delete</span>
+                    <span class="api-desc">Массовое удаление клиентов</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "passwords": ["p1", "p2"] }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/clients/batch-group</span>
+                    <span class="api-desc">Массовое перемещение между группами</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "passwords": ["p1", "p2"], "group_id": "target_group_id_or_empty" }</code></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 2: Groups -->
+        <div id="apiPaneGroups" style="display: none; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/groups</span>
+                    <span class="api-desc">Список групп и лимитов скорости</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Возвращает все группы: <code>id</code>, <code>name</code>, ограничение скорости <code>rate_limit_mbps</code>, привязанное правило <code>routing_rule_id</code> и постоянный <code>sub_uuid</code> групповой подписки.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/groups</span>
+                    <span class="api-desc">Создание группы</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "name": "VIP Клиенты", "rate_limit_mbps": 100, "routing_rule_id": "" }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method put">PUT</span>
+                    <span class="api-path">/api/groups/{id}</span>
+                    <span class="api-desc">Редактирование группы</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "name": "Новое Имя Группы", "routing_rule_id": "rule_id_here" }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method delete">DELETE</span>
+                    <span class="api-path">/api/groups/{id}</span>
+                    <span class="api-desc">Каскадное удаление группы</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--danger); font-weight: 500;">
+                        Внимание: удаляет группу и безвозвратно удаляет всех входящих в неё клиентов.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/groups/{id}/sub-link/regenerate</span>
+                    <span class="api-desc">Перегенерация ссылки групповой подписки</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Выпускает новый уникальный <code>sub_uuid</code> для групповой подписки <code>/{group_sub_uuid}/sub-group</code>. Ответ: <code>{ "ok": true, "sub_uuid": "..." }</code>.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/groups/{id}/clients</span>
+                    <span class="api-desc">Список клиентов выбранной группы</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Возвращает JSON-массив всех клиентов, входящих в группу с указанным <code>id</code>.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 3: Subscriptions -->
+        <div id="apiPaneSubs" style="display: none; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+            <div style="background: color-mix(in srgb, var(--primary) 8%, transparent); border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent); border-radius: 10px; padding: 10px 14px; font-size: 12px; color: var(--text-muted); line-height: 1.5;">
+                <strong style="color: #60a5fa;">Изоляция доступа:</strong> эндпоинты подписок и управления группами открываются напрямую от корня со своим персональным секретным UUID (без префикса главной админки). Это предотвращает утечку пути главной панели администратора.
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/{sub_uuid}/sub</span>
+                    <span class="api-desc">Веб-страница персональной подписки (HTML)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Публичная веб-страница подписки клиента (без необходимости авторизации). Содержит живой векторный QR-код, прямую ссылку <code>csqtt://connect?...</code>, кнопку «Подключить в приложении reCSQTT» (с нативным уведомлением в приложении), контрастную кнопку копирования и инструкции.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/{sub_uuid}/json</span>
+                    <span class="api-desc">Конфигурация подписки клиента (JSON)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        Чистый эндпоинт для автоматического обновления конфигурации клиентом или ботом (также доступны алиасы <code>/{sub_uuid}/sub.json</code> и <code>/api/sub/{sub_uuid}</code>):
+                    </p>
+                    <pre class="api-code-block"><code>{
+  "v": 2,
+  "name": "Пользователь",
+  "host": "vpn.example.com",
+  "peer": 46000,
+  "password": "p_abc123...",
+  "vk_token": "...",
+  "hash": "...",
+  "link": "csqtt://connect?v=2&host=vpn.example.com&peer=46000&password=..."
+}</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/{group_sub_uuid}/sub-group</span>
+                    <span class="api-desc">Групповая страница подписок (HTML)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Публичная адаптивная страница для группы. Выводит всех активных клиентов группы в виде аккуратной сетки с QR-кодами, ссылками, кнопками копирования и быстрого подключения в reCSQTT.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/{group_sub_uuid}/json</span>
+                    <span class="api-desc">Конфигурации клиентов группы (JSON)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Возвращает JSON-массив с параметрами подключения всех активных клиентов группы (также доступны алиасы <code>/{group_sub_uuid}/sub-group.json</code> и <code>/api/sub-group/{group_sub_uuid}</code>): <code>[{ "name": "...", "link": "csqtt://...", ... }]</code>.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 4: Routing & Proxy -->
+        <div id="apiPaneRouting" style="display: none; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-method post" style="margin-left: -4px;">POST</span>
+                    <span class="api-path">/api/routing-rules</span>
+                    <span class="api-desc">Правила выборочной маршрутизации</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        <code>GET</code> возвращает список правил вместе с <code>id</code> и разрешёнными привязками
+                        (<code>assigned_groups</code>, <code>assigned_clients</code>). <code>POST</code> создаёт правило;
+                        режим приложений, доменов и адресов задаётся независимо. Готовые шаблоны включаются флагами
+                        <code>preset_apps</code>, <code>template_domains</code>, <code>template_ips</code>:
+                    </p>
+                    <pre class="api-code-block"><code>{
+  "name": "RU + пресет",
+  "mode": "blacklist",                // "blacklist" | "whitelist" (алиас is_whitelist)
+  "packages": ["com.example.app"],    // явные приложения
+  "preset_apps": true,                // готовый пресет приложений
+  "direct_domains": ["example.com"],  // явные домены (алиас domains)
+  "domains_mode": "blacklist",        // режим явных доменов
+  "template_domains": true,           // готовый список RU доменов
+  "ips": ["10.0.0.0/8"],              // явные адреса, не больше 512
+  "ip_mode": "blacklist",             // режим явных адресов
+  "template_ips": true,               // готовый список RU адресов
+  "assigned_groups": ["grp_..."],
+  "assigned_clients": ["client-password"]
+}</code></pre>
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Ограничения: явных <code>ips</code> — до 512, объединённых доменов — до 1024,
+                        <code>template_domains</code>/<code>template_ips</code> — только в чёрном режиме.
+                        Событие правила не должно превышать 65 536 байт.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method put">PUT</span>
+                    <span class="api-method delete" style="margin-left: -4px;">DELETE</span>
+                    <span class="api-path">/api/routing-rules/{id}</span>
+                    <span class="api-desc">Редактирование и удаление правила</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        <code>PUT</code> заменяет правило целиком — передавайте то же тело, что и в <code>POST</code>
+                        (включая <code>packages</code>, <code>preset_apps</code> и оба шаблонных флага),
+                        <code>DELETE</code> удаляет правило.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/template-domains</span>
+                    <span class="api-desc">Шаблоны доменов популярных сервисов</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        <code>text/plain</code>, один домен на строку: нормализованный список RU доменов (515 записей;
+                        клиент применяет 513 — однокомпонентные <code>psk</code> и <code>yandex</code> отбрасываются).
+                        Подключается к правилу флагом <code>template_domains: true</code>.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/template-ips</span>
+                    <span class="api-desc">Готовый список RU адресов</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        <code>text/plain</code>, один CIDR на строку: нормализованный список RU адресов (6 710 записей),
+                        которые направляются напрямую без VPN. Подключается к правилу флагом
+                        <code>template_ips: true</code> (только чёрный режим адресов).
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/preset-apps</span>
+                    <span class="api-desc">Готовый пресет приложений</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        JSON с двумя наборами: <code>red</code> — приложения, которые всегда идут мимо туннеля,
+                        <code>orange</code> — по умолчанию мимо, пользователь может вернуть их в туннель.
+                        Подключается к правилу флагом <code>preset_apps: true</code>.
+                    </p>
+                    <pre class="api-code-block"><code>{
+  "red": [{"package": "ru.example.red", "name": "Пример"}],
+  "orange": [{"package": "ru.example.orange", "name": "Пример"}]
+}</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-method post" style="margin-left: -4px;">POST</span>
+                    <span class="api-path">/api/local-proxy</span>
+                    <span class="api-desc">Outbound прокси (SOCKS5 / HTTP)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        Добавление внешних upstream прокси-серверов для маршрутизации трафика:
+                    </p>
+                    <pre class="api-code-block"><code>{
+  "name": "Германия SOCKS5",
+  "protocol": "socks5", // "socks5" или "http"
+  "host": "198.51.100.1",
+  "port": 1080,
+  "username": "user",
+  "password": "pass"
+}</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method put">PUT</span>
+                    <span class="api-method delete" style="margin-left: -4px;">DELETE</span>
+                    <span class="api-path">/api/local-proxy/profiles/{id}</span>
+                    <span class="api-desc">Управление профилем прокси</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Редактирование хоста/порта/пароля или удаление профиля прокси.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/local-proxy/activate/{id}</span>
+                    <span class="api-desc">Активация системного прокси</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Назначает выбранный прокси глобальным шлюзом по умолчанию (или <code>POST /api/local-proxy/deactivate</code> для отключения).
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 5: System & Settings -->
+        <div id="apiPaneSystem" style="display: none; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/stats</span>
+                    <span class="api-desc">Мониторинг нагрузки и ресурсов</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Возвращает нагрузку CPU (%), использование RAM (байт), число активных туннелей и скорость сети.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-path">/api/diagnostics/dpi</span>
+                    <span class="api-desc">DPI диагностика и телеметрия пакетов</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Возвращает статус кольцевого буфера DPI, количество зафиксированных аномальных пакетов и последние семплы фреймов для отладки цензуры.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/memory/trim</span>
+                    <span class="api-desc">Принудительное освобождение RAM (Trim)</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Вызывает сброс неиспользуемой памяти в ядро операционной системы для минимизации RSS.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-method post" style="margin-left: -4px;">POST</span>
+                    <span class="api-path">/api/settings</span>
+                    <span class="api-desc">Глобальные настройки сервера</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Получение и сохранение настроек: DNS, MTU, stealth-домены маскировки, интервал автоперезапуска, лимиты.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/settings/dns</span>
+                    <span class="api-desc">Быстрая смена DNS</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "dns_provider": "cloudflare", "dns_primary": "1.1.1.1", "dns_secondary": "1.0.0.1" }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/settings/restart-interval</span>
+                    <span class="api-desc">Интервал автоперезапуска (в часах)</span>
+                </div>
+                <div class="api-card-body">
+                    <pre class="api-code-block"><code>{ "interval_hours": 12 }</code></pre>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-method post" style="margin-left: -4px;">POST</span>
+                    <span class="api-path">/api/export и /api/import</span>
+                    <span class="api-desc">Резервная копия и неразрушающее слияние</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        <code>GET /api/export</code> выгружает полный JSON базы. <code>POST /api/import</code> производит умное слияние: клиенты и настройки добавляются к существующим без перезаписи и потери трафика.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method get">GET</span>
+                    <span class="api-method post" style="margin-left: -4px;">POST</span>
+                    <span class="api-path">/api/logs</span>
+                    <span class="api-desc">Журнал логов сервера</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        <code>GET /api/logs</code> возвращает строки логов. <code>POST /api/logs/toggle</code> включает/выключает запись, <code>POST /api/logs/clear</code> очищает буфер, а <code>GET /api/logs/download</code> отдает текстовый файл.
+                    </p>
+                </div>
+            </div>
+
+            <div class="api-card">
+                <div class="api-card-header">
+                    <span class="api-method post">POST</span>
+                    <span class="api-path">/api/reboot</span>
+                    <span class="api-desc">Перезапуск сервера reCSQTT</span>
+                </div>
+                <div class="api-card-body">
+                    <p style="font-size: 12px; color: var(--text-muted);">
+                        Инициирует контролируемый мягкий перезапуск процесса reCSQTT на сервере.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="dlg-actions">
+            <button class="btn btn-primary" onclick="document.getElementById('apiDocsDlg').close()">Закрыть</button>
+        </div>
+    </dialog>

@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" id="themeColorMeta" content="#f8fafc">
+    <link rel="icon" type="image/svg+xml" href="/pwa-icon.svg">
+    <link rel="apple-touch-icon" href="/pwa-icon.svg">
+    <meta property="og:title" content="reCSQTT">
+    <meta property="og:type" content="website">
+    <title>Подписка группы: __GROUP_NAME__</title>
+    <script src="/qrcode.min.js"></script>
+    <style>
+        /*__THEME_TOKENS__*/
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 24px 16px 48px;
+        }
+        .header-bar {
+            width: 100%;
+            max-width: 1360px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-bottom: 24px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 16px 24px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header-title {
+            font-size: 19px;
+            font-weight: 700;
+            margin: 0;
+            color: var(--text-main);
+        }
+        .badge {
+            background: color-mix(in srgb, var(--primary) 15%, transparent);
+            color: var(--primary);
+            border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+            border-radius: 9999px;
+            padding: 4px 12px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .group-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 1360px;
+        }
+        @media (min-width: 1024px) {
+            .group-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+        @media (min-width: 1360px) {
+            .group-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+        }
+        @media (max-width: 640px) {
+            .group-grid {
+                grid-template-columns: 1fr;
+                gap: 16px;
+            }
+            body { padding: 16px 12px 32px; }
+            .header-bar { padding: 14px 16px; margin-bottom: 16px; }
+        }
+        .client-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        .client-card:hover {
+            transform: translateY(-2px);
+            border-color: color-mix(in srgb, var(--primary) 40%, transparent);
+        }
+        .client-card-header {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .client-name {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-main);
+            word-break: break-word;
+        }
+        .divider {
+            width: 100%;
+            border: 0;
+            border-top: 1px solid var(--border);
+            margin: 0 0 16px;
+        }
+        .qr-box {
+            background: #ffffff;
+            padding: 10px;
+            border-radius: 12px;
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            width: 220px;
+            height: 220px;
+            margin: 0 auto 16px;
+        }
+        .qr-box svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .input-row {
+            width: 100%;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .link-input {
+            flex: 1;
+            height: 40px;
+            font-size: 12px;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            padding: 0 10px;
+            background: var(--surface-hover);
+            color: var(--text-muted);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            outline: none;
+        }
+        .btn {
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            outline: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+        }
+        .btn-copy {
+            height: 40px;
+            width: 44px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            background: #27272a;
+            border: 1px solid #3f3f46;
+            color: #ffffff;
+            border-radius: 8px;
+        }
+        .btn-copy:hover {
+            background: #3f3f46;
+        }
+        .btn-primary {
+            background: var(--primary);
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            width: 100%;
+            height: 42px;
+        }
+        .btn-primary:hover {
+            background: var(--primary-hover);
+        }
+        .empty-state {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-muted);
+            font-size: 15px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+        }
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--surface);
+            color: var(--text-main);
+            padding: 10px 18px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            font-size: 13px;
+            font-weight: 500;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+            opacity: 0;
+            transition: transform 0.25s ease, opacity 0.25s ease;
+            pointer-events: none;
+            z-index: 1000;
+        }
+        .toast.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+        }
+        .theme-toggle {
+            width: 36px; height: 36px; margin: 0; padding: 0;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--surface-hover); color: var(--text-muted);
+            border: 1px solid var(--border); border-radius: 10px;
+            cursor: pointer; transition: color 0.2s, border-color 0.2s;
+        }
+        .theme-toggle:hover { color: var(--text-main); border-color: var(--text-muted); }
+    </style>
+    <script>
+        function syncThemeColorMeta() {
+            const meta = document.getElementById('themeColorMeta');
+            if (!meta) return;
+            meta.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg-color').trim());
+        }
+        if (localStorage.getItem('csqtt-theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+        syncThemeColorMeta();
+    </script>
+</head>
+<body>
+    <header class="header-bar">
+        <div class="header-left">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" style="stroke:var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="7" r="3.5"></circle>
+                <path d="M6 21v-2a4 4 0 0 1 8 0v2"></path>
+                <path d="M5.5 10a3 3 0 0 1 0-6"></path>
+                <path d="M2 21v-1.5a3.5 3.5 0 0 1 3-3.4"></path>
+                <path d="M18.5 4a3 3 0 0 1 0 6"></path>
+                <path d="M19 16.1a3.5 3.5 0 0 1 3 3.4V21"></path>
+            </svg>
+            <h1 class="header-title">Группа: __GROUP_NAME__</h1>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <div class="badge">__CLIENTS_COUNT__ клиентов</div>
+            <button class="theme-toggle" type="button" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему">
+                <svg id="themeIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+            </button>
+        </div>
+    </header>
+
+    <main class="group-grid" id="gridContainer"></main>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        const MOON_ICON = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>';
+        const SUN_ICON = '<circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>';
+        function updateThemeIcon() {
+            const icon = document.getElementById('themeIcon');
+            if (!icon) return;
+            icon.innerHTML = document.documentElement.getAttribute('data-theme') === 'dark' ? SUN_ICON : MOON_ICON;
+        }
+        function toggleTheme() {
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            document.documentElement.setAttribute('data-theme', isDark ? 'light' : 'dark');
+            localStorage.setItem('csqtt-theme', isDark ? 'light' : 'dark');
+            updateThemeIcon();
+            syncThemeColorMeta();
+        }
+        updateThemeIcon();
+
+        const clients = __CLIENTS_JSON__;
+        function esc(s) {
+            return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            if (!t) return;
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(() => { t.classList.remove('show'); }, 2000);
+        }
+        async function copyToClipboard(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    return true;
+                } catch (e) {}
+            }
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'absolute';
+                ta.style.left = '-9999px';
+                ta.style.top = '0';
+                ta.setAttribute('readonly', '');
+                document.body.appendChild(ta);
+                ta.select();
+                ta.setSelectionRange(0, 99999);
+                const success = document.execCommand('copy');
+                document.body.removeChild(ta);
+                return success;
+            } catch (e) {
+                return false;
+            }
+        }
+        async function copyCardLink(btn, link) {
+            if (!link) return;
+            if (await copyToClipboard(link)) {
+                if (btn) {
+                    btn.style.color = 'var(--primary)';
+                    btn.style.borderColor = 'var(--primary)';
+                    setTimeout(() => { btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
+                }
+                showToast("Ссылка скопирована");
+            } else {
+                showToast("Не удалось скопировать");
+            }
+        }
+
+        const grid = document.getElementById('gridContainer');
+        if (!clients.length) {
+            grid.innerHTML = '<div class="empty-state">В этой группе пока нет клиентов.</div>';
+        } else {
+            let html = '';
+            clients.forEach((c, idx) => {
+                html += `
+                <div class="client-card">
+                    <div class="client-card-header">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style="stroke:var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+                            <circle cx="12" cy="7" r="4"></circle>
+                        </svg>
+                        <h2 class="client-name">${esc(c.name || 'Клиент')}</h2>
+                    </div>
+                    <hr class="divider">
+                    <div class="qr-box" id="qr-box-${idx}"></div>
+                    <div class="input-row">
+                        <input class="link-input" readonly value="${esc(c.link)}" onclick="this.select()">
+                        <button class="btn btn-copy" onclick="copyCardLink(this, '${esc(c.link)}')" title="Копировать ссылку">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                    <a href="${esc(c.link)}" class="btn btn-primary">Подключить в приложении reCSQTT</a>
+                </div>
+                `;
+            });
+            grid.innerHTML = html;
+
+            clients.forEach((c, idx) => {
+                const el = document.getElementById('qr-box-' + idx);
+                if (!el || !c.link) return;
+                try {
+                    const qr = qrcode(0, 'L');
+                    qr.addData(c.link);
+                    qr.make();
+                    el.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+                } catch (e) {
+                    el.innerHTML = '<div style="color:var(--danger);font-size:12px;">Ошибка QR</div>';
+                }
+            });
+        }
+    </script>
+</body>
+</html>

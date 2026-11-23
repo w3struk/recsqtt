@@ -1,0 +1,18 @@
+        /*__THEME_TOKENS__*/
+
+        html { -webkit-text-size-adjust: none; text-size-adjust: none; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-main); min-height: 100vh; display: flex; flex-direction: column; overflow-x: hidden; width: 100%; }
+
+        body, header, .header-container, .brand, .brand-logo, .header-actions, .btn, main, .glass-panel,
+        .stat-card, .stat-icon, .stat-value, .stat-sub, .progress-bar, .progress-fill,
+        .section-header, .section-title, .table-wrapper, table, th, td, tr,
+        .client-name, .client-pw, .client-hash, .traffic-flex, .badge, .actions,
+        .settings-grid, .setting-card, .input-group, .input-group input, .input-group select,
+        .toggle-row, .switch, .slider, dialog, .dlg-row, .dlg-actions,
+        svg, path, rect, line, polyline, circle, .tab-btn {
+            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, fill 0.3s ease, stroke 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .glass-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+

@@ -1,0 +1,73 @@
+        <div id="monitoring-section" style="display: none;">
+            <div class="section-header" style="justify-content: flex-end; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-direction: row !important;">
+                <label for="updateIntervalSelect" style="color: var(--text-secondary); font-size: 14px;" title="С какой периодичностью панель будет обновлять данные мониторинга, потоков и трафика">Обновление:</label>
+                <select id="updateIntervalSelect" class="input" style="width: auto; padding: 4px 10px; min-height: 32px;" onchange="changeUpdateInterval()">
+                    <option value="1000">1 сек</option>
+                    <option value="3000" selected>3 сек</option>
+                    <option value="5000">5 сек</option>
+                    <option value="10000">10 сек</option>
+                    <option value="15000">15 сек</option>
+                    <option value="30000">30 сек</option>
+                    <option value="60000">60 сек</option>
+                    <option value="90000">90 сек</option>
+                    <option value="120000">120 сек</option>
+                </select>
+            </div>
+            <section class="dashboard">
+                <div class="glass-panel stat-card">
+                    <div class="stat-header">
+                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg></div>
+                        <div class="stat-label">Сервер</div>
+                    </div>
+                    <div>
+                        <div class="stat-value" id="status_val">...</div>
+                        <div class="stat-sub" id="status_uptime">Загрузка...</div>
+                    </div>
+                </div>
+
+                <div class="glass-panel stat-card">
+                    <div class="stat-header">
+                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg></div>
+                        <div class="stat-label">Сессии</div>
+                    </div>
+                    <div>
+                        <div class="stat-value" id="active_val">0</div>
+                        <div class="stat-sub">Активные сессии</div>
+                    </div>
+                </div>
+
+                <div class="glass-panel stat-card cpu-card">
+                    <div class="stat-header">
+                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg></div>
+                        <div class="stat-label">CPU</div>
+                    </div>
+                    <div>
+                        <div class="stat-value" id="cpu_val">0% / 100%</div>
+                        <div class="progress-bar"><div class="progress-fill" id="cpu_bar" style="width: 0%"></div></div>
+                    </div>
+                </div>
+
+                <div class="glass-panel stat-card memory-card">
+                    <div class="stat-header">
+                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9h20v6H2z"></path><path d="M5 15v2M8 15v2M11 15v2M14 15v2M17 15v2M20 15v2"></path><rect x="4" y="10" width="3" height="4" rx="0.5"></rect><rect x="9" y="10" width="3" height="4" rx="0.5"></rect><rect x="14" y="10" width="3" height="4" rx="0.5"></rect><rect x="19" y="10" width="3" height="4" rx="0.5"></rect></svg></div>
+                        <div class="stat-label">ОЗУ</div>
+                    </div>
+                    <div>
+                        <div class="stat-value" id="ram_val">0 MB</div>
+                        <div class="stat-sub" id="ram_detail">Использование памяти</div>
+                    </div>
+                </div>
+
+                <div class="glass-panel stat-card traffic-card">
+                    <div class="stat-header">
+                        <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg></div>
+                        <div class="stat-label">Трафик</div>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 4px;">
+                        <div class="stat-value" style="font-size: 20px; color: var(--primary);" id="traffic_up">↑ 0 B</div>
+                        <div class="stat-value" style="font-size: 20px; color: var(--primary);" id="traffic_down">↓ 0 B</div>
+                        <div class="stat-sub" id="traffic_ingress">RX 0 · TX 0</div>
+                    </div>
+                </div>
+            </section>
+        </div>

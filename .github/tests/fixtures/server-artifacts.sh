@@ -23,6 +23,16 @@ make_server_root() {
         [[ -f "$path" ]] || continue
         inputs+=("${path#"$REPO_ROOT/"}")
     done
+
+    # Веб-ассеты панели скомпилированы в бинарник через include_str!, поэтому
+    # фикстура обязана их копировать так же, как это делает build_input_files:
+    # без них правка интерфейса не изменит buildInputSha256 и регрессия
+    # провенанса останется незамеченной.
+    [[ -d "$REPO_ROOT/rust-server/web" ]] || return 1
+    while IFS= read -r -d '' path; do
+        inputs+=("${path#"$REPO_ROOT/"}")
+    done < <(find "$REPO_ROOT/rust-server/web" -type f \
+        \( -name '*.css' -o -name '*.js' -o -name '*.html' \) -print0)
     for prefix in .cargo rust-server/.cargo; do
         [[ -d "$REPO_ROOT/$prefix" ]] || continue
         while IFS= read -r -d '' path; do

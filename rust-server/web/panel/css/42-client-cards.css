@@ -1,0 +1,42 @@
+        .client-cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+            min-width: 0;
+        }
+        .client-card {
+            min-width: 0;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 16px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            position: relative;
+        }
+        .client-card:hover {
+            background: var(--surface-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+        .client-card.group-card {
+            border: 1.5px solid var(--primary);
+        }
+        .client-card.group-card:hover {
+            border-color: var(--primary-hover);
+            box-shadow: 0 10px 20px -3px color-mix(in srgb, var(--primary) 20%, transparent);
+        }
+        .group-card-tag {
+            display: inline-flex;
+            align-items: center;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 6px;
+            background: var(--icon-bg);
+            color: var(--primary);
+        }

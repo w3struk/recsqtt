@@ -403,10 +403,17 @@ Android и ждёт ответа до 60 с; ждёт при этом тольк
 
 ## Панель, аутентификация и хранение
 
-Панель — `axum`-роутер (`web_panel.rs`) на `--web-port` (443 в доменном режиме), TLS из
+Панель — `axum`-роутер (`web_panel.rs`, обработчики в `web_panel/*.rs` по областям: `auth`,
+`clients`, `clients_batch`, `host`, `vk`, `groups`, `routing`, `settings`, `transfer`, `local_proxy`,
+`subscriptions`, `links`, `dns`, `logs`, `stats`, `pwa`, `persistence`, `stealth`, `router`, `validation`)
+на `--web-port` (443 в доменном режиме), TLS из
 `web_cert.pem`/`web_key.pem` в config-dir: отсутствующая пара генерируется self-signed через `rcgen` при первом
-старте, неполная — отказ старта, перезагрузка по `SIGUSR1`. Разметка — константы в бинарнике (`PANEL_HTML`,
-`LOGIN_HTML`, `CLIENT_SUB_HTML`, `GROUP_SUB_HTML`).
+старте, неполная — отказ старта, перезагрузка по `SIGUSR1`. Разметка, стили и скрипты лежат файлами
+в `rust-server/web/**` (разделы `panel/html/*`, стили `panel/css/*`, скрипты `panel/js/*`) и собираются
+в константы `PANEL_HTML`, `LOGIN_HTML`, `CLIENT_SUB_HTML`, `GROUP_SUB_HTML` модулем
+`rust-server/web_assets.rs` на этапе компиляции (`include_str!`/`concat!`): в бинарнике внешних
+файлов нет, а `panel/index.html` остаётся скелетом с маркерами, которые `assemble_panel` заменяет
+блоками при первом рендере. Скрипты попадают в один `<script>`, поэтому глобальная область у них общая.
 
 - **Вход.** Креды — `CSQTT_WEB_USER`/`CSQTT_WEB_PASS` (`--web-user`, `--web-pass-stdin`), установщик пишет их в
   `/etc/csqtt/csqtt.env`. `POST /api/login` сравнивает constant-time (`secret_eq`), поля раскодируются

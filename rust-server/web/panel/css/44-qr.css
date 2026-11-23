@@ -1,0 +1,25 @@
+        #qrCodeContainer {
+            background: #ffffff;
+            padding: 16px;
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+            border: 1px solid var(--border);
+            width: 260px;
+            height: 260px;
+            max-width: 100%;
+            aspect-ratio: 1;
+            box-sizing: border-box;
+            overflow: hidden;
+            margin: 0 auto;
+        }
+        #qrCodeContainer svg {
+            width: 100% !important;
+            height: 100% !important;
+            max-width: 100% !important;
+            max-height: 100% !important;
+            display: block !important;
+        }
+

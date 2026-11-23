@@ -1,0 +1,97 @@
+        .api-card {
+            background: var(--bg-color);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: border-color 0.2s;
+        }
+        .api-card:hover { border-color: var(--primary); }
+        .api-card-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            background: var(--surface-hover);
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            flex-wrap: wrap;
+        }
+        .api-method {
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 7px;
+            border-radius: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .api-method.get { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); border: 1px solid color-mix(in srgb, var(--success) 30%, transparent); }
+        .api-method.post { background: color-mix(in srgb, var(--primary) 15%, transparent); color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent); }
+        .api-method.put { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .api-method.delete { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); }
+        .api-path { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 600; color: var(--text-main); }
+        .api-desc { color: var(--text-muted); font-size: 12px; margin-left: auto; }
+        .api-card-body { padding: 12px 14px; }
+        .api-code-label { font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
+        .api-code-block {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-main);
+            overflow-x: auto;
+            margin: 0;
+        }
+
+        .api-tabs-nav {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 20px;
+            overflow-x: auto;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+            scrollbar-width: none;
+        }
+        .api-tabs-nav::-webkit-scrollbar { display: none; }
+        .api-tab-btn {
+            padding: 8px 14px;
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
+            border-radius: 10px;
+            border: 1px solid transparent;
+            cursor: pointer;
+            background: transparent;
+            color: var(--text-muted);
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .api-tab-btn:hover {
+            color: var(--text-main);
+            background: var(--surface-hover);
+        }
+        .api-tab-btn.active {
+            background: var(--primary);
+            color: #ffffff;
+            box-shadow: 0 4px 12px color-mix(in srgb, var(--primary) 25%, transparent);
+        }
+        .api-curl-copy-btn {
+            padding: 3px 8px;
+            font-size: 11px;
+            height: 24px;
+            border-radius: 6px;
+            background: var(--surface-hover);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .api-curl-copy-btn:hover {
+            color: var(--text-main);
+            border-color: var(--primary);
+        }
+

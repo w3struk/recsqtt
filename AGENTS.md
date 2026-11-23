@@ -88,11 +88,13 @@ ssh-add -d ~/.ssh/id_ed25519              # убрать только этот �
 | `app/` | Единственный Gradle-модуль. AGP 9.2, Kotlin 2.4, Compose, JDK 17, `compileSdk`/`targetSdk` 37, `minSdk` 26. |
 | `rust-client/` | Крейт `csqtt-client`. cargo-ndk → `app/build/generated/jniLibs/<variant>/<abi>/libclient.so`. **Не JNI-библиотека** — это исполняемый файл, запускаемый как дочерний процесс через `ProcessBuilder`. |
 | `rust-server/` | Крейт `csqtt`. cargo-zigbuild (статический musl, только amd64) → `app/build/generated/assets/` и `rust-server/dist/`. В APK не пакуется: release CI публикует бинарь отдельным ассетом. |
+| `rust-server/web_panel/` | Rust-часть панели по областям: `auth`, `clients` (+ `clients_batch`), `host`, `vk`, `groups`, `routing`, `settings` (+ `transfer`, `local_proxy`), `subscriptions`, `links`, `dns`, `logs`, `stats`, `pwa`, `persistence`, `stealth` (TLS-акцептор, abort-контроллеры, watchdog'и), `router`, `validation`, `tests`. Фасад — `rust-server/web_panel.rs`: `run`, `WebState`, лимиты тела, PWA-ассеты (их версию правит `bump_version.sh`). Модули видят друг друга через `pub(crate) use <модуль>::*;` в фасаде; наружу крейта панель отдаёт только `run`, шифрование ссылок и DNS-хелперы. |
 | `shared/` | 3 файла `.rs`, компилируемых в **оба** крейта через `#[path = "../shared/..."] mod ...;` в каждом `main.rs`. Не cargo workspace и не path-зависимость. `dtls.rs` и `wire_protocol.rs` общие; `spsc_ring.rs` только для клиента. |
 | `scripts/` | `android_env.sh`, `device_abi.sh` (определяет ABI подключённого устройства по манифесту), `toolchain.env` (единственный источник пинов тулчейна), `check_toolchain.sh`, `check_abi_list.sh`, `bump_version.sh`, два скрипта provenance, `build_apk.sh`, `install_apk.sh`, `run_system_checks.sh`. Пути артефактов настраиваются флагами `--variant`, `--jni-libs-dir`, `--assets-dir`, `--manifest`; значения по умолчанию — `app/build/generated/`. |
 | `scripts/install.sh` | Публичный установщик на ~5.7k строк: скачивает серверный релиз и ставится на сервер вручную или one-liner'ом (режим systemd или docker). |
 | `scripts/bootstrap.sh` | Тонкий вход one-liner'а: резолвит тег (`releases/latest`), скачивает `install.sh` и `SHA256SUMS`, сверяет SHA-256 и запускает установщик с проброшенными аргументами. Публикуется ассетом рядом с `install.sh`. |
 | `rust-server/data/` | Фиксированные ассеты маршрутизации: `domains_ru.txt` (515 доменов) и `ips_ru.txt` (6 710 CIDR) + `SOURCES.md` с источниками. Подключены `include_str!` в `rust-server/routing_assets.rs`; клиент и приложение своих копий не содержат. |
+| `rust-server/web/` | Разметка, стили и скрипты панели: `panel/index.html` (73-строчный скелет с маркерами на каждую часть), `panel/html/*` (15 частей: шапка, разделы, группы диалогов), `panel/css/*` (21 файл по областям), `panel/js/*` (20 файлов по областям), `theme.css`, `login.html`, `client_sub.html`, `group_sub.html`, `vendor/qrcode.min.js`. Собираются в документы `rust-server/web_assets.rs` (`include_str!`/`concat!`); в рантайме с диска не читаются. |
 
 ## Нативная часть: варианты и грабли
 
@@ -140,10 +142,10 @@ ARM-режима нет; подробности сборки и очистки �
   provenance сверяет с установленными библиотеками. Задачи сборки это учитывают
   (`outputs.upToDateWhen`), так что следующая сборка APK пересоберёт нативную часть сама;
   ручной вызов `scripts/native_client_provenance.sh verify` после такого `rm` честно упадёт.
-- **Правка Rust, `shared/`, одного из build-скриптов или `rust-server/data/*.txt`** меняет
-  хеш provenance. Клиентскую часть пересоберёт следующая сборка APK; сервер
-  пересобирает `rust-server/build_linux.sh` (локально или в CI) — Gradle его больше
-  не собирает и `rust-server/data/*.txt` в inputs Gradle не входят.
+- **Правка Rust, `shared/`, одного из build-скриптов, `rust-server/data/*.txt` или
+  `rust-server/web/**`** меняет хеш provenance. Клиентскую часть пересоберёт следующая сборка APK;
+  сервер пересобирает `rust-server/build_linux.sh` (локально или в CI) — Gradle его больше
+  не собирает и эти файлы в inputs Gradle не входят.
 
 ## Команды
 
@@ -243,6 +245,20 @@ sudo csqttctl status
    `scripts/version_properties.sh`, поэтому форма выражения в `app/build.gradle.kts`
    никого снаружи не касается. `versionCode` бета не меняет — иначе релиз с меньшим
    кодом стал бы для тестера «понижением».
+10. **Веб-ассеты панели живут файлами, а не литералами.** `rust-server/web/panel/index.html` —
+    скелет с маркером на каждую часть: `/*__PANEL_CSS__*/`, `//__PANEL_JS__` и
+    `<!--__PANEL_*__-->` для разметки. Части и их порядок заданы списками `PANEL_CSS`,
+    `PANEL_JS` и `PANEL_PARTS` в `rust-server/web_assets.rs`; туда же добавляется новый
+    файл. Порядок — это порядок каскада для CSS и порядок исполнения для JS; все скрипты
+    попадают в один `<script>`, поэтому `const`/`let` остаются общей областью видимости и
+    модульной изоляции между файлами нет. Правка в `rust-server/web/**` меняет
+    provenance-хеш: каталог внесён в `build_input_files` в `scripts/server_asset_provenance.sh`
+    и в фикстуру `.github/tests/fixtures/server-artifacts.sh`. Встраиваемые форматы
+    перечислены в `WEB_ASSET_GLOBS` (сейчас `*.css`, `*.js`, `*.html`); новый формат
+    ассета вносится туда же. Остатки редакторов (`.orig`, `*.swp`, `*~`) хеш не меняют,
+    а незнакомый формат под `web/` валит провенанс, а не выпадает из хеша молча.
+    `PWA_SERVICE_WORKER` остаётся в `web_panel.rs`: его `CACHE_NAME` правит
+    `scripts/bump_version.sh`.
 
 ## Правила Rust, которые роняют сборку
 

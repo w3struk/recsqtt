@@ -1,0 +1,20 @@
+        <div id="clients-section" style="display: none;">
+            <section>
+                <div class="clients-toolbar">
+                    <button class="btn btn-ghost clients-tb-links-btn" onclick="openLinksAndTokensDlg()">Настройка ссылок</button>
+                    <div class="panel-search-wrapper">
+                        <input type="text" id="mainSearchInput" class="panel-search-input" placeholder="Поиск групп и пользователей..." oninput="handleMainSearch(this.value)">
+                        <svg style="position: absolute; left: 10px; top: 11px; color: var(--text-muted); pointer-events: none;" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        <button id="mainSearchClearBtn" onclick="clearMainSearch()" style="display: none; position: absolute; right: 8px; top: 10px; background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0;" title="Очистить">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                        </button>
+                    </div>
+                    <div class="clients-tb-actions">
+                        <button class="btn btn-ghost" style="color: var(--primary); border: 1px solid color-mix(in srgb, var(--primary) 40%, transparent); white-space: nowrap;" onclick="openRoutingRulesDlg()">Управление маршрутизацией</button>
+                        <button class="btn btn-primary" onclick="openNewGroupDlg()">Создать группу</button>
+                        <button class="btn btn-primary" onclick="openNewClientDlg()">Создать доступ</button>
+                    </div>
+                </div>
+                <div id="clientsCards" class="client-cards-grid"></div>
+            </section>
+        </div>

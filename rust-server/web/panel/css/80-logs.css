@@ -1,0 +1,25 @@
+        .log-line { margin-bottom: 4px; padding: 2px 4px; border-radius: 4px; color: #e2e8f0; }
+        .log-line:hover { background: rgba(255, 255, 255, 0.05); }
+        #logConsole ::selection { background: color-mix(in srgb, var(--primary) 30%, transparent); color: #ffffff; }
+        .log-time { color: var(--text-muted); margin-right: 8px; }
+        .log-lvl { font-weight: 700; margin-right: 8px; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+        .log-lvl.log-info { color: #38bdf8; background: rgba(56, 189, 248, 0.1); }
+        .log-lvl.log-err { color: #f87171; background: rgba(248, 113, 113, 0.1); }
+        .log-mod { color: #34d399; background: rgba(52, 211, 153, 0.1); padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-right: 8px; }
+
+        #logConsole::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        #logConsole::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+        }
+        #logConsole::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+        }
+        #logConsole::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.22);
+        }
+
