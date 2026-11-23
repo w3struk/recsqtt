@@ -106,11 +106,13 @@ if [[ ! -x "$SERVER_BIN" ]]; then
     if ! bash rust-server/build_linux.sh --no-tests; then
         echo "ERROR: server build failed." >&2
         echo "       Build it manually with: bash rust-server/build_linux.sh --no-tests" >&2
+        echo "       It requires the exact zig/cargo-zigbuild pins from scripts/toolchain.env." >&2
         exit 1
     fi
     if [[ ! -x "$SERVER_BIN" ]]; then
         echo "ERROR: server binary not found or not executable: $SERVER_BIN" >&2
         echo "       Rebuild it with: bash rust-server/build_linux.sh --no-tests" >&2
+        echo "       It requires the exact zig/cargo-zigbuild pins from scripts/toolchain.env." >&2
         exit 1
     fi
 fi

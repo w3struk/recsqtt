@@ -14,6 +14,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 OUT="$TMP/stdout.txt"
 ERR="$TMP/stderr.txt"
+TEMPLATE=""
 WIRE_REVISION="CSQTT-WIRE-3"
 
 # Hermetic toolchain probing: keep the real probe commands out of this suite so
@@ -53,27 +54,58 @@ expect_failure() {
     printf '[OK] %s (exit %s): %s\n' "$label" "$STATUS" "$(<"$ERR")"
 }
 
-# Every negative calls this before its mutation. Explicit amd64 write/verify
-# also passes on the pre-change implementation, so missing ARM cannot hide an
-# integrity failure. Each root is new, with real, freshly hashed source inputs.
+# The copied tree plus a written-and-verified amd64 payload. The manifest holds
+# only content hashes (no paths); the sole varying field is generatedAtUtc, which
+# verification does not read. It is built once for the whole suite (before the
+# per-case subshells), which proves the real writer on the real inputs; every
+# restore is then a clone of that pristine tree instead of a fresh copy + two
+# full hash walks (the suite makes ~100 restores).
+make_template() {
+    [[ -n "$TEMPLATE" ]] && return 0
+    local root assets manifest
+    root="$TMP/server-template"
+    make_server_root "$root" || fail "could not copy server source inputs"
+    assets="$root/app/build/generated/assets"
+    manifest="$root/app/build/generated/provenance/csqtt-server.json"
+    write_server_elf "$assets/recsqtt-linux-amd64" 2 62 "$WIRE_REVISION" ||
+        fail "could not write amd64 ELF fixture"
+    SUT="$root/scripts/server_asset_provenance.sh"
+    expect_success "template write" write \
+        --root "$root" --assets-dir "$assets" --manifest "$manifest" \
+        --assets=recsqtt-linux-amd64
+    expect_success "template verify" verify \
+        --root "$root" --assets-dir "$assets" --manifest "$manifest" \
+        --assets=recsqtt-linux-amd64
+    TEMPLATE="$root"
+}
+
+# Every negative calls this before its mutation. The clone is byte-identical to
+# the verified template, so a missing ARM asset still cannot hide an integrity
+# failure, and explicit amd64 write/verify is still exercised by
+# test_default_amd64_manifest.
 restore_valid_fixture() {
     ROOT="$(mktemp -d "$TMP/server-root.XXXXXX")"
-    make_server_root "$ROOT" || fail "could not copy server source inputs"
+    make_template
+    cp -a -- "$TEMPLATE/." "$ROOT/" || fail "could not clone the fixture template"
     SUT="$ROOT/scripts/server_asset_provenance.sh"
     PATH_ARGS=(--root "$ROOT")
     if [[ "${1:-default}" == custom ]]; then
         ASSET_DIR="$ROOT/chosen assets"
         MANIFEST="$ROOT/chosen provenance/server.json"
         PATH_ARGS+=(--assets-dir "$ASSET_DIR" --manifest "$MANIFEST")
+        # The manifest is path-independent, so the verified template payload can
+        # be placed under the custom names without re-running the writer.
+        mkdir -p -- "$ASSET_DIR" "$(dirname -- "$MANIFEST")" || fail "could not create custom paths"
+        cp -- "$TEMPLATE/app/build/generated/assets/recsqtt-linux-amd64" \
+            "$ASSET_DIR/recsqtt-linux-amd64" || fail "could not place custom payload"
+        cp -- "$TEMPLATE/app/build/generated/provenance/csqtt-server.json" \
+            "$MANIFEST" || fail "could not place custom manifest"
     else
         ASSET_DIR="$ROOT/app/build/generated/assets"
         MANIFEST="$ROOT/app/build/generated/provenance/csqtt-server.json"
     fi
     AMD64="$ASSET_DIR/recsqtt-linux-amd64"
     VALID_ARGS=("${PATH_ARGS[@]}" --assets=recsqtt-linux-amd64)
-    write_server_elf "$AMD64" 2 62 "$WIRE_REVISION" || fail "could not write amd64 ELF fixture"
-    expect_success "restored fixture write" write "${VALID_ARGS[@]}"
-    expect_success "restored fixture verify" verify "${VALID_ARGS[@]}"
 }
 
 assert_amd64_manifest() {
@@ -127,11 +159,17 @@ test_invalid_asset_selection() {
         recsqtt-linux-amd64,csqtt-linux-arm64,csqtt-linux-armv7 \
         ,recsqtt-linux-amd64 recsqtt-linux-amd64, recsqtt-linux-amd64,, \
         $'recsqtt-linux-amd64\ncsqtt-linux-arm64'; do
+        # One pristine clone per selection: the ARM branch mutates the payload and
+        # manifest, and isolation keeps a future check-order change from turning
+        # later rejections into the wrong failure.
+        restore_valid_fixture
         for form in split equals; do
             for mode in write verify; do
-                restore_valid_fixture
                 case "$selection" in
                     csqtt-linux-arm64 | csqtt-linux-armv7)
+                        # ARM needs a matching payload/record, so it mutates the
+                        # clone's manifest; other selections are rejected while
+                        # parsing arguments and never read the fixture.
                         if [[ "$selection" == csqtt-linux-arm64 ]]; then
                             class=2 machine=183
                         else
@@ -179,6 +217,24 @@ test_legacy_manifest_rejected() {
         fail "legacy fixture mutation changed the fresh source hash"
     expect_failure "default verify rejects legacy three-record manifest" "artifact count mismatch" \
         verify "${PATH_ARGS[@]}"
+}
+
+# scripts/zig_env.sh управляет линковкой (снимает ambient CC_*), поэтому его
+# правка обязана менять buildInputSha256: иначе провенанс перестанет замечать
+# подмену окружения, из которой получается не-musl бинарь.
+test_build_input_hash_covers_zig_env() {
+    restore_valid_fixture
+    local source_hash
+    source_hash="$(jq -r '.buildInputSha256' "$MANIFEST")"
+    # Мутация в ТОМ ЖЕ дереве: restore_valid_fixture создаёт новый ROOT,
+    # поэтому повторный его вызов вернул бы неизменённый исходник.
+    printf '\n# fixture mutation\n' >>"$ROOT/scripts/zig_env.sh"
+    expect_success "write after scripts/zig_env.sh change" write "${VALID_ARGS[@]}"
+    [[ "$(jq -r '.buildInputSha256' "$MANIFEST")" != "$source_hash" ]] ||
+        fail "scripts/zig_env.sh is not part of buildInputSha256"
+    printf '\n# second mutation\n' >>"$ROOT/scripts/zig_env.sh"
+    expect_failure "verify rejects a changed scripts/zig_env.sh" \
+        "Rust server source changed after the production server build" verify "${VALID_ARGS[@]}"
 }
 
 test_stale_arm_assets_rejected() {
@@ -440,13 +496,20 @@ test_web_assets_are_bounded() {
         "Web assets directory is missing" write "${VALID_ARGS[@]}"
 }
 
+# Build the template in the parent shell: cases run in subshells, so a lazy
+# first-call build would run once per case instead of once per suite.
+make_template
+
 # Keep running the named cases during red so default/selection failures are
 # visible alongside the unchanged fail-closed integrity behavior.
 failed=0
+cases=0
 for test_case in test_default_amd64_manifest test_invalid_asset_selection \
-    test_legacy_manifest_rejected test_stale_arm_assets_rejected \
+    test_legacy_manifest_rejected test_build_input_hash_covers_zig_env \
+    test_stale_arm_assets_rejected \
     test_integrity_and_features_fail_closed test_web_assets_are_bounded \
     test_toolchain_recorded_and_compared test_strict_toolchain_pins; do
+    cases=$((cases + 1))
     set +e
     ( trap - EXIT; set -e; "$test_case" )
     status=$?
@@ -459,4 +522,4 @@ for test_case in test_default_amd64_manifest test_invalid_asset_selection \
     fi
 done
 [[ "$failed" -eq 0 ]] || exit 1
-printf 'server-asset-provenance: 8 cases OK\n'
+printf 'server-asset-provenance: %s cases OK\n' "$cases"

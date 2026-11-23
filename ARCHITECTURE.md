@@ -343,7 +343,11 @@ Android и ждёт ответа до 60 с; ждёт при этом тольк
   `red`/`orange`; сломанный уровень парсится в пустой список с `ERROR` в лог при старте. Файл валидируется
   `python3` в `rust-server/build_linux.sh` на каждой сборке, включая `--no-tests`.
 - **Provenance.** `rust-server/build_linux.sh` пишет/проверяет
-  `app/build/generated/provenance/csqtt-server.json` (схема v4). В `build_input_files` входят `data/*.txt`;
+  `app/build/generated/provenance/csqtt-server.json` (схема v5). В `build_input_files` входят скрипты
+  сборки (`build_linux*.sh`, `scripts/zig_env.sh`, `server_asset_provenance.sh`, `toolchain.env`),
+  `Cargo.toml`/`Cargo.lock`, `rust-toolchain.toml`, пресет, `data/*.txt`, все `rust-server/*.rs`,
+  `shared/*.rs`, Cargo-конфиги (`.cargo/`, `rust-server/.cargo/`) и встраиваемые веб-ассеты
+  (`*.css`, `*.js`, `*.html`; незнакомый формат под `web/` валит проверку, а не выпадает из хеша);
   `WIRE_PROTOCOL_REVISION` извлекается из `main.rs` через `sed` и обязан присутствовать в бинарнике.
 - **Как правило уезжает клиенту.** `GETCONF` с меткой `owner` (7-е поле) запрашивает решение; приходит JSON
   `ROUTING` `version: 3` с `packages`, `preset_red`, `preset_orange`, `domains`, `ips`, `content_sha`,
@@ -516,8 +520,10 @@ caps `NET_ADMIN`/`NET_RAW`/`NET_BIND_SERVICE`, `--restart unless-stopped`, ка�
   плюс `verify native provenance` и проверки подписи/идентичности APK; триггера `pull_request` нет, а `release.yml` и `beta.yml`
   вызывают общий workflow и своих гейтов не имеют.
 - **Воспроизводимость проверок.**
-  Клиент: `cd rust-client && cargo test` и `bash check_no_runtime_panics.sh`; сервер: `cd rust-server && cargo test`
-  (musl-цель из `.cargo/config.toml`). Согласованность версий — `bash scripts/check_versions.sh --root .`;
+  Клиент: `cd rust-client && cargo test` и `bash check_no_runtime_panics.sh`; сервер:
+  `cd rust-server && RUSTUP_TOOLCHAIN=1.97.1 cargo-zigbuild test --target x86_64-unknown-linux-musl --all-targets`
+  (musl-цель из `rust-server/.cargo/config.toml`; голый `cargo test` падает на `cc-rs` без musl C/C++ —
+  его ставит только `cargo-zigbuild`). Согласованность версий — `bash scripts/check_versions.sh --root .`;
   целостность — `scripts/native_client_provenance.sh verify` и `scripts/server_asset_provenance.sh verify`; системные проверки TUN/systemd — `scripts/run_system_checks.sh`, требует root.
 
 ## Сборка и карта проверок
@@ -537,13 +543,14 @@ caps `NET_ADMIN`/`NET_RAW`/`NET_BIND_SERVICE`, `--restart unless-stopped`, ка�
   `-Pcsqtt.nativeTests`, `-Pcsqtt.buildNativeClient`, `-Pcsqtt.skipNativeVerification`.
 - **Provenance.** Клиент — схема v6: ELF-класс/машина, `ET_DYN`, отсутствие Go-метаданных, маркер транспорта,
   SHA-256 против манифеста, совпадение с промежуточным выводом cargo и хеш входов (скрипты, `*.rs`,
-  `shared/*.rs`, `vendor/**`, `Cargo.lock`); сервер — схема v4: ELF amd64, `WIRE_PROTOCOL_REVISION`, features,
-  SHA-256 и хеш входов с `data/*.txt`.
+  `shared/*.rs`, `vendor/**`, `Cargo.lock`); сервер — схема v5: ELF amd64, `WIRE_PROTOCOL_REVISION`, features,
+  SHA-256 и хеш входов (скрипты сборки, `Cargo.*`/пины, пресет, `*.rs`/`shared/*.rs`, `data/*.txt`,
+  встраиваемые `web/**`).
 - **CI-гейты.** Только в `.github/workflows/build.yml` (release/beta его вызывают; своих гейтов у них нет):
   `build-version.sh` (версия+коммит), `check_versions.sh`, `deploy_shell_tests.sh`, `./gradlew
   :app:testDebugUnitTest`, отсутствие `sshj`/BouncyCastle в `releaseRuntimeClasspath`, Rust client
-  (`check_no_runtime_panics.sh`, `fmt`, `clippy -D warnings`, `test`), Rust server (musl-`clippy`/`test` через
-  zig-обёртки), затем provenance, guard «в APK нет серверного payload и есть `libclient.so`», подпись и identity
+  (`check_no_runtime_panics.sh`, `fmt`, `clippy -D warnings`, `test`), Rust server (musl-`clippy`/`test`/сборка
+  через `cargo-zigbuild`), затем provenance, guard «в APK нет серверного payload и есть `libclient.so`», подпись и identity
   (package `csqtt.quic.amurcanov`, versionName/versionCode).
 - **Релиз и ручное.** `release.yml` — тег `vX.Y.Z` (строгий regex, коммит достижим из `origin/main`), публикация
   трёх APK, `recsqtt-linux-amd64`, `install.sh`, `SHA256SUMS`; `beta.yml` на пуш в `main` — один `arm64-v8a` с

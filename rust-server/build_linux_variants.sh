@@ -31,6 +31,14 @@ if [[ -z "${RUST_TOOLCHAIN:-}" ]]; then
   exit 1
 fi
 
+# Ambient CC_*/CMAKE_TOOLCHAIN_FILE variables win over the wrappers that
+# cargo-zigbuild installs for its child process (it never overrides existing
+# ones), and a wrong linker here silently yields a dynamic glibc binary. The
+# list lives in one file, shared with build_linux.sh.
+# A missing or broken file aborts here: both scripts run with `set -e`.
+# shellcheck source=/dev/null
+source "$ROOT/scripts/zig_env.sh"
+
 LOG_DIR="$ROOT/build/csqtt-uring-linux-logs"
 
 TOOLCHAIN="$RUST_TOOLCHAIN"
@@ -100,26 +108,13 @@ if ! command -v zig >/dev/null 2>&1; then
   echo "Error: 'zig' not found in PATH." >&2
   exit 1
 fi
-if ! cargo zigbuild --help >/dev/null 2>&1; then
-  echo "Error: cargo-zigbuild not found." >&2
-  echo "  Install it with: cargo install cargo-zigbuild --locked" >&2
-  exit 1
-fi
+require_cargo_zigbuild || exit 1
+require_zig || exit 1
 
-# Ручные zig-обёртки из .github/scripts/musl-zig-env.sh нужны только cc-rs
-# (clippy/test): cargo-zigbuild выставляет свои переменные лишь когда их нет.
-# Для ФИНАЛЬНОГО линка эти обёртки вредны: rustc вызывает линкер без --target,
-# обёртка подставляет только явно переданный --target, и zig линкует против
-# glibc хоста. Бинарь получается динамическим (interpreter
-# /lib64/ld-linux-x86-64.so.2): он не запускается в alpine-образе и вообще не
-# является musl-сборкой. Поэтому в окружении zigbuild эти переменные снимаем и
-# отдаём выбор cargo-zigbuild.
-MANUAL_MUSL_ENV_UNSET=(
-  -u CC_x86_64_unknown_linux_musl
-  -u CXX_x86_64_unknown_linux_musl
-  -u AR_x86_64_unknown_linux_musl
-  -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER
-)
+# Ручные zig-обёртки для cc-rs больше не нужны: их ставит cargo-zigbuild, и он
+# же линкует финальный бинарь. Снимаем только ambient-переменные, иначе они
+# выигрывают у обёрток (add_env_if_missing) и линк уходит в glibc хоста.
+# Список — в scripts/zig_env.sh, общий с build_linux.sh.
 
 mkdir -p "$LOG_DIR"
 for asset in "${VARIANT_ASSETS[@]}"; do
@@ -144,11 +139,12 @@ build_one() {
     (
       cd "$SERVER_DIR"
       exec env \
-        ${MANUAL_MUSL_ENV_UNSET[@]+"${MANUAL_MUSL_ENV_UNSET[@]}"} \
+        "${MUSL_ENV_UNSET[@]}" \
+        RUSTUP_TOOLCHAIN="$TOOLCHAIN" \
         ZIG_GLOBAL_CACHE_DIR="$ROOT/build/zig-cache/$asset/global" \
         ZIG_LOCAL_CACHE_DIR="$ROOT/build/zig-cache/$asset/local" \
         CARGO_TARGET_DIR="$target_dir" \
-        cargo "+$TOOLCHAIN" zigbuild --release --target "$target" \
+        cargo-zigbuild build --release --target "$target" \
         ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"}
     ) 2>&1 | tee "$log"
     rc=${PIPESTATUS[0]}
@@ -157,11 +153,12 @@ build_one() {
     (
       cd "$SERVER_DIR"
       exec env \
-        ${MANUAL_MUSL_ENV_UNSET[@]+"${MANUAL_MUSL_ENV_UNSET[@]}"} \
+        "${MUSL_ENV_UNSET[@]}" \
+        RUSTUP_TOOLCHAIN="$TOOLCHAIN" \
         ZIG_GLOBAL_CACHE_DIR="$ROOT/build/zig-cache/$asset/global" \
         ZIG_LOCAL_CACHE_DIR="$ROOT/build/zig-cache/$asset/local" \
         CARGO_TARGET_DIR="$target_dir" \
-        cargo "+$TOOLCHAIN" zigbuild --release --target "$target" \
+        cargo-zigbuild build --release --target "$target" \
         ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"}
     ) >"$log" 2>&1 || rc=$?
   fi

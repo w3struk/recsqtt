@@ -304,7 +304,7 @@ jobs:
             build/csqtt-uring-linux-recsqtt-linux-amd64
             build/zig-cache
             ~/.cache/zig
-          key: cargo-server-target-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env', 'rust-server/Cargo.lock', 'rust-server/rust-toolchain.toml', '.github/scripts/musl-zig-env.sh') }}
+          key: cargo-server-target-${{ runner.os }}-${{ hashFiles('scripts/toolchain.env', 'rust-server/Cargo.lock', 'rust-server/rust-toolchain.toml', 'scripts/zig_env.sh') }}
           restore-keys: |
             cargo-server-target-${{ runner.os }}-
 
@@ -372,9 +372,8 @@ jobs:
       # Фикстуры .github/tests/*.sh существовали, но в CI не запускались:
       # регрессия в release/CI-скриптах ловилась только локально. Прогоняем
       # все и не падаем на первом — иначе за один прогон видна одна поломка.
-      # musl-zig-env.sh здесь не хелпер, а section-тест для
-      # .github/scripts/musl-zig-env.sh (сам скрипт лишь source'ится изнутри),
-      # поэтому он входит в набор наравне с остальными.
+      # zig-env.sh сверяет ambient-список и пины инструментов; внешнего
+      # env-хелпера у серверной сборки больше нет.
       - name: 'Gate: CI and release script fixtures'
         run: |
           set -euo pipefail
@@ -442,13 +441,15 @@ jobs:
       #
       # --tests: fmt/clippy/test живут в этом же шаге и в том же
       # CARGO_TARGET_DIR, что и сама сборка
-      # (build/csqtt-uring-linux-recsqtt-linux-amd64), поэтому clippy и zigbuild
+      # (build/csqtt-uring-linux-recsqtt-linux-amd64), поэтому clippy и сборка
       # делят собранные зависимости. Свой CARGO_TARGET_DIR здесь задавать
       # нельзя — он снова развёл бы каталоги и удвоил компиляцию.
-      # musl-zig-env.sh даёт cc-rs musl C/C++ (без него cc-rs падает:
-      # "failed to find tool x86_64-linux-musl-g++"); cargo-zigbuild ставит
-      # свои обёртки только при отсутствии переменных (add_env_if_missing),
-      # поэтому линкер посреди прогона не меняется.
+      # clippy/test/build идут через cargo-zigbuild: он сам ставит cc-rs
+      # musl C/C++ и CMake-тулчейн для своего child-процесса. Тулчейн
+      # передаётся через RUSTUP_TOOLCHAIN: форма `+toolchain` заставляет
+      # cargo-zigbuild потерять zig-окружение. Ambient CC_*/CMAKE_TOOLCHAIN_FILE
+      # снимает scripts/zig_env.sh — cargo-zigbuild не перекрывает уже
+      # экспортированные переменные (add_env_if_missing).
       # LC_ALL=C: вывод cargo (а позже keytool) локализуется, а парсеры английские.
       # Шаг стоит до keystore: серверной сборке подпись не нужна, а падать она
       # должна раньше, чем тратится время на APK.
@@ -457,8 +458,6 @@ jobs:
         run: |
           set -euo pipefail
           export LC_ALL=C
-          # shellcheck source=../.github/scripts/musl-zig-env.sh
-          source ../.github/scripts/musl-zig-env.sh
           bash build_linux.sh --tests
 
       # Пароль идёт через env, а не argv: verify-signing-identity.sh передаёт

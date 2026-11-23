@@ -22,8 +22,20 @@ entry="$(jq -cn --arg tool "$tool" --arg cwd "$PWD" \
     --arg targetDir "${CARGO_TARGET_DIR:-}" \
     --arg globalCache "${ZIG_GLOBAL_CACHE_DIR:-}" \
     --arg localCache "${ZIG_LOCAL_CACHE_DIR:-}" \
+    --arg rustupToolchain "${RUSTUP_TOOLCHAIN:-}" \
+    --arg cflags "${CFLAGS:-}" \
+    --arg poison "$( \
+        out=''
+        for name in CC_x86_64_unknown_linux_musl CXX_x86_64_unknown_linux_musl \
+            AR_x86_64_unknown_linux_musl RANLIB_x86_64_unknown_linux_musl \
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER CMAKE_TOOLCHAIN_FILE \
+            CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_musl TARGET_CMAKE_TOOLCHAIN_FILE; do
+            [[ -z "${!name:-}" ]] || out+="$name,"
+        done
+        printf '%s' "$out")" \
     --args '{tool: $tool, argv: $ARGS.positional, cwd: $cwd,
-             targetDir: $targetDir, globalCache: $globalCache, localCache: $localCache}' -- "$@")"
+             targetDir: $targetDir, globalCache: $globalCache, localCache: $localCache,
+             rustupToolchain: $rustupToolchain, cflags: $cflags, poison: $poison}' -- "$@")"
 printf '%s\n' "$entry" >>"${SERVER_BUILD_CALLS:?}"
 reject() { printf 'unexpected %s invocation: %s\n' "$tool" "$*" >&2; exit 97; }
 
@@ -41,16 +53,24 @@ case "$tool" in
         ;;
     zig)
         [[ "$*" == version ]] || reject "$@"
-        printf 'zig fixture\n'
+        printf '%s\n' "${SERVER_BUILD_FAKE_ZIG:-0.17.0}"
         ;;
     cargo)
-        [[ "$*" != 'zigbuild --help' ]] || exit 0
         [[ "${1:-}" == '+1.97.1' ]] || reject "$@"
         shift
-        operation="${1:-}"
-        case "$operation" in
-            fmt)
-                [[ "$*" == 'fmt --all -- --check' ]] || reject "$@"
+        [[ "${1:-}" == fmt ]] || reject "$@"
+        [[ "$*" == 'fmt --all -- --check' ]] || reject "$@"
+        ;;
+    cargo-zigbuild)
+        # `+toolchain` loses the zig environment (cargo-zigbuild then behaves
+        # like plain cargo), so the selector must travel via RUSTUP_TOOLCHAIN.
+        for arg in "$@"; do
+            [[ "$arg" != +* ]] || reject "$@"
+        done
+        case "${1:-}" in
+            --version)
+                [[ "$*" == '--version' ]] || reject "$@"
+                printf 'cargo-zigbuild %s\n' "${SERVER_BUILD_FAKE_CZ:-0.24.0}"
                 ;;
             clippy)
                 case "$*" in
@@ -66,7 +86,7 @@ case "$tool" in
                     *) reject "$@" ;;
                 esac
                 ;;
-            zigbuild)
+            build)
                 [[ "${2:-}" == --release && "${3:-}" == --target && \
                     "${4:-}" == x86_64-unknown-linux-musl ]] || reject "$@"
                 shift 4
@@ -88,7 +108,7 @@ case "$tool" in
 esac
 MOCK
 chmod 0755 "$BIN/tool-mock"
-for tool in cargo rustup rustc zig; do
+for tool in cargo cargo-zigbuild rustup rustc zig; do
     ln -s tool-mock "$BIN/$tool"
 done
 export PATH="$BIN:$PATH"
@@ -113,6 +133,24 @@ make_fixture() {
     CARGO_BINARY="$ROOT/build/csqtt-uring-linux-recsqtt-linux-amd64/x86_64-unknown-linux-musl/release/csqtt"
     OUT="$ROOT/stdout.txt" ERR="$ROOT/stderr.txt" CALLS="$ROOT/calls.jsonl"
     export SERVER_BUILD_CALLS="$CALLS" SERVER_BUILD_CARGO_MODE=ok
+    unset SERVER_BUILD_FAKE_ZIG SERVER_BUILD_FAKE_CZ
+    # CFLAGS/LDFLAGS/CPATH/PKG_CONFIG_*/BINDGEN_EXTRA_CLANG_ARGS are documented
+    # cargo-zigbuild knobs, so they deliberately survive the scrub; the
+    # assertions below require this value to reach clippy/test/build untouched.
+    export CFLAGS=-DCSQTT_ESCAPE_HATCH=1
+    # Ambient poisoning: cargo-zigbuild never overrides variables that are
+    # already exported (add_env_if_missing), so a stale CC_*/CMAKE_* would
+    # silently replace the zig toolchain. The producers must scrub exactly the
+    # MUSL_ENV_UNSET list; tool-mock records what actually survived and the
+    # assertions below require nothing to reach clippy/test/build.
+    export CC_x86_64_unknown_linux_musl=/nonexistent/poison-cc
+    export CXX_x86_64_unknown_linux_musl=/nonexistent/poison-cxx
+    export AR_x86_64_unknown_linux_musl=/nonexistent/poison-ar
+    export RANLIB_x86_64_unknown_linux_musl=/nonexistent/poison-ranlib
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/nonexistent/poison-linker
+    export CMAKE_TOOLCHAIN_FILE=/nonexistent/poison-cmake
+    export CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_musl=/nonexistent/poison-cmake-target
+    export TARGET_CMAKE_TOOLCHAIN_FILE=/nonexistent/poison-cmake-generic
     # Provenance probing must not reach the mocked toolchain (it would add
     # unexpected invocations to the recorded call log); the overrides keep the
     # manifest deterministic without mocking version output.
@@ -145,26 +183,48 @@ from pathlib import Path
 calls_path, root, entry_point, tests, features = sys.argv[1:]
 calls = [json.loads(line) for line in Path(calls_path).read_text().splitlines()]
 feature_args = [arg for feature in features.split(',') if feature for arg in ('--features', feature)]
-payload = ['+1.97.1', 'zigbuild', '--release', '--target', 'x86_64-unknown-linux-musl', *feature_args]
-cargo = [['zigbuild', '--help']]
-if entry_point == 'producer':
-    if tests == 'yes':
-        cargo += [
-            ['+1.97.1', 'fmt', '--all', '--', '--check'],
-            ['+1.97.1', 'clippy', '--release', '--target', 'x86_64-unknown-linux-musl', *feature_args, '--all-targets', '--', '-D', 'warnings'],
-            ['+1.97.1', 'test', '--target', 'x86_64-unknown-linux-musl', *feature_args, '--all-targets'],
-        ]
-    cargo += [['zigbuild', '--help']]
-cargo += [payload]
+payload = ['build', '--release', '--target', 'x86_64-unknown-linux-musl', *feature_args]
+cargo = []
+if entry_point == 'producer' and tests == 'yes':
+    cargo = [['+1.97.1', 'fmt', '--all', '--', '--check']]
 assert [c['argv'] for c in calls if c['tool'] == 'cargo'] == cargo, calls
+zigbuild = []
+if entry_point == 'producer':
+    zigbuild += [['--version']]
+    if tests == 'yes':
+        zigbuild += [
+            ['clippy', '--release', '--target', 'x86_64-unknown-linux-musl', *feature_args, '--all-targets', '--', '-D', 'warnings'],
+            ['test', '--target', 'x86_64-unknown-linux-musl', *feature_args, '--all-targets'],
+        ]
+# build_linux.sh делегирует финальный линк build_linux_variants.sh, а тот
+# проверяет пины сам: у него есть самостоятельный вход, и он обязан не
+# зависеть от того, кто его позвал.
+zigbuild += [['--version'], payload]
+assert [c['argv'] for c in calls if c['tool'] == 'cargo-zigbuild'] == zigbuild, calls
+# `+toolchain` silently drops the zig environment; the selector travels in
+# RUSTUP_TOOLCHAIN and must never appear in the argument vector.
+assert not any(arg.startswith('+') for c in calls if c['tool'] == 'cargo-zigbuild' for arg in c['argv']), calls
+assert all(c['rustupToolchain'] == '1.97.1'
+           for c in calls
+           if c['tool'] == 'cargo-zigbuild' and c['argv'][:1] in (['clippy'], ['test'], ['build'])), calls
+# Ambient-переменные отравлены в make_fixture: если producer перестанет
+# снимать MUSL_ENV_UNSET, они доедут до cargo-zigbuild и выиграют у его обёрток
+# (add_env_if_missing) — здесь это видно как непустой poison.
+assert all(c['poison'] == ''
+           for c in calls
+           if c['tool'] == 'cargo-zigbuild' and c['argv'][:1] in (['clippy'], ['test'], ['build'])), calls
+# Deliberate escape hatch: these knobs are not in MUSL_ENV_UNSET.
+assert all(c['cflags'] == '-DCSQTT_ESCAPE_HATCH=1'
+           for c in calls
+           if c['tool'] == 'cargo-zigbuild' and c['argv'][:1] in (['clippy'], ['test'], ['build'])), calls
 rustup = [] if entry_point == 'variants' else [
     ['toolchain', 'install', '1.97.1', '--profile', 'minimal', '--component', 'rustfmt', '--component', 'clippy'],
     ['target', 'add', 'x86_64-unknown-linux-musl', '--toolchain', '1.97.1'],
 ]
 assert [c['argv'] for c in calls if c['tool'] == 'rustup'] == rustup, calls
 assert [c['argv'] for c in calls if c['tool'] == 'rustc'] == ([] if entry_point == 'variants' else [['+1.97.1', '--version']]), calls
-assert [c['argv'] for c in calls if c['tool'] == 'zig'] == ([] if entry_point == 'variants' else [['version']]), calls
-builds = [c for c in calls if c['tool'] == 'cargo' and c['argv'] == payload]
+assert [c['argv'] for c in calls if c['tool'] == 'zig'] == [['version']] * (3 if entry_point == 'producer' else 1), calls
+builds = [c for c in calls if c['tool'] == 'cargo-zigbuild' and c['argv'] == payload]
 assert len(builds) == 1, builds
 build = builds[0]
 assert build['cwd'] == root + '/rust-server', build
@@ -174,7 +234,7 @@ assert build['localCache'] == root + '/build/zig-cache/recsqtt-linux-amd64/local
 # Один target-dir на clippy/test/release: иначе зависимости компилируются
 # трижды за прогон (clippy, тесты и финальная сборка в разных каталогах).
 for call in calls:
-    if call['tool'] == 'cargo' and call['argv'][1:2] in (['clippy'], ['test']):
+    if call['tool'] == 'cargo-zigbuild' and call['argv'][:1] in (['clippy'], ['test']):
         assert call['targetDir'] == build['targetDir'], call
 PY
 }
@@ -324,6 +384,50 @@ test_failed_or_missing_cargo_output() {
     done
 }
 
+# A drift between the installed tools and scripts/toolchain.env must stop the
+# producer before any compilation, with the exact command that fixes it: the
+# checks now depend on the CLI of both tools, so "some version" is not enough.
+test_toolchain_drift_fails_fast() {
+    local script bad
+    for script in build_linux.sh build_linux_variants.sh; do
+        for bad in zig cargo-zigbuild; do
+            make_fixture
+            case "$bad" in
+                zig) export SERVER_BUILD_FAKE_ZIG=0.17.0-dev.2056 ;;
+                cargo-zigbuild) export SERVER_BUILD_FAKE_CZ=0.23.4 ;;
+            esac
+            if [[ "$script" == build_linux.sh ]]; then
+                run_sut "$ROOT/rust-server/$script" --no-tests
+            else
+                run_sut "$ROOT/rust-server/$script"
+            fi
+            [[ "$STATUS" -eq 1 ]] ||
+                fail "$script with drifted $bad must fail fast, got exit $STATUS"
+            case "$bad" in
+                zig)
+                    grep -qF 'https://ziglang.org/download/0.17.0/' "$ERR" ||
+                        fail "$script: missing the zig download hint for drift"
+                    ;;
+                cargo-zigbuild)
+                    grep -qF 'cargo install cargo-zigbuild --version 0.24.0 --locked' "$ERR" ||
+                        fail "$script: missing the cargo-zigbuild fix command for drift"
+                    ;;
+            esac
+            if grep -q '"argv":\["build"' "$CALLS"; then
+                fail "$script compiled despite $bad drift"
+            fi
+            # checks must run before the toolchain section, so a drift must not
+            # reach `rustup toolchain install` (variants has no such step and
+            # would otherwise mask a missing producer-side check).
+            if [[ "$script" == build_linux.sh ]] && grep -q '"tool":"rustup"' "$CALLS"; then
+                fail "$script installed toolchains despite $bad drift (checks must run first)"
+            fi
+            [[ ! -e "$MANIFEST" ]] || fail "$script wrote provenance despite $bad drift"
+            printf '[OK] %s rejects %s drift before compiling\n' "$script" "$bad"
+        done
+    done
+}
+
 # Narrow source contract complement (not a replacement) to the parent's real
 # Gradle-graph and APK packaging gates: the APK ships the Rust client only, and
 # the server is built by rust-server/build_linux.sh outside Gradle.
@@ -384,7 +488,8 @@ PY
 
 failed=0
 for test_case in test_amd64_only_build test_incremental_cleanup_preserves_foreign_files_and_caches \
-    test_legacy_cli_and_features test_failed_or_missing_cargo_output test_gradle_client_only_contract; do
+    test_legacy_cli_and_features test_failed_or_missing_cargo_output \
+    test_toolchain_drift_fails_fast test_gradle_client_only_contract; do
     set +e
     ( trap - EXIT; set -e; "$test_case" )
     status=$?

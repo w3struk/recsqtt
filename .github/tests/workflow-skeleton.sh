@@ -1310,9 +1310,9 @@ want(
     "у 'Build server binary' должен быть working-directory: rust-server",
 )
 want(
-    re.search(r"source\s+\S*musl-zig-env\.sh", server_build_run),
-    "'Build server binary' обязан source'ить .github/scripts/musl-zig-env.sh "
-    "(без него cc-rs не находит x86_64-linux-musl-g++)",
+    not re.search(r"(?m)^\s*source\s", server_build_run),
+    "'Build server binary' не должен source'ить внешний env-хелпер: "
+    "musl C/C++ ставит сам cargo-zigbuild",
 )
 want(
     re.search(r"build_linux\.sh\s+--tests\b", server_build_run),

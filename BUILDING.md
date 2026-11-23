@@ -175,48 +175,26 @@ bash scripts/run_system_checks.sh   # требует root для TUN/systemd п�
 
 - `--tests` — `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`
   (для клиента дополнительно запрет `unwrap/expect/panic` в рантайме).
-  У сервера этот путь дополнительно требует musl-компилятора C/C++: `rust-server/.cargo/config.toml`
-  фиксирует `x86_64-unknown-linux-musl`, а `snmalloc-rs` и встроенная в `rusqlite` SQLite собирают
-  C/C++ через `cc-rs`. Без `x86_64-linux-musl-g++` (или zig-обёрток, как их делает `cargo zigbuild`)
-  `--tests` падает с `cc-rs: failed to find tool "x86_64-linux-musl-g++"`, тогда как релизная сборка
-  проходит — она идёт через `cargo zigbuild`. Обход — `--no-tests`. Если тесты сервера
-  прогнать нужно, повторите обёртки `cargo zigbuild` вручную: `cc-rs` передаёт zig
-  *Rust*-тройку, которую zig не понимает, поэтому обёртка должна и разбить флаг, и
-  переписать тройку. Готовый хелпер — `.github/scripts/musl-zig-env.sh` (его
-  source'ит CI-шаг `Build server binary`): `source .github/scripts/musl-zig-env.sh`
-  из `rust-server` создаёт те же обёртки и экспортирует `CC_*`/`CXX_*`/`AR_*`/
-  `CARGO_TARGET_*_LINKER`; `CARGO_TARGET_DIR` при этом не трогается, так что
-  результат попадёт в общий `build/csqtt-uring-linux-recsqtt-linux-amd64`.
-  Вручную то же самое выглядит так (обёртка должна и разбить `--target=`, и
-  переписать тройку):
-
-  ```bash
-  mkdir -p /tmp/zigwrap
-  for pair in zigcc:cc zigcxx:c++ zigar:ar; do
-    name="${pair%%:*}"; sub="${pair##*:}"
-    cat > "/tmp/zigwrap/$name" <<EOF
-  #!/bin/bash
-  newargs=()
-  for a in "\$@"; do
-    case "\$a" in
-      --target=*) t="\${a#--target=}"; newargs+=("-target" "\${t/unknown-/}");;
-      *) newargs+=("\$a");;
-    esac
-  done
-  exec zig $sub "\${newargs[@]}"
-  EOF
-    chmod +x "/tmp/zigwrap/$name"
-  done
-  cd rust-server
-  export CC_x86_64_unknown_linux_musl=/tmp/zigwrap/zigcc \
-         CXX_x86_64_unknown_linux_musl=/tmp/zigwrap/zigcxx \
-         AR_x86_64_unknown_linux_musl=/tmp/zigwrap/zigar \
-         CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/tmp/zigwrap/zigcc
-  cargo test --target x86_64-unknown-linux-musl   # 279 проходят, 1 пропущен
-  ```
-
-  Каждая переменная окружения должна быть голым путём к исполняемому файлу — cargo
-  отвергает `"zig cc"` с аргументами.
+  У сервера `clippy`/`test`/`build` идут через `cargo-zigbuild`. Тот сам ставит
+  `cc-rs` musl C/C++ (`snmalloc-rs`, SQLite в `rusqlite`, `aws-lc-sys`) и
+  CMake-тулчейн для своего child-процесса, поэтому `--tests` больше не требует
+  внешнего musl-компилятора и ручных обёрток. Тулчейн передаётся через
+  `RUSTUP_TOOLCHAIN`: форма `+1.97.1` в argv `cargo-zigbuild` теряет
+  zig-окружение, `cargo` уходит в обычную сборку и `cc-rs` падает на
+  `x86_64-linux-musl-gcc` (либо получается glibc-бинарь вместо musl).
+  `scripts/zig_env.sh` — единственный источник списка ambient-переменных
+  (`CC_*`, `CXX_*`, `AR_*`, `RANLIB_*`, `CARGO_TARGET_*_LINKER`,
+  `CMAKE_TOOLCHAIN_FILE*`), которые снимаются перед каждым вызовом:
+  `cargo-zigbuild` не перекрывает уже экспортированные переменные
+  (`add_env_if_missing`). Список закрытый: `CFLAGS`, `LDFLAGS`, `CPATH`,
+  `PKG_CONFIG_*`, `BINDGEN_EXTRA_CLANG_ARGS` не снимаются — это документированные
+  ручки `cargo-zigbuild` для системных заголовков и sysroot; фикстуры проверяют
+  и снятие списка, и pass-through `CFLAGS`. Тот же файл сверяет пины `zig` и
+  `cargo-zigbuild` с `scripts/toolchain.env` и печатает точную команду фикса при
+  расхождении.
+  `cargo-zigbuild test` исполняет тест-бинарь напрямую, поэтому amd64-инвариант —
+  не только про payload: для второй архитектуры понадобится runner (например,
+  `CARGO_TARGET_<TRIPLE>_RUNNER=qemu-aarch64`) или compile-only проверки без запуска.
 - `--jobs=N` у клиента — параллельные cargo-задачи на ABI; у сервера — сколько
   вариантов собирать одновременно. Серверные `--jobs=N` и `--sequential` сохранены,
   но штатный серверный вариант теперь один — amd64.
@@ -489,21 +467,24 @@ CI — три workflow: `.github/workflows/build.yml` (`workflow_call`: гейт
 Gradle сервер не собирает: APK содержит только клиент.
 
 Отдельного серверного гейта больше нет: `--tests` выполняется в том же шаге, что
-и компиляция (`fmt`/`clippy`/`test` до `cargo zigbuild`), поэтому серверные
+и компиляция (`fmt`/`clippy`/`test` до `cargo-zigbuild build`), поэтому серверные
 проверки и сборка делят **один** `CARGO_TARGET_DIR` —
 `build/csqtt-uring-linux-recsqtt-linux-amd64` (тот же каталог выбирает локальный
-`rust-server/build_linux.sh` и `rust-server/.cargo/config.toml`, так что
-`cd rust-server && cargo test` попадает туда же): release-зависимости, собранные
-`cargo clippy --release`, переиспользуются `cargo zigbuild`, а debug-тесты живут в
-том же каталоге отдельным профилем. Раньше их было три (`-clippy`, `linux-musl-tests`,
-сборочный), и зависимости компилировались заново.
+`rust-server/build_linux.sh` и `rust-server/.cargo/config.toml`): release-зависимости,
+собранные `cargo-zigbuild clippy --release`, переиспользуются финальным
+`cargo-zigbuild build`, а debug-тесты живут в том же каталоге отдельным профилем.
+Голый `cargo test` из `rust-server` в этот каталог не попадает: без
+`cargo-zigbuild` C-зависимостям не хватает musl C/C++ и сборка падает на
+`cc-rs: x86_64-linux-musl-gcc`. Раньше каталогов было три (`-clippy`,
+`linux-musl-tests`, сборочный), и зависимости компилировались заново.
 
 Шаг стоит до `Restore keystore`: серверной сборке подпись не нужна, а падать она
-должна раньше, чем тратится время на APK. `musl-zig-env.sh` даёт `cc-rs` musl
-C/C++ (`snmalloc-rs`, SQLite в `rusqlite`), без него `--tests` падает на
-`failed to find tool "x86_64-linux-musl-g++"`; `cargo-zigbuild` подставляет свои
-обёртки только для незаданных переменных, поэтому линкер посреди прогона не
-меняется.
+должна раньше, чем тратится время на APK. `clippy`, `test` и `build` идут через
+`cargo-zigbuild` и один wrapper-кеш (`~/.cache/cargo-zigbuild/<version>/`),
+поэтому переключение между `clippy --release` и финальным `build` не сбрасывает
+`cc-rs`-фингерпринты C-зависимостей (`snmalloc-rs`, SQLite в `rusqlite`,
+`aws-lc-sys`). Ambient-переменные снимает `scripts/zig_env.sh`, а провенанс
+пишется и проверяется со `--strict-toolchain`.
 
 CI кеширует тяжёлые каталоги, которых раньше не было ни в одном кеше:
 `build/rust-client-android-*` (cargo-ndk по ABI), `build/csqtt-uring-linux-recsqtt-linux-amd64`
@@ -514,9 +495,10 @@ CI кеширует тяжёлые каталоги, которых раньше
 старые артефакты. Проверка корректности не делегируется кешу: cargo
 сам инвалидирует по исходникам, а provenance/verify сверяют результат.
 
-Шаг `Gate: CI and release script fixtures` прогоняет все `.github/tests/*.sh`
-(`musl-zig-env.sh` — source-хелпер, он исключён). Это дешёвый гейт против регрессий
-в скриптах версий, релиза, подписи и провенанса: раньше они гонялись только локально.
+Шаг `Gate: CI and release script fixtures` прогоняет все `.github/tests/*.sh`,
+включая `zig-env.sh` (сверяет ambient-список и пины `zig`/`cargo-zigbuild`). Это
+дешёвый гейт против регрессий в скриптах версий, релиза, подписи и провенанса:
+раньше они гонялись только локально.
 
 Релиз запускается по тегу `v*` либо `workflow_dispatch` с именем существующего тега (workflow
 тегов не создаёт).

@@ -357,6 +357,7 @@ build_input_files() {
         rust-server/Cargo.toml \
         rust-server/Cargo.lock \
         rust-server/rust-toolchain.toml \
+        scripts/zig_env.sh \
         rust-server/ru_apps_preset.json \
         rust-server/data/domains_ru.txt \
         rust-server/data/ips_ru.txt \

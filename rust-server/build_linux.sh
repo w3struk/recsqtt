@@ -31,6 +31,14 @@ if [[ -z "${RUST_TOOLCHAIN:-}" ]]; then
   exit 1
 fi
 
+# The ambient-environment list and the pinned toolchain checks live in one
+# sourceable file, shared with build_linux_variants.sh: a stale CC_* or
+# CMAKE_TOOLCHAIN_FILE in the caller's shell would otherwise replace the zig
+# toolchain that cargo-zigbuild installs for its child process.
+# A missing or broken file aborts here: both scripts run with `set -e`.
+# shellcheck source=/dev/null
+source "$ROOT/scripts/zig_env.sh"
+
 # Один target-dir на clippy/test/release: release-зависимости, собранные
 # clippy, переиспользуются финальной сборкой, а debug-тесты живут в том же
 # каталоге отдельным профилем. Имя обязано совпадать с build_linux_variants.sh,
@@ -216,11 +224,8 @@ for tool in cargo rustup zig; do
     exit 1
   fi
 done
-if ! cargo zigbuild --help >/dev/null 2>&1; then
-  echo "Error: cargo-zigbuild not found." >&2
-  echo "  Install it with: cargo install cargo-zigbuild --locked" >&2
-  exit 1
-fi
+require_cargo_zigbuild || exit 1
+require_zig || exit 1
 
 section "Ensuring Rust $TOOLCHAIN (rustfmt, clippy) and musl targets"
 rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
@@ -229,9 +234,12 @@ echo "rustc: $(rustc "+$TOOLCHAIN" --version)"
 echo "zig:   $(zig version)"
 
 # cargo-zigbuild installs its own zig cc/ar wrappers and handles musl
-# self-contained linking. Do not override CARGO_TARGET_*_LINKER here: a manual
-# wrapper duplicates crt1.o on aarch64 and cannot map armv7 to zig's
-# "arm-linux-musleabihf" triple.
+# self-contained linking, so neither CARGO_TARGET_*_LINKER nor CC_*/CXX_*/AR_* is
+# set here: the wrappers live only inside the cargo-zigbuild process. The
+# toolchain selector travels via RUSTUP_TOOLCHAIN — the `+toolchain` argument
+# form makes cargo-zigbuild lose the zig environment and fall back to a plain
+# build. MUSL_ENV_UNSET removes ambient variables that would win over the
+# wrappers (cargo-zigbuild never overrides what is already exported).
 
 if [[ "$RUN_TESTS" == 1 ]]; then
   section "cargo fmt --all -- --check"
@@ -240,19 +248,21 @@ if [[ "$RUN_TESTS" == 1 ]]; then
     cargo "+$TOOLCHAIN" fmt --all -- --check
   )
 
-  section "cargo clippy (x86_64-unknown-linux-musl, release, -D warnings)"
+  section "cargo-zigbuild clippy (x86_64-unknown-linux-musl, release, -D warnings)"
   (
     cd "$SERVER_DIR"
     CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
-      cargo "+$TOOLCHAIN" clippy --release --target x86_64-unknown-linux-musl \
+      env "${MUSL_ENV_UNSET[@]}" RUSTUP_TOOLCHAIN="$TOOLCHAIN" \
+      cargo-zigbuild clippy --release --target x86_64-unknown-linux-musl \
       ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} --all-targets -- -D warnings
   )
 
-  section "cargo test (native Linux, x86_64-unknown-linux-musl)"
+  section "cargo-zigbuild test (native Linux, x86_64-unknown-linux-musl)"
   (
     cd "$SERVER_DIR"
     CARGO_TARGET_DIR="$SERVER_TARGET_DIR" \
-      cargo "+$TOOLCHAIN" test --target x86_64-unknown-linux-musl \
+      env "${MUSL_ENV_UNSET[@]}" RUSTUP_TOOLCHAIN="$TOOLCHAIN" \
+      cargo-zigbuild test --target x86_64-unknown-linux-musl \
       ${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} --all-targets
   )
 else
@@ -365,6 +375,7 @@ PROVENANCE_ARGS=(
   "--assets-dir=$ASSETS_DIR"
   "--manifest=$PROVENANCE_MANIFEST"
   "--features=$FEATURES_CSV"
+  "--strict-toolchain"
 )
 # This script knows it enabled the feature on purpose, so it allows exactly that;
 # every other caller (Gradle, build_apk.sh) has to opt in explicitly and therefore

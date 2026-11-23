@@ -162,17 +162,20 @@ cd rust-client && cargo test
 cd rust-client && cargo test turn_stream        # фильтр по подстроке
 cd rust-client && bash check_no_runtime_panics.sh
 
-# Rust-сервер — musl-цель из .cargo/config.toml, нужен musl-тулчейн C/C++ (см. BUILDING.md).
+# Rust-сервер — musl-цель из .cargo/config.toml. Голый `cargo test` не работает:
+# C-зависимостям нужен musl C/C++, его ставит только cargo-zigbuild.
 # cd rust-server обязателен: target-dir из конфига относительный и указывает в
 # <repo>/build/csqtt-uring-linux-recsqtt-linux-amd64; из корня конфиг не найдётся.
-cd rust-server && cargo test
-cd rust-server && cargo clippy --release --all-targets -- -D warnings
+cd rust-server && RUSTUP_TOOLCHAIN=1.97.1 cargo-zigbuild test --target x86_64-unknown-linux-musl
+cd rust-server && RUSTUP_TOOLCHAIN=1.97.1 cargo-zigbuild clippy --release \
+  --target x86_64-unknown-linux-musl --all-targets -- -D warnings
 
-# Локальная сборка сервера — только с --no-tests: без флага в не-TTY включаются
-# fmt/clippy/test, которым нужен musl C/C++ (падают на cc-rs: x86_64-linux-musl-g++).
-# Сама сборка идёт через cargo zigbuild и системного musl-g++ не требует;
-# musl-проверки — работа CI. Не перекрывайте CC/CXX на "zig cc": cc-rs такое отвергает.
-bash rust-server/build_linux.sh --no-tests
+# Локальная сборка сервера: --tests теперь полноценный, но требует точных пинов
+# zig 0.17.0 и cargo-zigbuild 0.24.0 из scripts/toolchain.env — при расхождении
+# scripts/zig_env.sh печатает команду фикса. Проверки и сборка идут через
+# cargo-zigbuild; селектор передаётся через RUSTUP_TOOLCHAIN, форма "+toolchain"
+# теряет zig-окружение и превращает сборку в обычную (cc-rs: musl-gcc).
+bash rust-server/build_linux.sh --tests
 
 # Нативная нагрузка и APK (обычно достаточно просто ./gradlew)
 ./gradlew :app:assembleDebug                    # dev-профиль клиента; сервер не собирается
