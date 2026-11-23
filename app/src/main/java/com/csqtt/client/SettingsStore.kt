@@ -79,6 +79,12 @@ class SettingsStore(context: Context) {
         private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
         private val SPLIT_TUNNEL_INVERTED_LIST_REPAIRED =
             booleanPreferencesKey("split_tunnel_inverted_list_repaired")
+
+        // Локальные списки приложений и видимость журнала больше не принадлежат профилю:
+        // маршрутизация в большинстве случаев приходит с серверного правила, а журнал —
+        // свойство приложения, а не подключения. Флаг закрывает одноразовый перенос
+        // значений активного профиля в глобальные ключи (см. migrateGlobalAppSettings).
+        private val APP_SETTINGS_GLOBAL_MIGRATED = booleanPreferencesKey("app_settings_global_migrated")
         private val EXTRA_WORKERS = booleanPreferencesKey("extra_workers")
         private val AUTO_JS_RISK_ACKNOWLEDGED = booleanPreferencesKey("auto_js_risk_acknowledged")
         private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
@@ -155,10 +161,25 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, EXCLUDED_APPS, WHITELIST_APPS, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS, CUSTOM_TURN_IPS, SELECTED_TURN_SUBNET -> stringPreferencesKey(newName) as Preferences.Key<T>
+                VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS, CUSTOM_TURN_IPS, SELECTED_TURN_SUBNET -> stringPreferencesKey(newName) as Preferences.Key<T>
                 WORKERS_PER_HASH, LISTEN_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
-                NO_DNS, IS_WHITELIST, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED -> booleanPreferencesKey(newName) as Preferences.Key<T>
+                NO_DNS, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 CONNECTION_GENERATION -> longPreferencesKey(newName) as Preferences.Key<T>
+                else -> stringPreferencesKey(newName) as Preferences.Key<T>
+            }
+        }
+
+        /**
+         * Суффиксный ключ старого профильного хранения для настроек, которые уже
+         * стали глобальными. Нужен только одноразовому переносу и легаси-миграциям:
+         * в обычном чтении и записи эти ключи идут без суффикса.
+         */
+        private fun <T> legacyProfileKey(baseKey: Preferences.Key<T>, profile: Int): Preferences.Key<T> {
+            if (profile == 0) return baseKey
+            val newName = "${baseKey.name}_$profile"
+            @Suppress("UNCHECKED_CAST")
+            return when (baseKey) {
+                IS_WHITELIST, PARTICIPANT_SHOW_LOGS -> booleanPreferencesKey(newName) as Preferences.Key<T>
                 else -> stringPreferencesKey(newName) as Preferences.Key<T>
             }
         }
@@ -183,8 +204,7 @@ class SettingsStore(context: Context) {
         prefs[getProfileKey(CSQTT_LINK, profile)] ?: ""
     }
     val participantShowLogs: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(PARTICIPANT_SHOW_LOGS, profile)] ?: false
+        prefs[PARTICIPANT_SHOW_LOGS] ?: false
     }
 
     val vkHashes: Flow<String> = dataStore.data.map { prefs ->
@@ -223,12 +243,10 @@ class SettingsStore(context: Context) {
         )
     }.onIo()
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(EXCLUDED_APPS, profile)] ?: ""
+        prefs[EXCLUDED_APPS] ?: legacyProfileValue(prefs, EXCLUDED_APPS) ?: ""
     }
     val whitelistApps: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(WHITELIST_APPS, profile)] ?: ""
+        prefs[WHITELIST_APPS] ?: legacyProfileValue(prefs, WHITELIST_APPS) ?: ""
     }
 
     val vkAuthMode: Flow<String> = dataStore.data.map { prefs ->
@@ -316,8 +334,22 @@ class SettingsStore(context: Context) {
     }
 
     val isWhitelist: Flow<Boolean> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(IS_WHITELIST, profile)] ?: false
+        prefs[IS_WHITELIST] ?: legacyProfileValue(prefs, IS_WHITELIST) ?: false
+    }
+
+    /**
+     * Значение активного профиля из старого суффиксного ключа — только как запасной
+     * вариант, пока [migrateGlobalAppSettings] не перенёс его в глобальный. Нужен из-за
+     * гонки с автостартом сервиса: `TunnelService` может подняться раньше, чем завершится
+     * асинхронная миграция, и иначе прочитал бы пустой список (а белый режим — как чёрный).
+     * Записанная пустая строка или `false` в глобальном ключе — осознанное значение,
+     * поэтому запасной путь включается только при его отсутствии.
+     */
+    private fun <T> legacyProfileValue(prefs: Preferences, baseKey: Preferences.Key<T>): T? {
+        val profile = (prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX)
+            .coerceIn(CsqttConstants.Profiles.MIN_INDEX, CsqttConstants.Profiles.MAX_INDEX)
+        if (profile == CsqttConstants.Profiles.MIN_INDEX) return null
+        return prefs[legacyProfileKey(baseKey, profile)]
     }
 
     val profileNames: Flow<Map<Int, String>> = dataStore.data.map { prefs ->
@@ -391,6 +423,7 @@ class SettingsStore(context: Context) {
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                 migrateLegacyWhitelistMode()
                 repairInvertedLocalBlacklist()
+                migrateGlobalAppSettings()
             }
         }
         if (uiCacheStarted.compareAndSet(false, true)) {
@@ -637,8 +670,7 @@ class SettingsStore(context: Context) {
 
     suspend fun saveParticipantShowLogs(show: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(PARTICIPANT_SHOW_LOGS, profile)] = show
+            prefs[PARTICIPANT_SHOW_LOGS] = show
         }
     }
 
@@ -660,26 +692,23 @@ class SettingsStore(context: Context) {
 
     suspend fun saveExcludedApps(packages: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(EXCLUDED_APPS, profile)] = packages
+            prefs[EXCLUDED_APPS] = packages
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
 
     suspend fun saveWhitelistApps(packages: String) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(WHITELIST_APPS, profile)] = packages
+            prefs[WHITELIST_APPS] = packages
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
 
     suspend fun saveAppRoutingLists(blacklist: String, whitelist: String, isWhitelist: Boolean? = null) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(EXCLUDED_APPS, profile)] = blacklist
-            prefs[getProfileKey(WHITELIST_APPS, profile)] = whitelist
-            if (isWhitelist != null) prefs[getProfileKey(IS_WHITELIST, profile)] = isWhitelist
+            prefs[EXCLUDED_APPS] = blacklist
+            prefs[WHITELIST_APPS] = whitelist
+            if (isWhitelist != null) prefs[IS_WHITELIST] = isWhitelist
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
@@ -839,21 +868,19 @@ class SettingsStore(context: Context) {
 
     suspend fun saveIsWhitelist(enabled: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
-            prefs[getProfileKey(IS_WHITELIST, profile)] = enabled
+            prefs[IS_WHITELIST] = enabled
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
 
     suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) {
         dataStore.edit { prefs ->
-            val profile = prefs[ACTIVE_PROFILE] ?: 0
             if (isWhitelist) {
-                prefs[getProfileKey(WHITELIST_APPS, profile)] = packages
+                prefs[WHITELIST_APPS] = packages
             } else {
-                prefs[getProfileKey(EXCLUDED_APPS, profile)] = packages
+                prefs[EXCLUDED_APPS] = packages
             }
-            prefs[getProfileKey(IS_WHITELIST, profile)] = isWhitelist
+            prefs[IS_WHITELIST] = isWhitelist
             prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
@@ -874,9 +901,9 @@ class SettingsStore(context: Context) {
             if (prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] == true) return@edit
 
             for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
-                val whitelistKey = getProfileKey(IS_WHITELIST, profile)
-                val appsKey = getProfileKey(EXCLUDED_APPS, profile)
-                val whitelistAppsKey = getProfileKey(WHITELIST_APPS, profile)
+                val whitelistKey = legacyProfileKey(IS_WHITELIST, profile)
+                val appsKey = legacyProfileKey(EXCLUDED_APPS, profile)
+                val whitelistAppsKey = legacyProfileKey(WHITELIST_APPS, profile)
                 if (prefs[whitelistKey] == true && prefs[whitelistAppsKey] == null) {
                     val migrated = LegacyAppListsMigration.fromLegacyWhiteList(prefs[appsKey])
                     prefs[appsKey] = migrated.black
@@ -918,8 +945,8 @@ class SettingsStore(context: Context) {
             if (prefs[SPLIT_TUNNEL_INVERTED_LIST_REPAIRED] == true) return@edit
 
             for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
-                val whitelistKey = getProfileKey(IS_WHITELIST, profile)
-                val appsKey = getProfileKey(EXCLUDED_APPS, profile)
+                val whitelistKey = legacyProfileKey(IS_WHITELIST, profile)
+                val appsKey = legacyProfileKey(EXCLUDED_APPS, profile)
                 val repaired = LegacyAppListsMigration.repairedBlacklist(
                     isWhitelist = prefs[whitelistKey] == true,
                     black = prefs[appsKey],
@@ -928,6 +955,40 @@ class SettingsStore(context: Context) {
             }
 
             prefs[SPLIT_TUNNEL_INVERTED_LIST_REPAIRED] = true
+        }
+    }
+
+    /**
+     * Одноразовый перенос настроек, которые перестали быть профильными.
+     *
+     * Локальные списки приложений и видимость журнала больше не зависят от профиля
+     * конфигурации: маршрутизация в большинстве случаев приходит с серверного правила,
+     * а журнал — свойство приложения, а не подключения. Переносим значения **активного**
+     * профиля: именно их пользователь видит сейчас, и именно они должны остаться после
+     * обновления. У профиля 0 базовые ключи уже глобальные — переносить нечего.
+     *
+     * Значения остальных профилей не удаляем: они просто перестают читаться, поэтому
+     * откат на прежнюю версию APK вернёт прежнее поведение. Гонку с ранним чтением
+     * закрывает [legacyProfileValue] — он читает суффиксный ключ, пока глобальный пуст.
+     */
+    suspend fun migrateGlobalAppSettings() {
+        if (dataStore.data.first()[APP_SETTINGS_GLOBAL_MIGRATED] == true) return
+
+        dataStore.edit { prefs ->
+            if (prefs[APP_SETTINGS_GLOBAL_MIGRATED] == true) return@edit
+
+            val profile = (prefs[ACTIVE_PROFILE] ?: CsqttConstants.Profiles.MIN_INDEX)
+                .coerceIn(CsqttConstants.Profiles.MIN_INDEX, CsqttConstants.Profiles.MAX_INDEX)
+            if (profile != CsqttConstants.Profiles.MIN_INDEX) {
+                prefs[legacyProfileKey(EXCLUDED_APPS, profile)]?.let { prefs[EXCLUDED_APPS] = it }
+                prefs[legacyProfileKey(WHITELIST_APPS, profile)]?.let { prefs[WHITELIST_APPS] = it }
+                prefs[legacyProfileKey(IS_WHITELIST, profile)]?.let { prefs[IS_WHITELIST] = it }
+                prefs[legacyProfileKey(PARTICIPANT_SHOW_LOGS, profile)]?.let {
+                    prefs[PARTICIPANT_SHOW_LOGS] = it
+                }
+            }
+
+            prefs[APP_SETTINGS_GLOBAL_MIGRATED] = true
         }
     }
 
