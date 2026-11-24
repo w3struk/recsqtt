@@ -37,7 +37,8 @@ sudo bash -c "$(wget -qO- https://github.com/w3struk/recsqtt/releases/latest/dow
 
 **Клиент** — Android 8.0+, APK из [Releases](https://github.com/w3struk/recsqtt/releases/latest):
 установите, откройте панель → **«Клиенты»** → **«Создать доступ»**, скопируйте
-ссылку `csqtt://` или QR и вставьте её в приложении на вкладке **«Туннель»**.
+ссылку `csqtt://` или QR и вставьте её в приложении: **«Подключение»** →
+карточка профиля → `Tune`, либо просто откройте ссылку на телефоне.
 
 На сервере дальше работает `csqttctl`:
 

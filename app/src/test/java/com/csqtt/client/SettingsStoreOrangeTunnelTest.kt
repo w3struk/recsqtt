@@ -21,13 +21,18 @@ class SettingsStoreOrangeTunnelTest {
         File("src/main/java/com/csqtt/client/SettingsStore.kt"),
     ).first(File::isFile).readLines()
 
+    private val profileSource: List<String> = listOf(
+        File("app/src/main/java/com/csqtt/client/ProfileSettingsStore.kt"),
+        File("src/main/java/com/csqtt/client/ProfileSettingsStore.kt"),
+    ).first(File::isFile).readLines()
+
     /** Тело объявления по его первой строке: до закрывающей `}` на том же отступе. */
     private fun bodyOf(declaration: (String) -> Boolean, what: String): String {
-        val start = source.indexOfFirst(declaration)
-        assertTrue("в SettingsStore нет $what", start >= 0)
-        val indent = source[start].takeWhile { it == ' ' }
-        val end = (start until source.size).first { source[it] == indent + "}" }
-        return source.subList(start, end + 1).joinToString("\n")
+        val start = profileSource.indexOfFirst(declaration)
+        assertTrue("в ProfileSettingsStore нет $what", start >= 0)
+        val indent = profileSource[start].takeWhile { it == ' ' }
+        val end = (start until profileSource.size).first { profileSource[it] == indent + "}" }
+        return profileSource.subList(start, end + 1).joinToString("\n")
     }
 
     private val getProfileKeyBody: String
@@ -45,7 +50,7 @@ class SettingsStoreOrangeTunnelTest {
         )
         assertFalse(
             "ORANGE_TUNNEL_ENABLED проходит через getProfileKey и получит суффикс профиля",
-            Regex("""getProfileKey\(\s*ORANGE_TUNNEL_ENABLED""").containsMatchIn(source.joinToString("\n")),
+            Regex("""getProfileKey\(\s*ORANGE_TUNNEL_ENABLED""").containsMatchIn((source + profileSource).joinToString("\n")),
         )
         assertTrue(
             "нет flow'а orangeTunnelEnabled с пустой строкой по умолчанию",

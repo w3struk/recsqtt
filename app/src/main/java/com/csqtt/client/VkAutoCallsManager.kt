@@ -151,7 +151,7 @@ object VkAutoCallsManager {
                         )
                         if (VkApi.isTokenInvalid(result)) {
                             if (clearStoredTokenOnInvalid) {
-                                runCatching { SettingsStore(context).clearVkAccessToken() }
+                                runCatching { SettingsStore(context).profile.clearVkAccessToken(profile) }
                             }
                             log(
                                 "vk_token_invalidated",

@@ -16,10 +16,10 @@ class LinkSaveNoticeTest {
     private fun readSource(vararg candidates: String): String =
         candidates.map(::File).first(File::isFile).readText()
 
-    private val floatingToolbarSource: String by lazy {
+    private val profileConnectionFieldsSource: String by lazy {
         readSource(
-            "app/src/main/java/com/csqtt/client/ui/FloatingToolbar.kt",
-            "src/main/java/com/csqtt/client/ui/FloatingToolbar.kt",
+            "app/src/main/java/com/csqtt/client/ui/ProfileConnectionFields.kt",
+            "src/main/java/com/csqtt/client/ui/ProfileConnectionFields.kt",
         )
     }
 
@@ -59,14 +59,14 @@ class LinkSaveNoticeTest {
     // --- Структурные проверки экранов ------------------------------------
 
     @Test
-    fun `QR branch no longer shows its own unconditional participant toast`() {
+    fun `QR branch stays inside the profile editor and does not claim a role change`() {
         assertFalse(
-            "FloatingToolbar всё ещё печатает безусловный тост о включении режима участника",
-            floatingToolbarSource.contains("Ссылка подключена из QR-кода"),
+            "редактор всё ещё печатает безусловный тост о включении режима участника",
+            profileConnectionFieldsSource.contains("Ссылка подключена из QR-кода"),
         )
         assertTrue(
-            "FloatingToolbar не использует LinkSaveNotice",
-            floatingToolbarSource.contains("LinkSaveNotice"),
+            "редактор не открывает QR-сканер",
+            profileConnectionFieldsSource.contains("QrScannerDialog"),
         )
     }
 
@@ -80,17 +80,21 @@ class LinkSaveNoticeTest {
             "MainActivity не использует LinkSaveNotice",
             mainActivitySource.contains("LinkSaveNotice"),
         )
+        assertTrue(
+            "MainActivity не поглощает intent после импорта",
+            mainActivitySource.contains("setIntent(Intent())"),
+        )
+        assertTrue(
+            "MainActivity не использует ProfileImportPolicy",
+            mainActivitySource.contains("ProfileImportPolicy"),
+        )
     }
 
     @Test
-    fun `deep-link confirmation dialog labels the port as a port`() {
+    fun `the old replace-configuration dialog is gone`() {
         assertFalse(
-            "в диалоге порт по-прежнему подписан как peer",
-            mainActivitySource.contains("Peer: \${link.port}"),
-        )
-        assertTrue(
-            "в диалоге нет подписи порта",
-            mainActivitySource.contains("Порт: \${link.port}"),
+            "старый диалог замены конфигурации остался",
+            mainActivitySource.contains("Заменить текущую конфигурацию"),
         )
     }
 }

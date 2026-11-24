@@ -24,7 +24,7 @@ class MainNavigationSwipeTest {
 
     @Test
     fun participantNavigationHidesLogsUnlessEnabled() {
-        assertEquals(listOf(0, 1, 3), resolveActiveNavIds(participantShowLogs = false))
-        assertEquals(listOf(0, 1, 2, 3), resolveActiveNavIds(participantShowLogs = true))
+        assertEquals(listOf(0, 3), resolveActiveNavIds(participantShowLogs = false))
+        assertEquals(listOf(0, 2, 3), resolveActiveNavIds(participantShowLogs = true))
     }
 }

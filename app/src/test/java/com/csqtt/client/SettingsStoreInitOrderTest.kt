@@ -36,8 +36,8 @@ class SettingsStoreInitOrderTest {
             .map { it.groupValues[1] }
             .toList()
         // Порог — страховка от вырожденного совпадения regex, а не учёт настроек:
-        // сейчас коллекторов 11 (12 было до удаления `srtp_mode`).
-        assertTrue("блок init больше не поднимает сборщики кэша", collected.size >= 9)
+        // здесь остались только глобальные кэши; профильные живут в ProfileSettingsStoreInitOrderTest.
+        assertTrue("блок init больше не поднимает сборщики кэша", collected.size >= 5)
 
         for (name in collected) {
             val at = properties[name]

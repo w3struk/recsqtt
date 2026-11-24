@@ -7,7 +7,6 @@
     <string name="widget_disconnected">Отключено</string>
     <string name="widget_toggle_vpn">Переключить VPN</string>
     <string name="nav_connection">Подключение</string>
-    <string name="nav_tunnel">Туннель</string>
     <string name="nav_settings">Настройки</string>
     <string name="nav_logs">Логи</string>
 

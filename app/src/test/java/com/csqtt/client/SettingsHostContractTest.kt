@@ -43,11 +43,10 @@ class SettingsHostContractTest {
             "Основные параметры",
             "CompactDropdownSetting",
             "Показывать логи",
-            "Выбор TURN-подсетей",
         ).forEach { token ->
             assertTrue("GeneralSettingsContent.kt must contain `$token`", content.contains(token))
         }
-        assertAbsent("GeneralSettingsContent.kt", content, "CsqttActionsCard")
+        assertAbsent("GeneralSettingsContent.kt", content, "CsqttActionsCard", "Выбор TURN-подсетей", "Отпечаток")
     }
 
     @Test
@@ -82,10 +81,10 @@ class SettingsHostContractTest {
 
     @Test
     fun `turn subnets button matches the app list button styling`() {
-        val content = readModuleSource("src/main/java/com/csqtt/client/ui/GeneralSettingsContent.kt")
+        val content = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileConnectionFields.kt")
         listOf(
-            "Icons.Outlined.AltRoute",
-            "material.icons.outlined.AltRoute",
+            "Icons.AutoMirrored.Outlined.AltRoute",
+            "material.icons.automirrored.outlined.AltRoute",
             "MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)",
             "Modifier.size(18.dp)",
             "Spacer(Modifier.width(8.dp))",
@@ -96,14 +95,16 @@ class SettingsHostContractTest {
     }
 
     @Test
-    fun `profile dialog uses a labelled close and a neutral clear action`() {
-        val tab = readModuleSource("src/main/java/com/csqtt/client/ui/GeneralSettingsTab.kt")
-        assertTrue(
-            "крестик диалога не занимает минимальную touch-цель",
-            tab.contains("Modifier.size(CsqttSizes.MinimumTouchTarget)"),
-        )
-        assertTrue("крестик диалога без подписи «Закрыть»", tab.contains("contentDescription = \"Закрыть\""))
-        assertAbsent("GeneralSettingsTab.kt", tab, "Icons.Default.Delete", "colorScheme.error")
+    fun `profile management lives on the connection header and sheet`() {
+        val header = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileHeaderCard.kt")
+        assertTrue("шапка профиля не использует Tune", header.contains("Icons.Outlined.Tune"))
+        assertTrue("шапка профиля не разносит элементы по краям", header.contains("Arrangement.SpaceBetween"))
+        assertAbsent("ProfileHeaderCard.kt", header, "Edit", "Create")
+
+        val sheet = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileListSheet.kt")
+        assertTrue("список профилей без кнопки добавления", sheet.contains("+ Добавить профиль"))
+        assertTrue("список профилей без удаления", sheet.contains("Icons.Filled.Delete"))
+        assertAbsent("ProfileListSheet.kt", sheet, "Icons.Filled.Edit", "Icons.Outlined.Edit")
     }
 
     @Test
@@ -117,45 +118,23 @@ class SettingsHostContractTest {
     }
 
     @Test
-    fun `header toolbar is reduced to the qr action`() {
-        val toolbar = readModuleSource("src/main/java/com/csqtt/client/ui/FloatingToolbar.kt")
-        assertAbsent(
-            "FloatingToolbar.kt",
-            toolbar,
-            "ic_settings_gear",
-            "quick_settings",
-            "CompactDropdownSetting",
-            "CsqttActionsCard",
-            "editingProfileIndex",
-            "WifiAutoPauseInfoDialog",
-            "TurnSubnetsDialog",
-            "isDarkTheme",
-            "settingsIconTint",
-            "luminance()",
+    fun `the header has no QR action and QR lives in the editor`() {
+        assertFalse(
+            "FloatingToolbar.kt всё ещё существует",
+            moduleFileExists("src/main/java/com/csqtt/client/ui/FloatingToolbar.kt"),
         )
-        listOf("QrScannerDialog", "LinkSaveNotice").forEach { token ->
-            assertTrue("FloatingToolbar.kt must still contain `$token`", toolbar.contains(token))
-        }
-        assertTrue(
-            "QR-кнопка не занимает минимальную touch-цель",
-            toolbar.contains(".size(CsqttSizes.MinimumTouchTarget)"),
-        )
-        assertTrue(
-            "иконка QR не использует нейтральный тинт темы",
-            toolbar.contains("tint = MaterialTheme.colorScheme.onSurface"),
-        )
+        val activity = readModuleSource("src/main/java/com/csqtt/client/MainActivity.kt")
+        assertAbsent("MainActivity.kt", activity, "FloatingToolbar", "QrScannerDialog")
+        val fields = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileConnectionFields.kt")
+        assertTrue("QR не перенесён в редактор", fields.contains("QrScannerDialog"))
+        assertTrue("в редакторе нет вставки из буфера", fields.contains("ContentPaste"))
     }
 
     @Test
-    fun `settings dialogs moved to the settings tab`() {
+    fun `global settings keep only global dialogs`() {
         val tab = readModuleSource("src/main/java/com/csqtt/client/ui/GeneralSettingsTab.kt")
-        listOf(
-            "WifiAutoPauseInfoDialog",
-            "TurnSubnetsDialog",
-            "saveProfileName",
-        ).forEach { token ->
-            assertTrue("GeneralSettingsTab.kt must contain `$token`", tab.contains(token))
-        }
+        assertTrue("GeneralSettingsTab.kt must contain WifiAutoPauseInfoDialog", tab.contains("WifiAutoPauseInfoDialog"))
+        assertAbsent("GeneralSettingsTab.kt", tab, "TurnSubnetsDialog", "saveProfileName", "editingProfileIndex")
     }
 
     @Test

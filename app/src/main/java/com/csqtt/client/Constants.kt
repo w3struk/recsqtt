@@ -14,13 +14,14 @@ object CsqttConstants {
         const val ACTION_RECOVER_VK_CALL = "com.csqtt.client.RECOVER_VK_CALL"
         /** Единственный пользовательский путь завершения звонков VK: остановка туннеля их не трогает. */
         const val ACTION_CLOSE_VK_CALLS = "com.csqtt.client.CLOSE_VK_CALLS"
+        /**
+         * Явный запрос переподключения к активному профилю: сохранение уже
+         * активного профиля не меняет `active_profile`, поэтому наблюдатель
+         * смены профиля не сработает.
+         */
+        const val ACTION_RECONNECT_ACTIVE_PROFILE = "com.csqtt.client.RECONNECT_ACTIVE_PROFILE"
         const val EXTRA_UNAVAILABLE_VK_HASH = "unavailable_vk_hash"
         const val EXTRA_UNAVAILABLE_VK_CODE = "unavailable_vk_code"
-    }
-
-    object Profiles {
-        const val MIN_INDEX = 0
-        const val MAX_INDEX = 3
     }
 
     object Network {

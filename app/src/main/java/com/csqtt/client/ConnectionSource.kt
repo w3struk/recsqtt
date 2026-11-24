@@ -17,7 +17,7 @@ data class ConnectionSource(
  * VK-хеши, которые используются, если ссылка их не несёт.
  *
  * VK-кредов здесь нет: токен приходит из ссылки один раз при импорте и дальше живёт
- * только в `SettingsStore`, поэтому стартовый путь не может «включить» авто-режим
+ * только в `ProfileSettingsStore`, поэтому стартовый путь не может «включить» авто-режим
  * ссылкой. Функция чистая, поэтому её можно проверить на JVM.
  */
 internal fun resolveConnectionSourceFrom(
@@ -49,7 +49,20 @@ internal fun resolveConnectionSourceFrom(
 
 suspend fun resolveConnectionSource(store: SettingsStore): ConnectionSource? =
     resolveConnectionSourceFrom(
-        link = store.csqttLink.first(),
-        hashes = store.vkHashes.first(),
-        invalidHashes = VkHashValidationCodec.decode(store.vkHashCheckResults.first()),
+        link = store.profile.csqttLink.first(),
+        hashes = store.profile.vkHashes.first(),
+        invalidHashes = VkHashValidationCodec.decode(store.profile.vkHashCheckResults.first()),
     )
+
+/**
+ * Источник подключения **явного** профиля сессии: сервис передаёт ID, который
+ * прочитал один раз, и не разрешает активный профиль повторно.
+ */
+suspend fun resolveConnectionSource(store: SettingsStore, profile: Int): ConnectionSource? {
+    val snapshot = store.profile.connectionSnapshot(profile) ?: return null
+    return resolveConnectionSourceFrom(
+        link = snapshot.link,
+        hashes = snapshot.vkHashes,
+        invalidHashes = VkHashValidationCodec.decode(snapshot.vkHashCheckResults),
+    )
+}

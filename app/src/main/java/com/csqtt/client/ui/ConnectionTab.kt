@@ -10,18 +10,17 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CallEnd
 import androidx.compose.material3.Button
@@ -61,6 +60,8 @@ import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.BuildConfig
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.R
+import com.csqtt.client.ProfileSettingsStore
+import com.csqtt.client.ProfileSummary
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
@@ -83,6 +84,10 @@ import java.util.Locale
 internal fun ConnectionTab(
     settingsStore: SettingsStore,
     tunnelAuthSettings: TunnelAuthSnapshot,
+    activeProfile: Int,
+    profiles: List<ProfileSummary>,
+    onOpenProfiles: () -> Unit,
+    onOpenProfileEditor: () -> Unit,
     onInvalidConfiguration: () -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current.applicationContext
@@ -94,19 +99,19 @@ internal fun ConnectionTab(
     val cooldownActive by TunnelManager.cooldownActive.collectAsStateWithLifecycle()
 
     val csqttLink = tunnelAuthSettings.csqttLink
-    val vkHashes by settingsStore.vkHashes.collectAsStateWithLifecycle(initialValue = "")
-    val vkHashCheckResultsJson by settingsStore.vkHashCheckResults.collectAsStateWithLifecycle(initialValue = "{}")
-    val workersPerHash by settingsStore.workersPerHash.collectAsStateWithLifecycle(initialValue = 18)
-    val sni by settingsStore.sni.collectAsStateWithLifecycle(initialValue = "")
-    val turnTransport by settingsStore.turnTransport.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT)
-    val customTurnIps by settingsStore.customTurnIps.collectAsStateWithLifecycle(initialValue = "")
-    val vkAuthMode by settingsStore.vkAuthMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.VkAuth.MODE_CALLS)
-    val captchaMode by settingsStore.captchaMode.collectAsStateWithLifecycle(initialValue = "auto")
-    val captchaSolveMethod by settingsStore.captchaSolveMethod.collectAsStateWithLifecycle(initialValue = "auto")
-    val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT)
-    val activeClientIds by settingsStore.activeClientIds.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS)
-    val savedHashMode by settingsStore.vkHashMode.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedVkHashMode)
-    val savedVkAccessToken by settingsStore.vkAccessToken.collectAsStateWithLifecycle(initialValue = SettingsStore.cachedVkAccessToken)
+    val vkHashes by settingsStore.profile.vkHashes.collectAsStateWithLifecycle(initialValue = "")
+    val vkHashCheckResultsJson by settingsStore.profile.vkHashCheckResults.collectAsStateWithLifecycle(initialValue = "{}")
+    val workersPerHash by settingsStore.profile.workersPerHash.collectAsStateWithLifecycle(initialValue = 18)
+    val sni by settingsStore.profile.sni.collectAsStateWithLifecycle(initialValue = "")
+    val turnTransport by settingsStore.profile.turnTransport.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_TURN_TRANSPORT)
+    val customTurnIps by settingsStore.profile.customTurnIps.collectAsStateWithLifecycle(initialValue = "")
+    val vkAuthMode by settingsStore.profile.vkAuthMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.VkAuth.MODE_CALLS)
+    val captchaMode by settingsStore.profile.captchaMode.collectAsStateWithLifecycle(initialValue = "auto")
+    val captchaSolveMethod by settingsStore.profile.captchaSolveMethod.collectAsStateWithLifecycle(initialValue = "auto")
+    val activeFingerprint by settingsStore.profile.selectedFingerprint.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT)
+    val activeClientIds by settingsStore.profile.activeClientIds.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS)
+    val savedHashMode by settingsStore.profile.vkHashMode.collectAsStateWithLifecycle(initialValue = ProfileSettingsStore.cachedVkHashMode)
+    val savedVkAccessToken by settingsStore.profile.vkAccessToken.collectAsStateWithLifecycle(initialValue = ProfileSettingsStore.cachedVkAccessToken)
 
     var pendingStartAfterVpnPermission by remember { mutableStateOf(false) }
     var isClosingVkCalls by remember { mutableStateOf(false) }
@@ -263,13 +268,14 @@ internal fun ConnectionTab(
     }
 
     CsqttScreen {
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(bottom = 16.dp)
-                .offset(y = 10.dp),
-            contentAlignment = Alignment.Center,
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             TunnelConnectionPanel(
                 tunnelRunning = tunnelRunning,
@@ -283,6 +289,12 @@ internal fun ConnectionTab(
                 showCloseVkCalls = showCloseVkCalls,
                 isClosingVkCalls = isClosingVkCalls,
                 onRequestCloseVkCalls = { showCloseVkCallsConfirm = true },
+            )
+
+            ProfileHeaderCard(
+                activeName = profiles.firstOrNull { it.id == activeProfile }?.name ?: "Профиль $activeProfile",
+                onOpenProfiles = onOpenProfiles,
+                onOpenSettings = onOpenProfileEditor,
             )
         }
     }

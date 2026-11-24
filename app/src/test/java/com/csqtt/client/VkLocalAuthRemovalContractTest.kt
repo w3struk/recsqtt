@@ -53,10 +53,10 @@ class VkLocalAuthRemovalContractTest {
     }
 
     @Test
-    fun `settings tab has no login or revoke plumbing`() {
+    fun `profile editor has no login or revoke plumbing`() {
         assertAbsent(
-            "SettingsTab.kt",
-            readModuleSource("src/main/java/com/csqtt/client/ui/SettingsTab.kt"),
+            "ProfileConnectionFields.kt",
+            readModuleSource("src/main/java/com/csqtt/client/ui/ProfileConnectionFields.kt"),
             "onVkAuth" + "Requested",
             "VkToken" + "RevokeDialog",
             "onLogin",

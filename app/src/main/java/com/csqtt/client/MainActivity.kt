@@ -28,17 +28,16 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Terminal
-import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -66,15 +65,13 @@ import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
 import com.csqtt.client.ui.AppUpdateDialog
 import com.csqtt.client.ui.ConnectionTab
-import com.csqtt.client.ui.FloatingToolbar
 import com.csqtt.client.ui.GeneralSettingsTab
 import com.csqtt.client.ui.LogsTab
-import com.csqtt.client.ui.SettingsTab
+import com.csqtt.client.ui.ProfileEditorScreen
+import com.csqtt.client.ui.ProfileListSheet
 import com.csqtt.client.CsqttConstants
-import com.csqtt.client.ui.components.LocalCsqttHeaderActions
 import com.csqtt.client.ui.design.CsqttMotion
 import com.csqtt.client.ui.design.CsqttShapes
-import com.csqtt.client.ui.utils.parseCsqttLink
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
@@ -85,6 +82,7 @@ class MainActivity : ComponentActivity() {
     private val appSettingsStore by lazy { SettingsStore(applicationContext) }
     private var renderUi by mutableStateOf(false)
     private var batteryPromptInFlight = false
+    private var pendingExternalImport by mutableStateOf<ProfileImportPrefill?>(null)
 
     private val batteryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         batteryPromptInFlight = false
@@ -122,10 +120,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(if (discardStaleUiState) null else savedInstanceState)
 
         lifecycleScope.launch {
-            appSettingsStore.migrateLinkCredentialsIfNeeded()
+            appSettingsStore.profile.migrateLinkCredentialsIfNeeded()
         }
 
-        importCsqttLink(intent)
+        // Восстановление процесса не должно повторно импортировать тот же ACTION_VIEW:
+        // setIntent обновляет только локальный Intent, а система пришлёт исходный.
+        if (savedInstanceState == null) importCsqttLink(intent)
 
         TunnelManager.initObservers(this)
 
@@ -137,7 +137,6 @@ class MainActivity : ComponentActivity() {
             val uiStateHolder = rememberSaveableStateHolder()
             val settingsStore = remember { appSettingsStore }
             val themeMode by settingsStore.themeMode.collectAsStateWithLifecycle(initialValue = CsqttConstants.Theme.MODE_SYSTEM)
-            val activeFingerprint by settingsStore.selectedFingerprint.collectAsStateWithLifecycle(initialValue = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT)
             val scope = rememberCoroutineScope()
 
             val baseDensity = LocalDensity.current
@@ -164,10 +163,8 @@ class MainActivity : ComponentActivity() {
                                             settingsStore.saveThemeMode(mode)
                                         }
                                     },
-                                    activeFingerprint = activeFingerprint,
-                                    onFingerprintChange = { fp ->
-                                        scope.launch { settingsStore.saveFingerprint(fp) }
-                                    },
+                                    pendingExternalImport = pendingExternalImport,
+                                    onExternalImportHandled = { pendingExternalImport = null },
                                 )
                             }
                         }
@@ -186,40 +183,53 @@ class MainActivity : ComponentActivity() {
     private fun importCsqttLink(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val raw = intent.dataString ?: return
-        val link = parseCsqttLink(raw)
+        // Обработанный intent поглощаем сразу: повторное создание Activity не
+        // должно запускать импорт заново или открывать редактор.
+        setIntent(Intent())
         val decision = VkLinkImportPolicy.decide(raw)
-        if (link == null || decision == null) {
+        if (decision == null) {
             showRaisedToast("Неверная ссылка reCSQTT", Toast.LENGTH_SHORT)
             return
         }
         lifecycleScope.launch {
-            val storedTokenExists = try {
-                appSettingsStore.vkAccessToken.first().isNotBlank()
+            val profiles = try {
+                appSettingsStore.profile.profiles.first()
             } catch (_: IOException) {
-                false
+                emptyList()
             }
-            val wipeWarning = if (decision.wipesStoredCredentials && storedTokenExists) {
-                "\n\nв ссылке нет токена — сохранённый доступ будет удалён"
-            } else {
-                ""
-            }
-            android.app.AlertDialog.Builder(this@MainActivity)
-                .setTitle("Импорт конфигурации reCSQTT")
-                .setMessage("Хост: ${link.host}\nПорт: ${link.port}\n\nЗаменить текущую конфигурацию?$wipeWarning")
-                .setPositiveButton("Импортировать") { _, _ ->
-                    lifecycleScope.launch {
-                        // Ссылка — единственный способ задать подключение; роль всегда участник,
-                        // поэтому сообщение говорит только о факте записи.
-                        val outcome = try {
-                            LinkSaveNotice.outcomeForParticipantLink(saved = appSettingsStore.importCsqttLink(raw))
-                        } catch (_: IOException) {
-                            LinkSaveNotice.outcomeForParticipantLink(saved = false)
+            when (ProfileImportPolicy.route(profiles)) {
+                ExternalImportRoute.AutoSaveStartProfile -> {
+                    val saved: Boolean? = try {
+                        appSettingsStore.profile.importExternalLinkIntoStartProfile(raw)
+                    } catch (_: IOException) {
+                        null
+                    }
+                    when (saved) {
+                        true -> showRaisedToast(
+                            LinkSaveNotice.configToast(LinkSaveOutcome.SAVED),
+                            Toast.LENGTH_SHORT,
+                        )
+
+                        false -> {
+                            // Профиль 0 заполнили параллельно — ведём в новый редактор.
+                            pendingExternalImport = ProfileImportPolicy.prefill(decision)
                         }
-                        showRaisedToast(LinkSaveNotice.configToast(outcome), Toast.LENGTH_SHORT)
+
+                        null -> {
+                            // Сбой записи — не выдаём его за занятый профиль 0.
+                            showRaisedToast(
+                                "Не удалось сохранить ссылку: ошибка хранилища",
+                                Toast.LENGTH_LONG,
+                            )
+                            pendingExternalImport = ProfileImportPolicy.prefill(decision)
+                        }
                     }
                 }
-                .setNegativeButton("Отмена", null)
-                .show()
+
+                ExternalImportRoute.OpenNewProfileEditor -> {
+                    pendingExternalImport = ProfileImportPolicy.prefill(decision)
+                }
+            }
         }
     }
 
@@ -277,10 +287,8 @@ private data class NavItem(
 )
 
 private const val LOGS_TAB_ID = 2
-
 private val navItems = listOf(
     NavItem(0, R.string.nav_connection, Icons.Filled.PowerSettingsNew, Icons.Filled.PowerSettingsNew),
-    NavItem(1, R.string.nav_tunnel, Icons.Filled.VpnKey, Icons.Outlined.VpnKey),
     NavItem(LOGS_TAB_ID, R.string.nav_logs, Icons.Filled.Terminal, Icons.Outlined.Terminal),
     NavItem(3, R.string.nav_settings, Icons.Filled.Settings, Icons.Outlined.Settings),
 )
@@ -291,26 +299,31 @@ internal fun navigationSwipeProgress(totalDrag: Float, containerWidth: Int): Flo
 internal fun shouldCommitNavigationSwipe(progress: Float): Boolean = progress > 0.4f
 
 internal fun resolveActiveNavIds(participantShowLogs: Boolean): List<Int> =
-    if (participantShowLogs) listOf(0, 1, LOGS_TAB_ID, 3) else listOf(0, 1, 3)
+    if (participantShowLogs) listOf(0, LOGS_TAB_ID, 3) else listOf(0, 3)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(
+internal fun MainScreen(
     settingsStore: SettingsStore,
     themeMode: String = CsqttConstants.Theme.MODE_SYSTEM,
     onThemeChange: (String) -> Unit = {},
-    activeFingerprint: String = CsqttConstants.Tunnel.DEFAULT_FINGERPRINT,
-    onFingerprintChange: (String) -> Unit = {},
+    pendingExternalImport: ProfileImportPrefill? = null,
+    onExternalImportHandled: () -> Unit = {},
 ) {
     val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
     val tunnelAutoPausedForWifi by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
+    val serverAssignedWorkers by TunnelManager.serverAssignedWorkers.collectAsStateWithLifecycle()
+    val effectiveActiveWorkers = serverAssignedWorkers.takeIf { tunnelRunning && it in 3..100 }
     val view = LocalView.current
     val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    val activeProfile by settingsStore.activeProfile.collectAsStateWithLifecycle(initialValue = 0)
-    val tunnelAuthSettings by settingsStore.tunnelAuthSnapshot.collectAsStateWithLifecycle(
+    val activeProfile by settingsStore.profile.activeProfile.collectAsStateWithLifecycle(initialValue = 0)
+    val profileSummaries by settingsStore.profile.profiles.collectAsStateWithLifecycle(
+        initialValue = emptyList<ProfileSummary>(),
+    )
+    val tunnelAuthSettings by settingsStore.profile.tunnelAuthSnapshot.collectAsStateWithLifecycle(
         initialValue = TunnelAuthSnapshot()
     )
     val participantShowLogs by settingsStore.participantShowLogs.collectAsStateWithLifecycle(initialValue = false)
@@ -328,7 +341,10 @@ fun MainScreen(
         initialValue = SettingsStore.cachedIsWhitelist ?: false
     )
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var tunnelValidationRequest by rememberSaveable { mutableIntStateOf(0) }
+    var showProfileSheet by rememberSaveable { mutableStateOf(false) }
+    var editorOpen by rememberSaveable { mutableStateOf(false) }
+    var editorIsNew by rememberSaveable { mutableStateOf(false) }
+    var openEditorId by rememberSaveable { mutableStateOf<Int?>(null) }
     val dragTargetIndex = remember { mutableIntStateOf(-1) }
     val dragProgress = remember { mutableFloatStateOf(0f) }
     var wasRunning by remember { mutableStateOf(tunnelRunning) }
@@ -364,6 +380,24 @@ fun MainScreen(
 
     LaunchedEffect(selectedTab) {
         if (selectedTab == LOGS_TAB_ID) TunnelManager.clearUnreadErrors()
+    }
+
+    LaunchedEffect(pendingExternalImport) {
+        if (pendingExternalImport != null) {
+            // Внешний импорт важнее открытого листа/редактора: незаписанное
+            // состояние отбрасывается, показываем новый профиль с префиллом.
+            showProfileSheet = false
+            editorOpen = true
+            editorIsNew = true
+            openEditorId = null
+        }
+    }
+
+    val editorTarget: ProfileEditorTarget? = when {
+        pendingExternalImport != null -> ProfileEditorTarget.New
+        editorOpen && editorIsNew -> ProfileEditorTarget.New
+        editorOpen && openEditorId != null -> ProfileEditorTarget.Existing(openEditorId!!)
+        else -> null
     }
 
     LaunchedEffect(updateCheckIntervalHours) {
@@ -419,15 +453,10 @@ fun MainScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         AppBackdrop(modifier = Modifier.matchParentSize())
 
-        CompositionLocalProvider(
-            LocalCsqttHeaderActions provides {
-                FloatingToolbar(settingsStore = settingsStore)
-            },
-        ) {
-            Scaffold(
-                contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
-                containerColor = Color.Transparent,
-            ) { padding ->
+        Scaffold(
+            contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
+            containerColor = Color.Transparent,
+        ) { padding ->
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -484,7 +513,6 @@ fun MainScreen(
                             val tab = selectedTab
                             val tabStateKey: Any = when (tab) {
                                 0 -> "connection:${tunnelAuthSettings.profile}"
-                                1 -> "tunnel:${tunnelAuthSettings.profile}"
                                 else -> tab
                             }
                             tabStateHolder.SaveableStateProvider(tabStateKey) {
@@ -493,19 +521,19 @@ fun MainScreen(
                                     ConnectionTab(
                                         settingsStore = settingsStore,
                                         tunnelAuthSettings = tunnelAuthSettings,
-                                        onInvalidConfiguration = {
-                                            selectedTab = 1
-                                            tunnelValidationRequest += 1
+                                        activeProfile = activeProfile,
+                                        profiles = profileSummaries,
+                                        onOpenProfiles = { showProfileSheet = true },
+                                        onOpenProfileEditor = {
+                                            editorOpen = true
+                                            editorIsNew = false
+                                            openEditorId = activeProfile
                                         },
-                                    )
-                                } else {
-                                    Spacer(modifier = Modifier.fillMaxSize())
-                                }
-                                1 -> if (tunnelAuthSettings.isLoaded) {
-                                    SettingsTab(
-                                        settingsStore = settingsStore,
-                                        tunnelAuthSettings = tunnelAuthSettings,
-                                        validationRequest = tunnelValidationRequest,
+                                        onInvalidConfiguration = {
+                                            editorOpen = true
+                                            editorIsNew = false
+                                            openEditorId = activeProfile
+                                        },
                                     )
                                 } else {
                                     Spacer(modifier = Modifier.fillMaxSize())
@@ -513,14 +541,8 @@ fun MainScreen(
                                 2 -> LogsTab()
                                 3 -> GeneralSettingsTab(
                                     settingsStore = settingsStore,
-                                    activeProfile = activeProfile,
-                                    onActiveProfileChange = { profile ->
-                                        scope.launch { settingsStore.saveActiveProfile(profile) }
-                                    },
                                     currentTheme = themeMode,
                                     onThemeChange = onThemeChange,
-                                    activeFingerprint = activeFingerprint,
-                                    onFingerprintChange = onFingerprintChange,
                                     autoPauseOnWifi = autoPauseOnWifi,
                                     onAutoPauseOnWifiChange = { enabled ->
                                         scope.launch { settingsStore.saveAutoPauseOnWifi(enabled) }
@@ -561,7 +583,103 @@ fun MainScreen(
                     )
                 }
             }
+    }
+
+    if (showProfileSheet) {
+        ProfileListSheet(
+            profiles = profileSummaries,
+            activeId = activeProfile,
+            onSelect = { id ->
+                showProfileSheet = false
+                scope.launch {
+                    try {
+                        settingsStore.profile.saveActiveProfile(id)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: IOException) {
+                        context.showRaisedToast(
+                            "Не удалось переключить профиль: ошибка хранилища",
+                            Toast.LENGTH_LONG,
+                        )
+                    }
+                }
+            },
+            onDelete = { id ->
+                scope.launch {
+                    // Звонки закрываются до удаления: deleteProfile чистит их реестр.
+                    val token = runCatching { settingsStore.profile.vkAccessToken(id) }
+                        .getOrDefault("")
+                    if (token.isNotBlank()) {
+                        runCatching { VkAutoCallsManager.closeAll(context, token, id) }
+                    }
+                    val sessionProfile = TunnelManager.getCurrentParams()?.profile
+                    val deleted = try {
+                        settingsStore.profile.deleteProfile(id)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: IOException) {
+                        context.showRaisedToast(
+                            "Не удалось удалить профиль: ошибка хранилища",
+                            Toast.LENGTH_LONG,
+                        )
+                        false
+                    }
+                    // Удалили профиль живой сессии, когда активен уже другой:
+                    // наблюдатель смены active_profile молчит, и туннель остался бы
+                    // с мёртвыми хешами. Пересобираем его на активном профиле.
+                    if (
+                        deleted &&
+                        sessionProfile == id &&
+                        id != activeProfile &&
+                        TunnelManager.wantsTunnel()
+                    ) {
+                        context.startService(
+                            Intent(context, TunnelService::class.java).apply {
+                                action = CsqttConstants.General.ACTION_RECONNECT_ACTIVE_PROFILE
+                            }
+                        )
+                    }
+                }
+            },
+            onAdd = {
+                showProfileSheet = false
+                editorOpen = true
+                editorIsNew = true
+                openEditorId = null
+            },
+            onDismiss = { showProfileSheet = false },
+            effectiveActiveWorkers = effectiveActiveWorkers,
+        )
+    }
+
+    editorTarget?.let { target ->
+        val closeEditor: () -> Unit = {
+            editorOpen = false
+            editorIsNew = false
+            openEditorId = null
+            if (pendingExternalImport != null) onExternalImportHandled()
         }
+        ProfileEditorScreen(
+            settingsStore = settingsStore,
+            target = target,
+            prefill = if (target is ProfileEditorTarget.New) pendingExternalImport else null,
+            onDismiss = closeEditor,
+            onSaved = { reconnectRequired ->
+                closeEditor()
+                if (
+                    reconnectRequired &&
+                    target is ProfileEditorTarget.Existing &&
+                    target.id == activeProfile &&
+                    TunnelManager.wantsTunnel()
+                ) {
+                    context.startService(
+                        Intent(context, TunnelService::class.java).apply {
+                            action = CsqttConstants.General.ACTION_RECONNECT_ACTIVE_PROFILE
+                        }
+                    )
+                }
+            },
+        )
     }
 
     pendingRelease?.let { release ->

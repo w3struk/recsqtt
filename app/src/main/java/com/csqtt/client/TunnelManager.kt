@@ -798,12 +798,15 @@ object TunnelManager {
             level = LogLevel.OK,
         )
         activeScope.launch {
-            if (shouldPersistUnavailableVkHash(params.vkHashMode, isNewUnavailableHash, event.code)) {
+            if (
+                shouldPersistUnavailableVkHash(params.vkHashMode, isNewUnavailableHash, event.code) &&
+                params.profile >= 0
+            ) {
                 activeContext()?.let { ctx ->
                     val store = activeSettingsStore ?: SettingsStore(ctx).also {
                         activeSettingsStore = it
                     }
-                    store.invalidateVkHash(event.hash)
+                    store.profile.invalidateVkHash(params.profile, event.hash)
                 }
             }
             val remaining = params.vkHashes

@@ -23,15 +23,20 @@ class SettingsStoreGlobalAppSettingsTest {
         File("src/main/java/com/csqtt/client/SettingsStore.kt"),
     ).first(File::isFile).readLines()
 
-    private val sourceText: String = source.joinToString("\n")
+    private val profileSource: List<String> = listOf(
+        File("app/src/main/java/com/csqtt/client/ProfileSettingsStore.kt"),
+        File("src/main/java/com/csqtt/client/ProfileSettingsStore.kt"),
+    ).first(File::isFile).readLines()
+
+    private val sourceText: String = (source + profileSource).joinToString("\n")
 
     /** Тело объявления по его первой строке: до закрывающей `}` на том же отступе. */
-    private fun bodyOf(declaration: String): String {
-        val start = source.indexOfFirst { it.contains(declaration) }
-        assertTrue("в SettingsStore нет «$declaration»", start >= 0)
-        val indent = source[start].takeWhile { it == ' ' }
-        val end = (start + 1 until source.size).first { source[it] == indent + "}" }
-        return source.subList(start, end + 1).joinToString("\n")
+    private fun bodyOf(declaration: String, lines: List<String> = source): String {
+        val start = lines.indexOfFirst { it.contains(declaration) }
+        assertTrue("нет объявления «$declaration»", start >= 0)
+        val indent = lines[start].takeWhile { it == ' ' }
+        val end = (start + 1 until lines.size).first { lines[it] == indent + "}" }
+        return lines.subList(start, end + 1).joinToString("\n")
     }
 
     @Test
@@ -96,7 +101,7 @@ class SettingsStoreGlobalAppSettingsTest {
 
     @Test
     fun `the four keys no longer receive a profile suffix`() {
-        val getProfileKeyBody = bodyOf("private fun <T> getProfileKey(")
+        val getProfileKeyBody = bodyOf("private fun <T> getProfileKey(", profileSource)
         listOf(
             "EXCLUDED_APPS",
             "WHITELIST_APPS",
@@ -124,7 +129,7 @@ class SettingsStoreGlobalAppSettingsTest {
         )
         assertTrue(
             "перенос не ограничен профилем, отличным от нулевого",
-            migration.contains("if (profile != CsqttConstants.Profiles.MIN_INDEX)"),
+            migration.contains("if (profileId != ProfileRegistryPolicy.DEFAULT_PROFILE_ID)"),
         )
         listOf(
             "EXCLUDED_APPS",
