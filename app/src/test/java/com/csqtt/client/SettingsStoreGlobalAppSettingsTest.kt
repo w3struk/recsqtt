@@ -82,7 +82,6 @@ class SettingsStoreGlobalAppSettingsTest {
             "suspend fun saveExcludedApps" to "prefs[EXCLUDED_APPS] = packages",
             "suspend fun saveWhitelistApps" to "prefs[WHITELIST_APPS] = packages",
             "suspend fun saveAppRoutingLists" to "prefs[EXCLUDED_APPS] = blacklist",
-            "suspend fun saveExceptionsMode" to "prefs[IS_WHITELIST] = isWhitelist",
             "suspend fun saveParticipantShowLogs" to "prefs[PARTICIPANT_SHOW_LOGS] = show",
         )
         savers.forEach { (declaration, globalWrite) ->
@@ -107,26 +106,6 @@ class SettingsStoreGlobalAppSettingsTest {
             assertFalse(
                 "$key попал в профильную карту ключей",
                 Regex("""\b$key\b""").containsMatchIn(getProfileKeyBody),
-            )
-        }
-    }
-
-    @Test
-    fun `legacy migrations still read the old suffixed keys`() {
-        listOf(
-            "suspend fun migrateLegacyWhitelistMode(",
-            "suspend fun repairInvertedLocalBlacklist(",
-        ).forEach { declaration ->
-            val body = bodyOf(declaration)
-            assertTrue(
-                "$declaration должен читать старые ключи через legacyProfileKey",
-                body.contains("legacyProfileKey(EXCLUDED_APPS") &&
-                    body.contains("legacyProfileKey(IS_WHITELIST"),
-            )
-            assertFalse(
-                "$declaration не должен выдавать старые ключи за профильные",
-                Regex("""getProfileKey\(\s*(EXCLUDED_APPS|WHITELIST_APPS|IS_WHITELIST)""")
-                    .containsMatchIn(body),
             )
         }
     }
@@ -165,16 +144,12 @@ class SettingsStoreGlobalAppSettingsTest {
     }
 
     @Test
-    fun `the migration runs after the legacy repairs`() {
+    fun `the migration runs from init`() {
         val init = bodyOf("init {")
-        val repairAt = init.indexOf("repairInvertedLocalBlacklist()")
-        val migrateAt = init.indexOf("migrateGlobalAppSettings()")
 
-        assertTrue("init не вызывает repairInvertedLocalBlacklist", repairAt >= 0)
-        assertTrue("init не вызывает migrateGlobalAppSettings", migrateAt >= 0)
         assertTrue(
-            "перенос должен идти после ремонта легаси-списков",
-            migrateAt > repairAt,
+            "init не вызывает migrateGlobalAppSettings",
+            init.contains("migrateGlobalAppSettings()"),
         )
     }
 

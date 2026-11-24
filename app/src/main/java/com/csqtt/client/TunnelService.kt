@@ -273,7 +273,6 @@ class TunnelService : Service() {
                         val params = TunnelParams(
                             peer = intent.getStringExtra("peer") ?: "",
                             vkHashes = resolvedHashes.value,
-                            secondaryVkHash = intent.getStringExtra("secondary_vk_hash") ?: "",
                             workersPerHash = workersPerHash,
                             port = intent.getIntExtra("port", 0),
                             profile = activeProfile,
@@ -489,7 +488,6 @@ class TunnelService : Service() {
         val params = TunnelParams(
             peer = source.peer,
             vkHashes = resolvedHashes?.value ?: "",
-            secondaryVkHash = store.secondaryVkHash.first(),
             workersPerHash = workersPerHash,
             port = 0,
             profile = activeProfile,

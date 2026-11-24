@@ -19,7 +19,6 @@ internal suspend fun buildQuickStartIntent(context: Context): Intent? {
         putExtra("peer", source.peer)
         putExtra("vk_hashes", source.hashes)
         putExtra("vk_hashes_from_link", source.hashesFromLink)
-        putExtra("secondary_vk_hash", store.secondaryVkHash.first())
         putExtra("workers_per_hash", store.workersPerHash.first())
         putExtra("port", 0)
         putExtra("sni", store.sni.first())

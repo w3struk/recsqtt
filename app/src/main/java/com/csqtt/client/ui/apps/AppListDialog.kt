@@ -79,7 +79,6 @@ import com.csqtt.client.ui.design.CsqttSpacing
 internal fun AppListDialog(
     appsList: List<AppItem>,
     isAppsLoading: Boolean,
-    isMigrationReady: Boolean,
     isRefreshing: Boolean,
     refreshFailed: Boolean,
     searchQuery: String,
@@ -181,7 +180,7 @@ internal fun AppListDialog(
                                 containerColor = Color(0xFF1475FD),
                                 contentColor = Color.White,
                             ),
-                            enabled = isMigrationReady && !serverLocked,
+                            enabled = !serverLocked,
                         ) {
                             Text(
                                 text = "Чёрный список",
@@ -206,7 +205,7 @@ internal fun AppListDialog(
                                 1.dp,
                                 MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                             ),
-                            enabled = isMigrationReady && !serverLocked,
+                            enabled = !serverLocked,
                         ) {
                             Text(
                                 text = "Чёрный список",
@@ -229,7 +228,7 @@ internal fun AppListDialog(
                                 containerColor = Color(0xFF1475FD),
                                 contentColor = Color.White,
                             ),
-                            enabled = isMigrationReady && !serverLocked,
+                            enabled = !serverLocked,
                         ) {
                             Text(
                                 text = "Белый список",
@@ -254,7 +253,7 @@ internal fun AppListDialog(
                                 1.dp,
                                 MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                             ),
-                            enabled = isMigrationReady && !serverLocked,
+                            enabled = !serverLocked,
                         ) {
                             Text(
                                 text = "Белый список",
@@ -419,7 +418,7 @@ internal fun AppListDialog(
                 // 184 red packages, dozens of which can be installed).
 
                 when {
-                    !isMigrationReady || isAppsLoading -> {
+                    isAppsLoading -> {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()

@@ -205,8 +205,7 @@ sudo csqttctl status
 3. **События в stdout.** Формат `__CSQTT_EVENT__|KIND|{json}`, отправляются только при `CSQTT_EVENTS=1`
    в окружении (Kotlin всегда его ставит). Определены в `rust-client/events.rs` (`EVENT_PREFIX`),
    продублированы в `Constants.kt` (`CSQTT_EVENT_PREFIX`), разбираются в `TunnelEventParser.kt`.
-   Kotlin-парсер принимает надмножество: `STARTED`, `CAPTCHA_REQUEST`, `CAPTCHA_DONE` обрабатываются, но
-   текущий Rust-клиент их не отправляет — не считайте их рабочими.
+   Парсер понимает ровно те события, которые шлёт Rust.
 4. **Передача TUN.** Файловый дескриптор TUN пересекает границу процесса через **abstract** Unix-сокет
    `csqtt_tun_uds`: Rust его биндит (`rust-client/tun.rs`), Android подключается
    (`TunVpnService.kt`). Имя — жёстко зашитый литерал с обеих сторон, а не общая константа.

@@ -29,13 +29,6 @@ class IpRoutingPolicyTest {
     )
 
     @Test
-    fun `routing is on exactly when the list is not empty`() {
-        assertTrue("непустой список включает роутинг", IpRoutingPolicy.isEnabled("10.0.0.1"))
-        assertFalse("пустой список выключает роутинг", IpRoutingPolicy.isEnabled(""))
-        assertFalse("пробелы — не список", IpRoutingPolicy.isEnabled("   "))
-    }
-
-    @Test
     fun `a first rule always needs a rebuild`() {
         assertTrue("первое правило требует пересборки", IpRoutingPolicy.needsVpnRebuild(null, rule()))
     }

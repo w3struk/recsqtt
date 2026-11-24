@@ -686,13 +686,6 @@ object TunnelManager {
                     updateProcessLog(identity, "event_error_${event.code}", event.message, 99, true)
                 }
             }
-            is TunnelEventParser.Event.CaptchaRequest -> {
-                activeScope.launch {
-                    if (isCurrent(identity)) {
-                        handleCaptchaSolve(event.mode, event.redirectUri, event.sessionToken, identity)
-                    }
-                }
-            }
             is TunnelEventParser.Event.Progress -> {
                 if (event.kind == "credentials") {
                     identity.startupProgress.credentialReceived()
@@ -1811,7 +1804,7 @@ object TunnelManager {
 
         if (lineTrim.contains("FATAL_PROTOCOL")) {
             handleCriticalError(
-                "🔁 Клиент и сервер используют разные версии протокола. Выполните деплой из этой версии приложения. Воркеры остановлены.",
+                "🔁 Клиент и сервер используют разные версии протокола. Обновите приложение и сервер. Воркеры остановлены.",
                 identity,
             )
             return
@@ -2716,7 +2709,6 @@ object TunnelManager {
 data class TunnelParams(
     val peer: String,
     val vkHashes: String,
-    val secondaryVkHash: String = "",
     val workersPerHash: Int,
     val port: Int,
     /** Профиль конфигурации, из которого собран этот снимок; -1 — снимок без профиля (неизвестен). */

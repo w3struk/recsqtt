@@ -152,8 +152,7 @@ Kotlin пишет один дефис, Rust нормализует в двойн
 События идут в stdout строками `__CSQTT_EVENT__|KIND|{json}` и только при `CSQTT_EVENTS=1`:
 `PROCESS`, `READY`, `DTLS`, `CONFIG`, `ROUTING`, `ROUTING_ABSENT`, `WORKERS`, `STATS`,
 `ACTIVE_ZERO`, `TUN_LOST`, `ERROR`, `SERVER_RESTART`, `PROGRESS`, `NETWORK_SUSPECT`,
-`CALL_UNAVAILABLE`, `STOPPED` (`events.rs`). `TunnelEventParser` принимает надмножество:
-`STARTED`, `CAPTCHA_REQUEST`, `CAPTCHA_DONE` он понимает, но Rust их не шлёт. Payload, не влезший в
+`CALL_UNAVAILABLE`, `STOPPED` (`events.rs`). `TunnelEventParser` понимает ровно эти события. Payload, не влезший в
 лимит строки, заменяется `ERROR` (для `ROUTING` — фатальным); запрос капчи — строка `CAPTCHA_SOLVE|…`;
 stderr — диагностика, stdout — протокол, в debug оба дублируются в logcat (`CSQTT/Protocol`, `CSQTT/Diagnostic`).
 
@@ -403,7 +402,7 @@ Android и ждёт ответа до 60 с; ждёт при этом тольк
 - **Ограничения.**
   Сопоставление идёт по именам пакетов (`addAllowedApplication`/`addDisallowedApplication`), собственных диапазонов UID в коде нет;
   смена состава пакетов требует пересборки VPN (`PackageChangePolicy`), иначе UID-набор остаётся прежним.
-  IPv6 в TUN не маршрутизируется: нет ни IPv6-адреса, ни маршрута, а IPv6-DNS отфильтрован — трафик v6 остаётся вне туннеля. Ключ `no_dns` зарегистрирован в `SettingsStore` и списке миграции, но потребителей в коде нет — приложения резолвятся только через выданные сервером DNS.
+  IPv6 в TUN не маршрутизируется: нет ни IPv6-адреса, ни маршрута, а IPv6-DNS отфильтрован — трафик v6 остаётся вне туннеля. Приложения резолвятся только через выданные сервером DNS; ключ `no_dns` удалён вместе с остальными мёртвыми настройками.
 
 ## Панель, аутентификация и хранение
 
@@ -499,8 +498,8 @@ caps `NET_ADMIN`/`NET_RAW`/`NET_BIND_SERVICE`, `--restart unless-stopped`, ка�
   Формат `__CSQTT_EVENT__|KIND|{json}`, префикс задан в `rust-client/events.rs` (`EVENT_PREFIX`) и продублирован
   в `CsqttConstants.General.CSQTT_EVENT_PREFIX`; отправка включается только `CSQTT_EVENTS=1` (Kotlin ставит всегда).
   Реально эмитятся `READY`, `STOPPED`, `PROCESS`, `CONFIG`, `ROUTING`, `ROUTING_ABSENT`, `WORKERS`, `STATS`, `ERROR`, `ACTIVE_ZERO`,
-  `TUN_LOST`, `DTLS`, `SERVER_RESTART`, `PROGRESS`, `NETWORK_SUSPECT`, `CALL_UNAVAILABLE`; `STARTED`, `CAPTCHA_REQUEST` и `CAPTCHA_DONE`
-  `TunnelEventParser` разбирает, но текущий Rust их не отправляет.
+  `TUN_LOST`, `DTLS`, `SERVER_RESTART`, `PROGRESS`, `NETWORK_SUSPECT`, `CALL_UNAVAILABLE`. `TunnelEventParser`
+  понимает ровно эти события.
 - **Границы журнала.**
   Сообщение обрезается до 4096 символов (`MAX_LOG_MESSAGE_LENGTH`), в журнале держится 500 записей (`LogJournalPolicy.MAX_ENTRIES`), pending-буфер — 128 ключей с вытеснением не-терминальных записей и флашем через 120 мс; терминальная строка `[СТОП]`
   переживает инвалидацию процесса (`TunnelLogPolicy`), повторные строки сливаются со счётчиком.

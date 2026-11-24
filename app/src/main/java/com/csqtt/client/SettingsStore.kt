@@ -40,17 +40,14 @@ class SettingsStore(context: Context) {
         private val PARTICIPANT_SHOW_LOGS = booleanPreferencesKey("participant_show_logs")
 
         private val VK_HASHES = stringPreferencesKey("vk_hashes")
-        private val SECONDARY_VK_HASH = stringPreferencesKey("secondary_vk_hash")
         private val WORKERS_PER_HASH = intPreferencesKey("workers_per_hash")
         private val PROTOCOL = stringPreferencesKey("protocol")
         private val LISTEN_PORT = intPreferencesKey("listen_port")
         private val SNI = stringPreferencesKey("sni")
-        private val NO_DNS = booleanPreferencesKey("no_dns")
         private val CUSTOM_TURN_IPS = stringPreferencesKey("custom_turn_ips")
         private val SELECTED_TURN_SUBNET = stringPreferencesKey("selected_turn_subnet")
         private val TURN_SUBNET_IP_LIMIT = stringPreferencesKey("turn_subnet_ip_limit")
 
-        private val USER_AGENT = stringPreferencesKey("user_agent")
         private val PROFILE_NAME = stringPreferencesKey("profile_name")
 
         private val EXCLUDED_APPS = stringPreferencesKey("excluded_apps")
@@ -58,10 +55,6 @@ class SettingsStore(context: Context) {
         // Глобальный, а не профильный ключ: пресет приходит с серверного правила и к профилям
         // отношения не имеет, поэтому через getProfileKey он не проходит.
         private val ORANGE_TUNNEL_ENABLED = stringPreferencesKey("orange_tunnel_enabled")
-
-        private val PROXY_MODE = stringPreferencesKey("proxy_mode") 
-        private val PROXY_HOST = stringPreferencesKey("proxy_host")
-        private val PROXY_PORT = intPreferencesKey("proxy_port")
 
         private val VK_AUTH_MODE = stringPreferencesKey("vk_auth_mode") 
         private val OBFS_MODE = stringPreferencesKey("obfs_mode") 
@@ -76,16 +69,12 @@ class SettingsStore(context: Context) {
         private val VK_ACCESS_TOKEN_USER_ID = stringPreferencesKey("vk_access_token_user_id")
 
         private val IS_WHITELIST = booleanPreferencesKey("is_whitelist")
-        private val SPLIT_TUNNEL_WHITELIST_MIGRATED = booleanPreferencesKey("split_tunnel_whitelist_migrated")
-        private val SPLIT_TUNNEL_INVERTED_LIST_REPAIRED =
-            booleanPreferencesKey("split_tunnel_inverted_list_repaired")
 
         // Локальные списки приложений и видимость журнала больше не принадлежат профилю:
         // маршрутизация в большинстве случаев приходит с серверного правила, а журнал —
         // свойство приложения, а не подключения. Флаг закрывает одноразовый перенос
         // значений активного профиля в глобальные ключи (см. migrateGlobalAppSettings).
         private val APP_SETTINGS_GLOBAL_MIGRATED = booleanPreferencesKey("app_settings_global_migrated")
-        private val EXTRA_WORKERS = booleanPreferencesKey("extra_workers")
         private val AUTO_JS_RISK_ACKNOWLEDGED = booleanPreferencesKey("auto_js_risk_acknowledged")
         private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
         private val BATTERY_OPTIMIZATION_PROMPT_HANDLED =
@@ -110,7 +99,6 @@ class SettingsStore(context: Context) {
         private val UPDATE_DIALOG_LAST_ACTION = stringPreferencesKey("update_dialog_last_action")
         private val UPDATE_DIALOG_LAST_ACTION_AT = longPreferencesKey("update_dialog_last_action_at")
 
-        private val CLIENT_ID_CHECK_RESULTS = stringPreferencesKey("client_id_check_results")
         private val VK_HASH_CHECK_RESULTS = stringPreferencesKey("vk_hash_check_results")
         private val CONNECTION_GENERATION = longPreferencesKey("connection_generation")
         private val TUNNEL_LAST_DIAGNOSTIC = stringPreferencesKey("tunnel_last_diagnostic")
@@ -131,9 +119,6 @@ class SettingsStore(context: Context) {
 
         @Volatile
         internal var cachedWorkersPerHash: Int? = null
-
-        @Volatile
-        internal var cachedExtraWorkers: Boolean? = null
 
         @Volatile
         internal var cachedCustomTurnIps: String? = null
@@ -161,18 +146,16 @@ class SettingsStore(context: Context) {
             val newName = "${baseKey.name}_$profile"
             @Suppress("UNCHECKED_CAST")
             return when (baseKey) {
-                VK_HASHES, SECONDARY_VK_HASH, PROTOCOL, SNI, USER_AGENT, PROXY_MODE, PROXY_HOST, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, VK_HASH_CHECK_RESULTS, CLIENT_ID_CHECK_RESULTS, CUSTOM_TURN_IPS, SELECTED_TURN_SUBNET -> stringPreferencesKey(newName) as Preferences.Key<T>
-                WORKERS_PER_HASH, LISTEN_PORT, PROXY_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
-                NO_DNS, EXTRA_WORKERS, SPLIT_TUNNEL_WHITELIST_MIGRATED -> booleanPreferencesKey(newName) as Preferences.Key<T>
-                CONNECTION_GENERATION -> longPreferencesKey(newName) as Preferences.Key<T>
+                VK_HASHES, PROTOCOL, SNI, VK_AUTH_MODE, OBFS_MODE, TURN_TRANSPORT, CAPTCHA_MODE, CAPTCHA_SOLVE_METHOD, CAPTCHA_WBV_SOLVE_METHOD, CSQTT_LINK, SELECTED_FINGERPRINT, ACTIVE_CLIENT_IDS, VK_HASH_MODE, VK_ACCESS_TOKEN, VK_ACCESS_TOKEN_ENCRYPTED, VK_ACCESS_TOKEN_USER_ID, VK_HASH_CHECK_RESULTS, CUSTOM_TURN_IPS, SELECTED_TURN_SUBNET -> stringPreferencesKey(newName) as Preferences.Key<T>
+                WORKERS_PER_HASH, LISTEN_PORT -> intPreferencesKey(newName) as Preferences.Key<T>
                 else -> stringPreferencesKey(newName) as Preferences.Key<T>
             }
         }
 
         /**
          * Суффиксный ключ старого профильного хранения для настроек, которые уже
-         * стали глобальными. Нужен только одноразовому переносу и легаси-миграциям:
-         * в обычном чтении и записи эти ключи идут без суффикса.
+         * стали глобальными. Нужен только одноразовому переносу и запасному чтению
+         * до его завершения: в обычном чтении и записи эти ключи идут без суффикса.
          */
         private fun <T> legacyProfileKey(baseKey: Preferences.Key<T>, profile: Int): Preferences.Key<T> {
             if (profile == 0) return baseKey
@@ -211,16 +194,10 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(VK_HASHES, profile)] ?: ""
     }
-    val secondaryVkHash: Flow<String> = dataStore.data.map { prefs ->
-        val profile = prefs[ACTIVE_PROFILE] ?: 0
-        prefs[getProfileKey(SECONDARY_VK_HASH, profile)] ?: ""
-    }
     val workersPerHash: Flow<Int> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
-        val isExtra = prefs[getProfileKey(EXTRA_WORKERS, profile)] ?: false
-        val max = WorkerCountPolicy.defaultMaximum(isExtra)
         val current = prefs[getProfileKey(WORKERS_PER_HASH, profile)] ?: 18
-        WorkerCountPolicy.normalize(current, maximum = max)
+        WorkerCountPolicy.normalize(current, maximum = WorkerCountPolicy.defaultMaximum())
     }
     val protocol: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
@@ -370,7 +347,6 @@ class SettingsStore(context: Context) {
         }
     }
 
-    val extraWorkers: Flow<Boolean> = kotlinx.coroutines.flow.flowOf(false)
     val autoJsRiskAcknowledged: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[AUTO_JS_RISK_ACKNOWLEDGED] ?: false
     }
@@ -395,9 +371,6 @@ class SettingsStore(context: Context) {
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(ACTIVE_CLIENT_IDS, profile)] ?: CsqttConstants.Tunnel.DEFAULT_CLIENT_IDS
     }
-    val clientIdCheckResults: Flow<String> = dataStore.data.map { prefs ->
-        prefs[CLIENT_ID_CHECK_RESULTS] ?: "{}"
-    }
     val vkHashCheckResults: Flow<String> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
         prefs[getProfileKey(VK_HASH_CHECK_RESULTS, profile)] ?: "{}"
@@ -421,26 +394,16 @@ class SettingsStore(context: Context) {
     init {
         if (migrationsStarted.compareAndSet(false, true)) {
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-                migrateLegacyWhitelistMode()
-                repairInvertedLocalBlacklist()
                 migrateGlobalAppSettings()
             }
         }
         if (uiCacheStarted.compareAndSet(false, true)) {
             CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
-                launch {
-                    dataStore.edit { prefs ->
-                        for (p in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
-                            prefs[getProfileKey(EXTRA_WORKERS, p)] = false
-                        }
-                    }
-                }
                 launch { vkHashMode.collect { cachedVkHashMode = it } }
                 launch { vkAccessToken.collect { cachedVkAccessToken = it } }
                 launch { obfsMode.collect { cachedObfsMode = it } }
                 launch { turnTransport.collect { cachedTurnTransport = it } }
                 launch { workersPerHash.collect { cachedWorkersPerHash = it } }
-                cachedExtraWorkers = false
                 launch { customTurnIps.collect { cachedCustomTurnIps = it } }
                 launch { excludedApps.collect { cachedExcludedApps = it } }
                 launch { whitelistApps.collect { cachedWhitelistApps = it } }
@@ -487,12 +450,6 @@ class SettingsStore(context: Context) {
         dataStore.edit { prefs ->
             val profile = prefs[ACTIVE_PROFILE] ?: 0
             prefs[getProfileKey(ACTIVE_CLIENT_IDS, profile)] = clientIds
-        }
-    }
-
-    suspend fun saveClientIdCheckResults(resultsJson: String) {
-        dataStore.edit { prefs ->
-            prefs[CLIENT_ID_CHECK_RESULTS] = resultsJson
         }
     }
 
@@ -693,14 +650,12 @@ class SettingsStore(context: Context) {
     suspend fun saveExcludedApps(packages: String) {
         dataStore.edit { prefs ->
             prefs[EXCLUDED_APPS] = packages
-            prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
 
     suspend fun saveWhitelistApps(packages: String) {
         dataStore.edit { prefs ->
             prefs[WHITELIST_APPS] = packages
-            prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
 
@@ -709,7 +664,6 @@ class SettingsStore(context: Context) {
             prefs[EXCLUDED_APPS] = blacklist
             prefs[WHITELIST_APPS] = whitelist
             if (isWhitelist != null) prefs[IS_WHITELIST] = isWhitelist
-            prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
         }
     }
 
@@ -783,14 +737,6 @@ class SettingsStore(context: Context) {
             }
             prefs[getProfileKey(TURN_SUBNET_IP_LIMIT, profile)] = limit
             prefs[getProfileKey(CUSTOM_TURN_IPS, profile)] = ips
-        }
-    }
-
-    suspend fun saveExtraWorkers(enabled: Boolean = false) {
-        dataStore.edit { prefs ->
-            for (p in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
-                prefs[getProfileKey(EXTRA_WORKERS, p)] = false
-            }
         }
     }
 
@@ -869,92 +815,6 @@ class SettingsStore(context: Context) {
     suspend fun saveIsWhitelist(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[IS_WHITELIST] = enabled
-            prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
-        }
-    }
-
-    suspend fun saveExceptionsMode(packages: String, isWhitelist: Boolean) {
-        dataStore.edit { prefs ->
-            if (isWhitelist) {
-                prefs[WHITELIST_APPS] = packages
-            } else {
-                prefs[EXCLUDED_APPS] = packages
-            }
-            prefs[IS_WHITELIST] = isWhitelist
-            prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
-        }
-    }
-
-    /**
-     * Легаси хранил единственный список в `EXCLUDED_APPS` и в белом режиме
-     * держал там белый список. Переносим его в `WHITELIST_APPS`, а чёрную
-     * ветку оставляем пустой: синтез «всё установленное минус белый список»
-     * под чёрным правилом прочитался бы как настоящий чёрный список и увёл бы
-     * мимо тоннеля почти всё устройство. Профиль, у которого белый ключ уже
-     * заполнен, не трогаем — это состояние новой настройки, а не легаси.
-     */
-    suspend fun migrateLegacyWhitelistMode() {
-        val currentPrefs = dataStore.data.first()
-        if (currentPrefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] == true) return
-
-        dataStore.edit { prefs ->
-            if (prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] == true) return@edit
-
-            for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
-                val whitelistKey = legacyProfileKey(IS_WHITELIST, profile)
-                val appsKey = legacyProfileKey(EXCLUDED_APPS, profile)
-                val whitelistAppsKey = legacyProfileKey(WHITELIST_APPS, profile)
-                if (prefs[whitelistKey] == true && prefs[whitelistAppsKey] == null) {
-                    val migrated = LegacyAppListsMigration.fromLegacyWhiteList(prefs[appsKey])
-                    prefs[appsKey] = migrated.black
-                    prefs[whitelistAppsKey] = migrated.white
-                }
-            }
-
-            prefs[SPLIT_TUNNEL_WHITELIST_MIGRATED] = true
-        }
-    }
-
-        /**
-     * Одноразовый ремонт чёрной ветки, которую прежняя легаси-миграция успела
-     * синтезировать в белом профиле.
-     *
-     * Миграция 2.5.0/2.5.1 для белого профиля с непустым `EXCLUDED_APPS` писала
-     * туда «все установленные минус старый белый список» и всегда ставила
-     * `SPLIT_TUNNEL_WHITELIST_MIGRATED = true`. Новая [migrateLegacyWhitelistMode]
-     * выходит по этому флагу на первой строке, поэтому до данных обновившихся
-     * пользователей она не доходит. Под чёрным правилом сервера `effectivePackages`
-     * читает именно эту ветку и уводит мимо тоннеля почти всё устройство.
-     *
-     * Поэтому ремонт идёт отдельным ключом и отдельным проходом: у каждого профиля
-     * в белом режиме чёрная ветка очищается. У белого профиля непустой чёрный
-     * список почти всегда синтезирован прежней миграцией; осознанно сохранённый
-     * пользователем список (переключился в чёрный режим, отредактировал, вернулся
-     * в белый) эта миграция тоже затирает — осознанный размен, иначе перевёрнутый
-     * синтез остаётся у всех обновившихся. Профили в чёрном режиме не трогаем: там
-     * чёрный список пользовательский.
-     *
-     * Повторный запуск ничего не меняет: проход закрыт собственным ключом, а не
-     * `SPLIT_TUNNEL_WHITELIST_MIGRATED` (его выставляет любое сохранение списков).
-     */
-    suspend fun repairInvertedLocalBlacklist() {
-        val currentPrefs = dataStore.data.first()
-        if (currentPrefs[SPLIT_TUNNEL_INVERTED_LIST_REPAIRED] == true) return
-
-        dataStore.edit { prefs ->
-            if (prefs[SPLIT_TUNNEL_INVERTED_LIST_REPAIRED] == true) return@edit
-
-            for (profile in CsqttConstants.Profiles.MIN_INDEX..CsqttConstants.Profiles.MAX_INDEX) {
-                val whitelistKey = legacyProfileKey(IS_WHITELIST, profile)
-                val appsKey = legacyProfileKey(EXCLUDED_APPS, profile)
-                val repaired = LegacyAppListsMigration.repairedBlacklist(
-                    isWhitelist = prefs[whitelistKey] == true,
-                    black = prefs[appsKey],
-                )
-                if (repaired != null) prefs[appsKey] = repaired
-            }
-
-            prefs[SPLIT_TUNNEL_INVERTED_LIST_REPAIRED] = true
         }
     }
 

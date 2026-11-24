@@ -175,7 +175,6 @@ internal fun AppRoutingSection(
     var isAppsLoading by remember { mutableStateOf(AppCache.cached == null) }
     var isRefreshing by remember { mutableStateOf(false) }
     var refreshFailed by remember { mutableStateOf(false) }
-    var isMigrationReady by rememberSaveable { mutableStateOf(false) }
 
     var showAppsDialog by rememberSaveable { mutableStateOf(false) }
 
@@ -218,9 +217,6 @@ internal fun AppRoutingSection(
     var showSystemAppsState by remember(showSystemApps) { mutableStateOf(showSystemApps) }
 
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { settingsStore.migrateLegacyWhitelistMode() }
-        isMigrationReady = true
-
         AppCache.cached?.let {
             appsList = it.displayList
             installedPackages = it.allPackages
@@ -506,7 +502,6 @@ internal fun AppRoutingSection(
         AppListDialog(
             appsList = filteredApps,
             isAppsLoading = isAppsLoading,
-            isMigrationReady = isMigrationReady,
             isRefreshing = isRefreshing,
             refreshFailed = refreshFailed,
             searchQuery = appSearchQuery,

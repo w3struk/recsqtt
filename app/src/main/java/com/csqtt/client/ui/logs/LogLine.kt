@@ -50,8 +50,7 @@ private fun isGreenLog(tag: String, level: LogLevel, isError: Boolean): Boolean 
         tag.contains("NET", ignoreCase = true) ||
         tag.contains("СЕТЬ", ignoreCase = true) ||
         tag.contains("WRAP", ignoreCase = true) ||
-        tag.contains("ВОРКЕР", ignoreCase = true) ||
-        (tag.contains("ДЕПЛОЙ", ignoreCase = true) && (level == LogLevel.OK || level == LogLevel.NET))
+        tag.contains("ВОРКЕР", ignoreCase = true)
 }
 
 private fun resolveTagColors(isGreen: Boolean, isError: Boolean): TagColors {
