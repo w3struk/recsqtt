@@ -731,6 +731,10 @@ class ProfileSettingsStore internal constructor(
             if (active == profile || storedActive !in remaining) {
                 prefs[ACTIVE_PROFILE] = fallback
             }
+            val storedNext = prefs[NEXT_PROFILE_ID]
+            if (storedNext == null || storedNext <= profile) {
+                prefs[NEXT_PROFILE_ID] = profile + 1
+            }
             deleted = true
         }
         if (deleted) {

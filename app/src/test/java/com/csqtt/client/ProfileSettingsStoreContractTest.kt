@@ -244,9 +244,10 @@ class ProfileSettingsStoreContractTest {
     }
 
     @Test
-    fun `deleteProfile keeps the counter and clears the call registry`() {
+    fun `deleteProfile keeps the counter above the deleted id and clears the call registry`() {
         val body = bodyOf("suspend fun deleteProfile(")
-        assertFalse("deleteProfile уменьшает next_profile_id", body.contains("NEXT_PROFILE_ID"))
+        assertTrue("deleteProfile не обновляет next_profile_id", body.contains("NEXT_PROFILE_ID"))
+        assertTrue("deleteProfile не поднимает счётчик до profile + 1", body.contains("profile + 1"))
         assertTrue("deleteProfile не чистит ключи", body.contains("clearProfileKeys(profile)"))
         assertTrue("deleteProfile не чистит реестр звонков", body.contains("vkCalls.clear(profile)"))
     }

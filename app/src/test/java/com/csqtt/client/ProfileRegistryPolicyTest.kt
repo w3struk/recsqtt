@@ -216,6 +216,21 @@ class ProfileRegistryPolicyTest {
     }
 
     @Test
+    fun `migration keeps the counter above dropped ids`() {
+        val migration = ProfileRegistryPolicy.migrateRegistry(
+            storedIds = listOf(0, 5),
+            linked = setOf(0),
+            requestedActive = 0,
+            storedNext = null,
+        )
+
+        assertEquals(listOf(0), migration.ids)
+        assertEquals(0, migration.active)
+        assertEquals(6, migration.next)
+        assertEquals(listOf(5), migration.dropped)
+    }
+
+    @Test
     fun `migration of a fresh install writes an empty registry`() {
         val migration = ProfileRegistryPolicy.migrateRegistry(
             storedIds = null,

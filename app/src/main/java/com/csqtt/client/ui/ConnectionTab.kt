@@ -77,6 +77,7 @@ internal fun ConnectionTab(
     onInvalidConfiguration: () -> Unit,
     modifier: Modifier = Modifier,
     effectiveActiveWorkers: Int? = null,
+    liveSessionProfileId: () -> Int? = { null },
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
@@ -262,6 +263,7 @@ internal fun ConnectionTab(
                 onDelete = onDeleteProfile,
                 onAdd = onAddProfile,
                 effectiveActiveWorkers = effectiveActiveWorkers,
+                liveSessionProfileId = liveSessionProfileId,
             )
         }
     }

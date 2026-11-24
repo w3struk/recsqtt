@@ -70,6 +70,7 @@ internal fun ProfileListSection(
     onAdd: () -> Unit,
     modifier: Modifier = Modifier,
     effectiveActiveWorkers: Int? = null,
+    liveSessionProfileId: () -> Int? = { null },
 ) {
     var deleteTarget by remember { mutableStateOf<ProfileSummary?>(null) }
     val linkedIds = remember(profiles) { profiles.filter { it.hasLink }.map { it.id }.toSet() }
@@ -291,6 +292,7 @@ internal fun ProfileListSection(
 
     deleteTarget?.let { target ->
         val isActive = target.id == activeId
+        val liveSessionId = liveSessionProfileId()
         val fallbackId = if (isActive) {
             ProfileRegistryPolicy.activeAfterDelete(
                 ids = profiles.map { it.id },
@@ -311,6 +313,9 @@ internal fun ProfileListSection(
             text = {
                 Text(
                     when {
+                        !isActive && liveSessionId == target.id ->
+                            "Профиль «${target.name}» будет удалён. Текущее подключение будет пересобрано на активном профиле."
+
                         !isActive ->
                             "Профиль «${target.name}» будет удалён. Текущее подключение не изменится."
 

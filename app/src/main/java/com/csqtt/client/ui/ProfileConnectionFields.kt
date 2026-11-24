@@ -297,7 +297,18 @@ internal fun ProfileConnectionFields(
             OutlinedTextField(
                 value = draft.link,
                 onValueChange = { value -> onLinkEdited(value.filterNot(Char::isWhitespace)) },
-                label = { Text("Ссылка csqtt:// (обязательно)", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },
+                label = if (draft.link.isBlank()) {
+                    {
+                        Text(
+                            "Ссылка csqtt:// (обязательно)",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                } else {
+                    null
+                },
                 placeholder = {
                     Text(
                         "csqtt://connect?v=2&host=ip&peer=порт&password=пароль",
@@ -403,11 +414,6 @@ internal fun ProfileConnectionFields(
                 )
             }
 
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 4.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-            )
-
             val showForgetToken = showForgetTokenAction && onForgetToken != null
             val showCloseVkCalls = showCloseVkCallsAction && onCloseVkCalls != null
             if (showCredentialUi && (hasStoredToken || linkHashes.isEmpty())) {
@@ -419,10 +425,6 @@ internal fun ProfileConnectionFields(
                     enabled = vkTokenActionEnabled,
                     onForgetToken = { showForgetTokenDialog = true },
                     onCloseVkCalls = { showCloseVkCallsDialog = true },
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 4.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                 )
             }
 
@@ -579,11 +581,6 @@ internal fun ProfileConnectionFields(
                 }
             }
 
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 4.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-            )
-
             CompactDropdownSetting(
                 title = "Транспорт",
                 selectedKey = draft.turnTransport,
@@ -608,11 +605,6 @@ internal fun ProfileConnectionFields(
                 onTitleInfo = { showTurnTransportGeneralDialog = true },
                 onInfo = { transport -> showTurnTransportDetailDialog = transport },
                 onSelected = ::requestTurnTransport,
-            )
-
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 4.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
             )
 
             CompactDropdownSetting(

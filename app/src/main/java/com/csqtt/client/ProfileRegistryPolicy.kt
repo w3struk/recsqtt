@@ -136,11 +136,12 @@ internal object ProfileRegistryPolicy {
     ): RegistryMigration {
         val ids = linked.filter { it >= 0 }.distinct().sorted()
         val idSet = ids.toSet()
+        val dropped = (storedIds ?: emptyList()).distinct().filterNot { it in idSet }
         return RegistryMigration(
             ids = ids,
             active = resolveActive(ids = ids, requested = requestedActive, linked = linked),
-            next = nextId(ids = ids, storedNext = storedNext),
-            dropped = (storedIds ?: emptyList()).distinct().filterNot { it in idSet },
+            next = nextId(ids = (ids + dropped).distinct(), storedNext = storedNext),
+            dropped = dropped,
         )
     }
 

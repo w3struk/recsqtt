@@ -524,6 +524,13 @@ internal fun MainScreen(
                                         activeProfile = activeProfile,
                                         profiles = profileSummaries,
                                         effectiveActiveWorkers = effectiveActiveWorkers,
+                                        liveSessionProfileId = {
+                                            if (TunnelManager.wantsTunnel()) {
+                                                TunnelManager.getCurrentParams()?.profile?.takeIf { it >= 0 }
+                                            } else {
+                                                null
+                                            }
+                                        },
                                         onSelectProfile = { id ->
                                             scope.launch {
                                                 try {
