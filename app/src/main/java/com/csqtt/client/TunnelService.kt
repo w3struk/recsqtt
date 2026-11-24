@@ -355,7 +355,6 @@ class TunnelService : Service() {
                     ),
                 )
             }
-            CsqttConstants.General.ACTION_CLOSE_VK_CALLS -> closeVkCalls()
             "RESTORE_NOTIFICATION" -> {
                 if (foregroundStarted && !isStopping) {
                     lastNotificationText = null
@@ -605,47 +604,6 @@ class TunnelService : Service() {
             }
 
             else -> ResolvedVkHashes(fallbackHashes, false)
-        }
-    }
-
-    private fun closeVkCalls() {
-        serviceScope.launch {
-            try {
-                val store = SettingsStore(applicationContext)
-                val profile = TunnelManager.getCurrentParams()?.profile?.takeIf { it >= 0 }
-                    ?: store.profile.activeProfile.first()
-                val token = store.profile.vkAccessToken(profile)
-                val closed = VkAutoCallsManager.closeAll(applicationContext, token, profile)
-                if (closed) {
-                    TunnelManager.updateLog(
-                        "vk_calls_closed",
-                        "[OK] Звонки VK закрыты",
-                        40,
-                        false,
-                    )
-                } else {
-                    TunnelManager.updateLog(
-                        "vk_calls_closed",
-                        "[ERR] Звонки VK не закрыты: нет VK-токена",
-                        90,
-                        true,
-                    )
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e("TunnelService", "Unable to close VK calls", e)
-                TunnelManager.updateLog(
-                    "vk_calls_closed",
-                    "[ERR] Не удалось закрыть звонки VK: ${e.message ?: e.javaClass.simpleName}",
-                    90,
-                    true,
-                )
-            } finally {
-                if (!isStopping && !TunnelManager.running.value && !TunnelManager.starting.value) {
-                    stopSelf()
-                }
-            }
         }
     }
 
@@ -1359,6 +1317,20 @@ class TunnelService : Service() {
         // старт не должен перезаписать новый снимок.
         callRecoveryJob?.cancel()
         val generation = ++startGeneration
+        if (profile < 0) {
+            // Профиля нет: переподключать нечего, туннель должен быть остановлен.
+            // Ветка не читает имя профиля и не пишет profile_switch: «-1» — не профиль.
+            TunnelManager.updateLog(
+                "profile_switch_none",
+                "[ПРОФИЛЬ] Профиль не выбран — туннель будет остановлен",
+                30,
+                false,
+            )
+            serviceScope.launch(Dispatchers.Main) {
+                if (isCurrentStart(generation)) stopTunnel(finishVkCalls = false)
+            }
+            return
+        }
         updateNotification("Подключение...")
         startJob = serviceScope.launch {
             try {

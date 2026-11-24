@@ -15,6 +15,14 @@ class ProfileImportPolicyTest {
     )
 
     @Test
+    fun `empty registry auto-saves the import`() {
+        assertEquals(
+            ExternalImportRoute.AutoSaveStartProfile,
+            ProfileImportPolicy.route(emptyList()),
+        )
+    }
+
+    @Test
     fun `empty profile zero auto-saves the import`() {
         assertEquals(
             ExternalImportRoute.AutoSaveStartProfile,

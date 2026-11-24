@@ -40,11 +40,11 @@ internal val CsqttLightExtendedColors = CsqttExtendedColors(
     onInfo = Color.White,
     infoContainer = Color(0xFFD9E2FF),
     onInfoContainer = Color(0xFF001A43),
-    terminalBackground = Color(0xFF15171B),
-    terminalText = Color(0xFFDDE1E8),
-    terminalMuted = Color(0xFF9DA3AE),
-    terminalError = Color(0xFFFFB4AB),
-    terminalSuccess = Color(0xFF9BD4AF),
+    terminalBackground = Color.Transparent,
+    terminalText = Color(0xFF1E293B),
+    terminalMuted = Color(0xFF64748B),
+    terminalError = Color(0xFFDC2626),
+    terminalSuccess = Color(0xFF15803D),
 )
 
 internal val CsqttDarkExtendedColors = CsqttExtendedColors(
@@ -60,11 +60,11 @@ internal val CsqttDarkExtendedColors = CsqttExtendedColors(
     onInfo = Color(0xFF172E60),
     infoContainer = Color(0xFF304577),
     onInfoContainer = Color(0xFFD9E2FF),
-    terminalBackground = Color(0xFF101216),
-    terminalText = Color(0xFFDDE1E8),
-    terminalMuted = Color(0xFF9DA3AE),
-    terminalError = Color(0xFFFFB4AB),
-    terminalSuccess = Color(0xFF9BD4AF),
+    terminalBackground = Color.Transparent,
+    terminalText = Color(0xFFE2E8F0),
+    terminalMuted = Color(0xFF64748B),
+    terminalError = Color(0xFFF87171),
+    terminalSuccess = Color(0xFF4ADE80),
 )
 
 internal val LocalCsqttExtendedColors = staticCompositionLocalOf { CsqttDarkExtendedColors }

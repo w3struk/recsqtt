@@ -100,11 +100,39 @@ class VkLocalAuthRemovalContractTest {
     }
 
     @Test
-    fun `manual close calls button is gated by the debug policy`() {
-        val connectionTab = readModuleSource("src/main/java/com/csqtt/client/ui/ConnectionTab.kt")
+    fun `manual close calls action lives in the profile editor and is debug-only`() {
+        assertAbsent(
+            "ConnectionTab.kt",
+            readModuleSource("src/main/java/com/csqtt/client/ui/ConnectionTab.kt"),
+            "CloseVkCallsAction",
+            "CloseVkCallsDialog",
+            "closeVkCalls",
+            "ACTION_CLOSE_VK_CALLS",
+            "VkCallCloseUiPolicy",
+        )
+        assertAbsent(
+            "TunnelService.kt",
+            readModuleSource("src/main/java/com/csqtt/client/TunnelService.kt"),
+            "ACTION_CLOSE_VK_CALLS",
+            "closeVkCalls",
+        )
+        assertAbsent(
+            "Constants.kt",
+            readModuleSource("src/main/java/com/csqtt/client/Constants.kt"),
+            "ACTION_CLOSE_VK_CALLS",
+        )
+
+        val fields = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileConnectionFields.kt")
         assertTrue(
-            "ConnectionTab.kt must gate the close-calls action on VkCallCloseUiPolicy",
-            connectionTab.contains("VkCallCloseUiPolicy.isVisible(BuildConfig.DEBUG)"),
+            "ProfileConnectionFields.kt must gate the close-calls action on VkCallCloseUiPolicy",
+            fields.contains("VkCallCloseUiPolicy.closeCallsVisible(BuildConfig.DEBUG)"),
+        )
+        assertTrue("ProfileConnectionFields.kt has no close-calls callback", fields.contains("onCloseVkCalls"))
+
+        val editor = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileEditorScreen.kt")
+        assertTrue(
+            "ProfileEditorScreen.kt must close the edited profile's calls directly",
+            editor.contains("closeAll(context, token, existingId)"),
         )
     }
 }

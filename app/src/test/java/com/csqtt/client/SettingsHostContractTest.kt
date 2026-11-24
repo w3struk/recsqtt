@@ -95,16 +95,17 @@ class SettingsHostContractTest {
     }
 
     @Test
-    fun `profile management lives on the connection header and sheet`() {
-        val header = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileHeaderCard.kt")
-        assertTrue("шапка профиля не использует Tune", header.contains("Icons.Outlined.Tune"))
-        assertTrue("шапка профиля не разносит элементы по краям", header.contains("Arrangement.SpaceBetween"))
-        assertAbsent("ProfileHeaderCard.kt", header, "Edit", "Create")
-
+    fun `profile management lives on the connection tab and inline list`() {
+        assertFalse(
+            "ProfileHeaderCard.kt всё ещё существует",
+            moduleFileExists("src/main/java/com/csqtt/client/ui/ProfileHeaderCard.kt"),
+        )
         val sheet = readModuleSource("src/main/java/com/csqtt/client/ui/ProfileListSheet.kt")
-        assertTrue("список профилей без кнопки добавления", sheet.contains("+ Добавить профиль"))
+        assertTrue("список профилей без кнопки добавления", sheet.contains("Добавить"))
+        assertAbsent("ProfileListSheet.kt", sheet, "Добавить профиль")
         assertTrue("список профилей без удаления", sheet.contains("Icons.Filled.Delete"))
-        assertAbsent("ProfileListSheet.kt", sheet, "Icons.Filled.Edit", "Icons.Outlined.Edit")
+        assertTrue("список профилей не использует Tune", sheet.contains("Icons.Outlined.Tune"))
+        assertAbsent("ProfileListSheet.kt", sheet, "Icons.Filled.Edit", "Icons.Outlined.Edit", "ModalBottomSheet")
     }
 
     @Test

@@ -26,12 +26,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.AltRoute
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.outlined.AltRoute
+import androidx.compose.material.icons.outlined.CallEnd
 import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -41,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +65,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.BuildConfig
@@ -69,6 +75,7 @@ import com.csqtt.client.CsqttConstants
 import com.csqtt.client.ProfileDraft
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelManager
+import com.csqtt.client.VkCallCloseUiPolicy
 import com.csqtt.client.VkCredentialStartPolicy
 import com.csqtt.client.VkCredentialUiPolicy
 import com.csqtt.client.VkHashValidationCodec
@@ -109,6 +116,7 @@ internal fun ProfileConnectionFields(
     onLinkImported: (VkLinkImportPolicy.Decision) -> Unit,
     onHashCheckResultsChange: (String) -> Unit,
     onForgetToken: (() -> Unit)?,
+    onCloseVkCalls: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -118,6 +126,7 @@ internal fun ProfileConnectionFields(
     val tunnelStarting by TunnelManager.starting.collectAsStateWithLifecycle()
     val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
     val vkTokenActionEnabled = !tunnelRunning && !tunnelStarting && !tunnelStopping
+    val isTunnelActive = !vkTokenActionEnabled
     val serverWorkers by TunnelManager.serverAssignedWorkers.collectAsState()
     val effectiveServerWorkers = serverWorkers.takeIf { tunnelRunning && it in 3..100 }
 
@@ -126,6 +135,7 @@ internal fun ProfileConnectionFields(
 
     val showCredentialUi = VkCredentialUiPolicy.statusVisible(BuildConfig.DEBUG)
     val showForgetTokenAction = VkCredentialUiPolicy.forgetTokenVisible(BuildConfig.DEBUG)
+    val showCloseVkCallsAction = VkCallCloseUiPolicy.closeCallsVisible(BuildConfig.DEBUG)
 
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
     var showHashesDialog by rememberSaveable { mutableStateOf(false) }
@@ -138,6 +148,7 @@ internal fun ProfileConnectionFields(
     var showTurnTransportDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
     var showTurnSubnetsDialog by rememberSaveable { mutableStateOf(false) }
     var showForgetTokenDialog by rememberSaveable { mutableStateOf(false) }
+    var showCloseVkCallsDialog by rememberSaveable { mutableStateOf(false) }
     var vkModeBlockedMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var showAutoJsRiskDialog by remember { mutableStateOf(false) }
     var pendingAutoJsSelection by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -274,21 +285,6 @@ internal fun ProfileConnectionFields(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        AppSectionCard {
-            OutlinedTextField(
-                value = draft.name,
-                onValueChange = { onDraftChange(draft.copy(name = it)) },
-                label = { Text("Название профиля", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = CsqttShapes.Control,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                ),
-            )
-        }
-
         AppSectionCard(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -343,7 +339,7 @@ internal fun ProfileConnectionFields(
                                         painter = painterResource(id = R.drawable.ic_qr_scan),
                                         contentDescription = "Сканировать QR-код",
                                         modifier = Modifier.size(18.dp),
-                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        tint = MaterialTheme.colorScheme.primary,
                                     )
                                 }
                                 IconButton(
@@ -354,22 +350,26 @@ internal fun ProfileConnectionFields(
                                         imageVector = Icons.Outlined.ContentPaste,
                                         contentDescription = "Вставить из буфера обмена",
                                         modifier = Modifier.size(18.dp),
-                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        tint = MaterialTheme.colorScheme.primary,
                                     )
                                 }
                             }
                         }
                     } else {
-                        IconButton(
-                            onClick = { onLinkEdited("") },
-                            modifier = Modifier.size(CsqttSizes.MinimumTouchTarget),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Close,
-                                contentDescription = "Очистить ссылку",
-                                modifier = Modifier.size(CsqttSizes.IconMedium),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides Dp.Unspecified) {
+                            IconButton(
+                                onClick = { onLinkEdited("") },
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .size(36.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Очистить ссылку",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 },
@@ -408,13 +408,21 @@ internal fun ProfileConnectionFields(
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
             )
 
+            val showForgetToken = showForgetTokenAction && onForgetToken != null
+            val showCloseVkCalls = showCloseVkCallsAction && onCloseVkCalls != null
             if (showCredentialUi && (hasStoredToken || linkHashes.isEmpty())) {
                 VkTokenStatusRow(
                     hasStoredToken = hasStoredToken,
                     storedUserId = storedUserId,
-                    showAction = showForgetTokenAction && onForgetToken != null,
+                    showForgetToken = showForgetToken,
+                    showCloseVkCalls = showCloseVkCalls,
                     enabled = vkTokenActionEnabled,
                     onForgetToken = { showForgetTokenDialog = true },
+                    onCloseVkCalls = { showCloseVkCallsDialog = true },
+                )
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                 )
             }
 
@@ -805,6 +813,16 @@ internal fun ProfileConnectionFields(
             },
         )
     }
+    if (showCloseVkCallsDialog && onCloseVkCalls != null) {
+        CloseVkCallsDialog(
+            isTunnelActive = isTunnelActive,
+            onDismiss = { showCloseVkCallsDialog = false },
+            onConfirm = {
+                showCloseVkCallsDialog = false
+                onCloseVkCalls.invoke()
+            },
+        )
+    }
 
     vkModeBlockedMessage?.let { message ->
         AlertDialog(
@@ -844,70 +862,222 @@ private fun hashInputErrors(hashes: List<String>): List<String> = buildList {
 private fun VkTokenStatusRow(
     hasStoredToken: Boolean,
     storedUserId: String,
-    showAction: Boolean,
+    showForgetToken: Boolean,
+    showCloseVkCalls: Boolean,
     enabled: Boolean,
     onForgetToken: () -> Unit,
+    onCloseVkCalls: () -> Unit,
 ) {
-    Row(
+    val anyActionVisible = showForgetToken || showCloseVkCalls
+    Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (hasStoredToken) {
-            Icon(
-                Icons.Filled.CheckCircle,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Токен из ссылки", fontWeight = FontWeight.SemiBold)
-                val maskedUserId = VkCredentialStartPolicy.maskedUserId(storedUserId)
-                Text(
-                    text = if (maskedUserId.isNotEmpty()) {
-                        "ID $maskedUserId"
-                    } else {
-                        "ID не указан — владелец звонков определится по отпечатку токена"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (hasStoredToken) {
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
                 )
-                if (showAction && !enabled) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Токен из ссылки", fontWeight = FontWeight.SemiBold)
+                    val maskedUserId = VkCredentialStartPolicy.maskedUserId(storedUserId)
                     Text(
-                        text = "Сначала отключите VPN",
+                        text = if (maskedUserId.isNotEmpty()) {
+                            "ID $maskedUserId"
+                        } else {
+                            "ID не указан — владелец звонков определится по отпечатку токена"
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (anyActionVisible && !enabled) {
+                        Text(
+                            text = "Сначала отключите VPN",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        )
+                    }
+                }
+            } else {
+                Icon(
+                    Icons.Filled.Link,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Токен приходит из ссылки панели", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = "Без него «Авто API» и «Авто ВК» недоступны: импортируйте ссылку csqtt:// заново.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
-            if (showAction) OutlinedButton(
-                onClick = onForgetToken,
-                enabled = enabled,
-                modifier = Modifier.height(36.dp),
-                shape = CsqttShapes.Pill,
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = Color.Transparent,
-                    contentColor = MaterialTheme.colorScheme.error,
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
-                contentPadding = PaddingValues(horizontal = 12.dp),
+        }
+        if (hasStoredToken && anyActionVisible) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Забыть токен", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                if (showCloseVkCalls) {
+                    OutlinedButton(
+                        onClick = onCloseVkCalls,
+                        enabled = enabled,
+                        modifier = Modifier.height(36.dp),
+                        shape = CsqttShapes.Pill,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            disabledContainerColor = Color.Transparent,
+                            disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            if (enabled) {
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                            } else {
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)
+                            },
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.CallEnd,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Закрыть звонки VK", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    }
+                }
+                if (showForgetToken) {
+                    OutlinedButton(
+                        onClick = onForgetToken,
+                        enabled = enabled,
+                        modifier = Modifier.height(36.dp),
+                        shape = CsqttShapes.Pill,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                    ) {
+                        Text("Забыть токен", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    }
+                }
             }
-        } else {
-            Icon(
-                Icons.Filled.Link,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Токен приходит из ссылки панели", fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun CloseVkCallsDialog(
+    isTunnelActive: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            shape = CsqttShapes.Dialog,
+            color = appSectionCardColor(),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            border = BorderStroke(1.dp, appSectionCardBorderColor()),
+            tonalElevation = 0.dp,
+            modifier = Modifier.fillMaxWidth(0.92f),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.CallEnd,
+                        contentDescription = null,
+                        tint = if (isTunnelActive) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Text(
+                        text = "Закрыть звонки VK?",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                    )
+                }
+
                 Text(
-                    text = "Без него «Авто API» и «Авто ВК» недоступны: импортируйте ссылку csqtt:// заново.",
+                    text = if (isTunnelActive) {
+                        "Туннель запущен. Сначала необходимо отключить VPN: завершение звонков во время активного соединения невозможно.\n\nЗвонки будут завершены в VK, а сохранённые ссылки удалены. При следующем запуске потребуется создать новые звонки и решить капчу."
+                    } else {
+                        "Звонки будут завершены в VK, а сохранённые ссылки удалены из памяти приложения. При следующем запуске потребуется создать новые звонки — для этого нужно решить капчу."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 16.sp,
                 )
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = onConfirm,
+                        enabled = !isTunnelActive,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(CsqttSizes.ControlHeight),
+                        shape = CsqttShapes.Pill,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError,
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp, pressedElevation = 0.dp),
+                    ) {
+                        Text(
+                            text = "Закрыть звонки",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(CsqttSizes.ControlHeight),
+                        shape = CsqttShapes.Pill,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                    ) {
+                        Text(
+                            text = "Отмена",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                        )
+                    }
+                }
             }
         }
     }

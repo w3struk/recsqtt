@@ -9,11 +9,21 @@ class TunnelAuthSnapshotTest {
     @Test
     fun `default snapshot is a loading sentinel`() {
         assertFalse(TunnelAuthSnapshot().isLoaded)
+        assertEquals(Int.MIN_VALUE, TunnelAuthSnapshot().profile)
     }
 
     @Test
     fun `profile snapshot is loaded`() {
         assertTrue(TunnelAuthSnapshot(profile = 0).isLoaded)
+    }
+
+    @Test
+    fun `no profile is a loaded snapshot`() {
+        val snapshot = TunnelAuthSnapshot(profile = ProfileRegistryPolicy.NO_PROFILE)
+
+        assertTrue(snapshot.isLoaded)
+        assertFalse(snapshot.profile >= 0)
+        assertEquals(ProfileRegistryPolicy.NO_PROFILE, snapshot.profile)
     }
 
     @Test

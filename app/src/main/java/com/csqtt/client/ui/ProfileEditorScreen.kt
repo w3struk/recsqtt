@@ -1,8 +1,10 @@
 package com.csqtt.client.ui
 
+import android.os.Build
 import android.util.Log
+import android.view.View
+import android.view.Window
 import android.widget.Toast
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,31 +17,49 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowCompat
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.ImportedLinkCredentials
 import com.csqtt.client.ProfileDraft
@@ -77,8 +97,6 @@ internal fun ProfileEditorScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val isNew = target is ProfileEditorTarget.New
-
     var draft by remember(target, prefill) { mutableStateOf<ProfileDraft?>(null) }
     var baseHasToken by remember(target, prefill) { mutableStateOf(false) }
     var storedUserId by remember(target, prefill) { mutableStateOf("") }
@@ -89,6 +107,7 @@ internal fun ProfileEditorScreen(
     var pendingCredentials by remember(target, prefill) { mutableStateOf(prefill?.credentials) }
     var pendingLink by remember(target, prefill) { mutableStateOf(prefill?.link.orEmpty()) }
     var saving by remember { mutableStateOf(false) }
+    var showRenameDialog by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(target, prefill) {
         try {
@@ -112,6 +131,10 @@ internal fun ProfileEditorScreen(
                 }
 
                 is ProfileEditorTarget.Existing -> {
+                    if (target.id < 0) {
+                        onDismiss()
+                        return@LaunchedEffect
+                    }
                     val loaded = settingsStore.profile.draft(target.id)
                     if (loaded == null) {
                         onDismiss()
@@ -242,16 +265,41 @@ internal fun ProfileEditorScreen(
 
     val existingId = (target as? ProfileEditorTarget.Existing)?.id
     val canSave = draft?.let { ProfileEditorPolicy.canSave(it.link) } == true && !saving
-    val title = if (isNew) "Новый профиль" else draft?.name ?: "Профиль"
+    val title = draft?.name?.ifBlank { null } ?: "Профиль"
 
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
             dismissOnBackPress = true,
             dismissOnClickOutside = false,
         ),
     ) {
+        val view = LocalView.current
+        val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+
+        if (!view.isInEditMode) {
+            @Suppress("DEPRECATION")
+            SideEffect {
+                val window = (view.parent as? DialogWindowProvider)?.window
+                    ?: (view as? DialogWindowProvider)?.window
+                    ?: findDialogWindow(view)
+                if (window != null) {
+                    window.statusBarColor = android.graphics.Color.TRANSPARENT
+                    window.navigationBarColor = android.graphics.Color.TRANSPARENT
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        window.isNavigationBarContrastEnforced = false
+                        window.isStatusBarContrastEnforced = false
+                    }
+                    WindowCompat.getInsetsController(window, window.decorView).apply {
+                        isAppearanceLightStatusBars = !isDark
+                        isAppearanceLightNavigationBars = !isDark
+                    }
+                }
+            }
+        }
+
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background,
@@ -279,15 +327,33 @@ internal fun ProfileEditorScreen(
                             tint = MaterialTheme.colorScheme.onSurface,
                         )
                     }
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
+                    Row(
                         modifier = Modifier.weight(1f),
-                    )
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        IconButton(
+                            onClick = { showRenameDialog = true },
+                            enabled = draft != null,
+                            modifier = Modifier.size(36.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Edit,
+                                contentDescription = "Переименовать профиль",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
                     Button(
                         onClick = { save() },
                         enabled = canSave,
@@ -316,8 +382,6 @@ internal fun ProfileEditorScreen(
                         .padding(top = 8.dp, bottom = CsqttSizes.ScreenBottomPadding),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    VpnContinuityPlaque(isNew = isNew)
-
                     val currentDraft = draft
                     if (currentDraft != null) {
                         val linkError = currentDraft.link.isNotBlank() &&
@@ -400,6 +464,43 @@ internal fun ProfileEditorScreen(
                                     }
                                 }
                             },
+                            onCloseVkCalls = if (existingId != null && baseHasToken) {
+                                {
+                                    scope.launch {
+                                        try {
+                                            val token = settingsStore.profile.vkAccessToken(existingId)
+                                            val closed = VkAutoCallsManager.closeAll(context, token, existingId)
+                                            if (closed) {
+                                                TunnelManager.updateLog(
+                                                    "vk_calls_closed",
+                                                    "[OK] Звонки VK закрыты",
+                                                    40,
+                                                    false,
+                                                )
+                                                context.showRaisedToast("Звонки VK закрыты", Toast.LENGTH_SHORT)
+                                            } else {
+                                                TunnelManager.updateLog(
+                                                    "vk_calls_closed",
+                                                    "[ERR] Звонки VK не закрыты: нет VK-токена",
+                                                    90,
+                                                    true,
+                                                )
+                                                context.showRaisedToast("Не удалось закрыть звонки VK", Toast.LENGTH_SHORT)
+                                            }
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            TunnelManager.updateLog(
+                                                "vk_calls_close_error",
+                                                "[ERR] Не удалось закрыть звонки VK: ${e.message ?: e.javaClass.simpleName}",
+                                                90,
+                                                true,
+                                            )
+                                            context.showRaisedToast("Не удалось закрыть звонки VK", Toast.LENGTH_SHORT)
+                                        }
+                                    }
+                                }
+                            } else null,
                         )
                     } else {
                         Text(
@@ -411,29 +512,123 @@ internal fun ProfileEditorScreen(
                 }
             }
         }
+
+        if (showRenameDialog) {
+            val currentDraft = draft
+            if (currentDraft != null) {
+                RenameProfileDialog(
+                    currentName = currentDraft.name,
+                    onDismiss = { showRenameDialog = false },
+                    onConfirm = { newName ->
+                        val trimmed = newName.trim()
+                        val finalName = if (trimmed.isBlank()) {
+                            ProfileEditorPolicy.defaultName(currentDraft.id)
+                        } else {
+                            trimmed
+                        }
+                        draft = currentDraft.copy(name = finalName)
+                        showRenameDialog = false
+                    },
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun VpnContinuityPlaque(isNew: Boolean) {
-    Surface(
-        shape = CsqttShapes.Card,
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(
-            1.dp,
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
-        ),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text(
-            text = if (isNew) {
-                "Текущий туннель работает без разрыва до сохранения. После сохранения профиль станет активным, и туннель переподключится."
-            } else {
-                "Текущий туннель работает без разрыва до сохранения. После сохранения изменения применятся, и туннель переподключится."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-        )
+private fun RenameProfileDialog(
+    currentName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var nameText by rememberSaveable { mutableStateOf(currentName) }
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
     }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Переименовать профиль",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = nameText,
+                    onValueChange = { nameText = it },
+                    label = {
+                        Text(
+                            "Название профиля",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    supportingText = {
+                        Text("Имя профиля отображается в списке и используется в журнале соединений.")
+                    },
+                    trailingIcon = if (nameText.isNotEmpty()) {
+                        {
+                            IconButton(
+                                onClick = { nameText = "" },
+                                modifier = Modifier.size(36.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Close,
+                                    contentDescription = "Очистить",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    } else null,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { onConfirm(nameText) }),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester),
+                    shape = CsqttShapes.Control,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                    ),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(nameText) },
+            ) {
+                Text(
+                    text = "Сохранить",
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+            ) {
+                Text("Отмена")
+            }
+        },
+    )
+}
+
+private tailrec fun findDialogWindow(view: View): Window? {
+    if (view is DialogWindowProvider) return view.window
+    val parent = view.parent
+    return if (parent is View) findDialogWindow(parent) else null
 }

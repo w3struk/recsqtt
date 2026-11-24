@@ -6,25 +6,36 @@ package com.csqtt.client
  * Здесь нет DataStore, Android или Compose: только список ID, активный профиль и
  * множество профилей с непустой ссылкой. Хранилище и UI обязаны принимать те же
  * решения, поэтому все пограничные случаи закреплены JVM-тестами.
+ *
+ * Реестр может быть пустым: профиль не создаётся «на всякий случай», и пустой
+ * список — законное состояние после удаления последнего профиля.
  */
 internal object ProfileRegistryPolicy {
     const val DEFAULT_PROFILE_ID = 0
-    const val DEFAULT_NEXT_ID = 1
+
+    /** Профиля нет: реестр пуст или активный профиль не выбран. */
+    const val NO_PROFILE = -1
 
     /**
-     * Разбирает сохранённый `profile_ids`. Возвращает `null`, если строки нет
-     * или в ней не осталось ни одного корректного ID: вызывающий тогда
-     * переходит к обнаружению по данным.
+     * Разбирает сохранённый `profile_ids`.
+     *
+     * * `null` — ключа нет: реестр ещё не мигрирован, список нужно обнаружить.
+     * * пустая/пробельная строка — реестр мигрирован, но пуст.
+     * * только мусор (`abc`, отрицательные) — некорректно, нужно обнаружение.
+     * * смесь мусора и ID — валидные ID в порядке хранения.
      */
     fun parseIds(raw: String?): List<Int>? {
-        if (raw.isNullOrBlank()) return null
+        if (raw == null) return null
         val ids = LinkedHashSet<Int>()
         for (part in raw.split(',')) {
-            val id = part.trim().toIntOrNull() ?: continue
+            val token = part.trim()
+            if (token.isEmpty()) continue
+            val id = token.toIntOrNull() ?: continue
             if (id < 0) continue
             ids += id
         }
-        return ids.takeIf { it.isNotEmpty() }?.toList()
+        if (ids.isNotEmpty()) return ids.toList()
+        return if (raw.isBlank()) emptyList() else null
     }
 
     fun formatIds(ids: List<Int>): String = ids.joinToString(",")
@@ -53,41 +64,43 @@ internal object ProfileRegistryPolicy {
     }
 
     /**
-     * Список профилей при первом запуске новой версии: стартовый 0, активный
-     * профиль (даже без ссылки, чтобы его можно было удалить) и все профили со
-     * ссылкой. Порядок — по возрастанию ID.
+     * Профили для ещё не мигрированного реестра: ровно те, у которых есть
+     * непустая ссылка. Стартовый профиль 0 и активный ID не выдумываются —
+     * пустой список здесь нормален. Порядок — по возрастанию ID.
      */
-    fun discover(active: Int?, linked: Set<Int>): List<Int> {
-        val ids = sortedSetOf(DEFAULT_PROFILE_ID)
-        if (active != null && active >= 0) ids += active
-        ids += linked.filter { it >= 0 }
-        return ids.toList()
+    @Suppress("UNUSED_PARAMETER")
+    fun discover(active: Int?, linked: Set<Int>): List<Int> =
+        linked.filter { it >= 0 }.distinct().sorted()
+
+    /**
+     * Активный профиль не может быть несуществующим: пустой реестр даёт
+     * [NO_PROFILE]. Сохранённый ID остаётся активным, даже если у профиля нет
+     * ссылки; иначе выбирается первый профиль со ссылкой, затем просто первый.
+     */
+    fun resolveActive(ids: List<Int>, requested: Int, linked: Set<Int>): Int {
+        if (ids.isEmpty()) return NO_PROFILE
+        if (requested in ids) return requested
+        return ids.firstOrNull { it in linked } ?: ids.first()
     }
 
     /**
-     * Активный профиль не может быть несуществующим. Если сохранённый ID есть в
-     * списке, он остаётся активным; профиль 0 разрешён без ссылки как стартовое
-     * состояние. Для остальных без ссылки выбирается первый профиль со ссылкой.
+     * Следующий ID не переиспользует удалённые и не отстаёт от списка.
+     * Пустой реестр начинает с 0; монотонный счётчик переживает удаление всех
+     * профилей.
      */
-    fun resolveActive(ids: List<Int>, requested: Int, linked: Set<Int>): Int {
-        if (requested !in ids) return ids.firstOrNull() ?: DEFAULT_PROFILE_ID
-        if (requested == DEFAULT_PROFILE_ID || requested in linked) return requested
-        return ids.firstOrNull { it in linked } ?: requested
-    }
+    fun nextId(ids: List<Int>, storedNext: Int?): Int = maxOf(
+        storedNext?.takeIf { it >= 0 } ?: 0,
+        (ids.maxOrNull() ?: -1) + 1,
+        0,
+    )
 
-    /** Следующий ID не переиспользует удалённые и не отстаёт от списка. */
-    fun nextId(ids: List<Int>, storedNext: Int?): Int {
-        val fromStorage = storedNext?.takeIf { it > 0 } ?: DEFAULT_NEXT_ID
-        val fromList = (ids.maxOrNull() ?: -1) + 1
-        return maxOf(fromStorage, fromList, DEFAULT_NEXT_ID)
-    }
-
-    fun canDelete(ids: List<Int>, id: Int): Boolean = ids.size > 1 && id in ids
+    /** Удалить можно любой профиль, включая последний. */
+    fun canDelete(ids: List<Int>, id: Int): Boolean = id in ids
 
     /**
      * Кого сделать активным после удаления. Если удалён неактивный профиль,
      * активный не меняется. Иначе берётся первый оставшийся со ссылкой, затем
-     * просто первый оставшийся.
+     * просто первый оставшийся; пустой реестр даёт [NO_PROFILE].
      */
     fun activeAfterDelete(
         ids: List<Int>,
@@ -96,10 +109,39 @@ internal object ProfileRegistryPolicy {
         linked: Set<Int>,
     ): Int {
         val remaining = ids.filterNot { it == deleted }
+        if (remaining.isEmpty()) return NO_PROFILE
         if (active in remaining) return active
-        return remaining.firstOrNull { it in linked }
-            ?: remaining.firstOrNull()
-            ?: DEFAULT_PROFILE_ID
+        return remaining.firstOrNull { it in linked } ?: remaining.first()
+    }
+
+    /** Итог миграции реестра из обнаруженного состояния в явный `profile_ids`. */
+    data class RegistryMigration(
+        val ids: List<Int>,
+        val active: Int,
+        val next: Int,
+        val dropped: List<Int>,
+    )
+
+    /**
+     * Чистая миграция в схему реестра v2. Новый список — ровно профили со
+     * ссылкой: неlinked-профили, включая стартовый 0, отбрасываются, и их ID
+     * попадают в [RegistryMigration.dropped]. Активный профиль разрешается теми
+     * же правилами, что и в [resolveActive]; `next` — правилом [nextId].
+     */
+    fun migrateRegistry(
+        storedIds: List<Int>?,
+        linked: Set<Int>,
+        requestedActive: Int,
+        storedNext: Int?,
+    ): RegistryMigration {
+        val ids = linked.filter { it >= 0 }.distinct().sorted()
+        val idSet = ids.toSet()
+        return RegistryMigration(
+            ids = ids,
+            active = resolveActive(ids = ids, requested = requestedActive, linked = linked),
+            next = nextId(ids = ids, storedNext = storedNext),
+            dropped = (storedIds ?: emptyList()).distinct().filterNot { it in idSet },
+        )
     }
 
     fun summaryText(

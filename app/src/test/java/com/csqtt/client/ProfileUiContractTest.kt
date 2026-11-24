@@ -17,35 +17,58 @@ class ProfileUiContractTest {
         listOf(File("app/$relativePath"), File(relativePath)).any(File::isFile)
 
     @Test
-    fun `profile header is below the connection panel with tune on the right`() {
-        val connection = source("src/main/java/com/csqtt/client/ui/ConnectionTab.kt")
-        assertTrue(
-            "ProfileHeaderCard должен идти после TunnelConnectionPanel",
-            connection.indexOf("TunnelConnectionPanel(") < connection.indexOf("ProfileHeaderCard("),
+    fun `profile header is gone and profile list is rendered inline inside connection tab`() {
+        assertFalse(
+            "ProfileHeaderCard.kt не должен существовать",
+            exists("src/main/java/com/csqtt/client/ui/ProfileHeaderCard.kt"),
         )
-        val header = source("src/main/java/com/csqtt/client/ui/ProfileHeaderCard.kt")
-        assertTrue("нет Tune", header.contains("Icons.Outlined.Tune"))
-        assertTrue("нет раскладки по краям", header.contains("Arrangement.SpaceBetween"))
-        assertTrue("пилюля не ограничивает длинное имя", header.contains("weight(1f, fill = false)"))
-        assertTrue("нет обводки пилюли", header.contains("BorderStroke(1.dp"))
-        assertTrue("нет тональной кнопки Tune", header.contains("FilledTonalIconButton"))
-        assertTrue("пилюля не использует Surface(onClick)", header.contains("Surface(") && header.contains("onClick = onOpenProfiles"))
-        assertFalse("в шапке остался карандаш", header.contains("Edit"))
+        val connection = source("src/main/java/com/csqtt/client/ui/ConnectionTab.kt")
+        assertFalse(
+            "ConnectionTab не должен содержать ProfileHeaderCard",
+            connection.contains("ProfileHeaderCard"),
+        )
+        assertTrue(
+            "список профилей должен идти после TunnelConnectionPanel",
+            connection.indexOf("TunnelConnectionPanel(") < connection.indexOf("ProfileListSection("),
+        )
     }
 
     @Test
-    fun `profile sheet has no rename and keeps add and delete`() {
+    fun `profile list is inline with tune before delete and handles empty state`() {
         val sheet = source("src/main/java/com/csqtt/client/ui/ProfileListSheet.kt")
-        assertTrue("нет удаления", sheet.contains("Icons.Filled.Delete"))
-        assertTrue("нет добавления", sheet.contains("+ Добавить профиль"))
-        assertTrue("список не ограничен по высоте", sheet.contains("weight(1f, fill = false)"))
+        assertFalse("лист не должен быть ModalBottomSheet", sheet.contains("ModalBottomSheet"))
+        assertFalse("в инлайн-списке не должно быть кнопки закрытия", sheet.contains("Icons.Filled.Close"))
+        assertFalse("вернулось переименование", sheet.contains("Icons.Filled.Edit"))
+        assertFalse("вернулось переименование", sheet.contains("Icons.Outlined.Edit"))
+
+        assertTrue("нет заголовка списка", sheet.contains("Профили подключения"))
+        assertTrue("нет добавления", sheet.contains("Добавить"))
+        assertFalse("старый текст кнопки остался", sheet.contains("Добавить профиль"))
+        assertFalse("бейдж АКТИВЕН не должен присутствовать", sheet.contains("АКТИВЕН"))
         assertTrue("строки списка не оформлены карточкой", sheet.contains("Surface("))
         assertTrue("нет selectable на строке", sheet.contains("selectable("))
         assertTrue("RadioButton сохранил второй клик", sheet.contains("RadioButton(") && sheet.contains("onClick = null"))
-        assertTrue("нет заголовка списка", sheet.contains("Профили подключения"))
-        assertTrue("нет кнопки закрытия", sheet.contains("Icons.Filled.Close"))
-        assertFalse("вернулось переименование", sheet.contains("Icons.Filled.Edit"))
-        assertFalse("вернулось переименование", sheet.contains("Icons.Outlined.Edit"))
+
+        val tuneIndex = sheet.indexOf("Icons.Outlined.Tune")
+        val deleteIndex = sheet.indexOf("Icons.Filled.Delete")
+        assertTrue("нет иконки Tune", tuneIndex >= 0)
+        assertTrue("нет иконки Delete", deleteIndex >= 0)
+        assertTrue("Tune должен быть расположен в коде до Delete", tuneIndex < deleteIndex)
+
+        val tuneBlock = sheet.substring(tuneIndex, deleteIndex)
+        assertFalse("кнопка Tune не должна содержать BorderStroke", tuneBlock.contains("BorderStroke"))
+
+        assertTrue("нет плейсхолдера пустого состояния", sheet.contains("Пока нет профилей"))
+
+        val connection = source("src/main/java/com/csqtt/client/ui/ConnectionTab.kt")
+        assertTrue(
+            "ConnectionTab не содержит подсказки для пустого состояния",
+            connection.contains("Добавьте профиль, чтобы подключиться"),
+        )
+        assertTrue(
+            "ConnectionTab не содержит честного a11y-описания отключенного логотипа",
+            connection.contains("VPN отключён: нет профиля"),
+        )
     }
 
     @Test
@@ -54,9 +77,10 @@ class ProfileUiContractTest {
         listOf(
             "DialogProperties(",
             "usePlatformDefaultWidth = false",
-            "Новый профиль",
             "Icons.AutoMirrored.Filled.ArrowBack",
             "Назад",
+            "Icons.Rounded.Edit",
+            "Переименовать профиль",
             "ProfileEditorPolicy.canSave",
             "addProfile(",
             "saveProfileDraft(",
@@ -65,11 +89,19 @@ class ProfileUiContractTest {
             "credentialsChanged = pendingCredentials != null",
             "catch (e: IOException)",
             "prefill?.credentials?.userId.orEmpty()",
-            "Текущий туннель работает без разрыва до сохранения",
         ).forEach { token ->
             assertTrue("в редакторе нет `$token`", editor.contains(token))
         }
         assertFalse("автосохранение вернулось", editor.contains("delay(300)"))
+        assertFalse("плашка VpnContinuityPlaque не должна быть в редакторе", editor.contains("VpnContinuityPlaque"))
+        assertFalse(
+            "текст плашки остался в редакторе",
+            editor.contains("Текущий туннель работает без разрыва до сохранения"),
+        )
+        assertFalse(
+            "заголовок не должен быть захардкожен как Новый профиль",
+            editor.contains("\"Новый профиль\""),
+        )
     }
 
     @Test
@@ -80,6 +112,7 @@ class ProfileUiContractTest {
         assertTrue("нет разделителей секции", fields.contains("HorizontalDivider"))
         assertTrue("поле ссылки без пометки обязательности", fields.contains("(обязательно)"))
         assertTrue("trailing actions не компактные", fields.contains("LocalMinimumInteractiveComponentSize"))
+        assertFalse("поле названия профиля должно быть удалено из полей соединения", fields.contains("Название профиля"))
     }
 
     @Test

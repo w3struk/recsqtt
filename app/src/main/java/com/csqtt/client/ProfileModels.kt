@@ -3,15 +3,20 @@ package com.csqtt.client
 /**
  * Снимок участия профиля в VK-авторизации.
  *
- * `profile >= 0` означает, что значение уже прочитано; `-1` — загрузочный
- * сентинел, по которому UI отличает «ещё не знаем» от профиля 0.
+ * [NOT_LOADED_PROFILE] — «ещё не прочитано». Любое прочитанное значение, включая
+ * [ProfileRegistryPolicy.NO_PROFILE] (`-1`), означает загруженный снимок; `-1`
+ * говорит, что профиля нет, а не что данные не пришли.
  */
 internal data class TunnelAuthSnapshot(
-    val profile: Int = -1,
+    val profile: Int = NOT_LOADED_PROFILE,
     val csqttLink: String = "",
 ) {
     val isLoaded: Boolean
-        get() = profile >= 0
+        get() = profile != NOT_LOADED_PROFILE
+
+    companion object {
+        const val NOT_LOADED_PROFILE = Int.MIN_VALUE
+    }
 }
 
 /**

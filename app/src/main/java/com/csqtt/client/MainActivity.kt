@@ -68,7 +68,6 @@ import com.csqtt.client.ui.ConnectionTab
 import com.csqtt.client.ui.GeneralSettingsTab
 import com.csqtt.client.ui.LogsTab
 import com.csqtt.client.ui.ProfileEditorScreen
-import com.csqtt.client.ui.ProfileListSheet
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.ui.design.CsqttMotion
 import com.csqtt.client.ui.design.CsqttShapes
@@ -319,7 +318,9 @@ internal fun MainScreen(
     val context = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
-    val activeProfile by settingsStore.profile.activeProfile.collectAsStateWithLifecycle(initialValue = 0)
+    val activeProfile by settingsStore.profile.activeProfile.collectAsStateWithLifecycle(
+        initialValue = ProfileRegistryPolicy.NO_PROFILE,
+    )
     val profileSummaries by settingsStore.profile.profiles.collectAsStateWithLifecycle(
         initialValue = emptyList<ProfileSummary>(),
     )
@@ -341,7 +342,6 @@ internal fun MainScreen(
         initialValue = SettingsStore.cachedIsWhitelist ?: false
     )
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var showProfileSheet by rememberSaveable { mutableStateOf(false) }
     var editorOpen by rememberSaveable { mutableStateOf(false) }
     var editorIsNew by rememberSaveable { mutableStateOf(false) }
     var openEditorId by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -386,7 +386,6 @@ internal fun MainScreen(
         if (pendingExternalImport != null) {
             // Внешний импорт важнее открытого листа/редактора: незаписанное
             // состояние отбрасывается, показываем новый профиль с префиллом.
-            showProfileSheet = false
             editorOpen = true
             editorIsNew = true
             openEditorId = null
@@ -396,7 +395,8 @@ internal fun MainScreen(
     val editorTarget: ProfileEditorTarget? = when {
         pendingExternalImport != null -> ProfileEditorTarget.New
         editorOpen && editorIsNew -> ProfileEditorTarget.New
-        editorOpen && openEditorId != null -> ProfileEditorTarget.Existing(openEditorId!!)
+        editorOpen && (openEditorId ?: -1) >= 0 -> ProfileEditorTarget.Existing(openEditorId!!)
+        editorOpen -> ProfileEditorTarget.New
         else -> null
     }
 
@@ -523,16 +523,78 @@ internal fun MainScreen(
                                         tunnelAuthSettings = tunnelAuthSettings,
                                         activeProfile = activeProfile,
                                         profiles = profileSummaries,
-                                        onOpenProfiles = { showProfileSheet = true },
-                                        onOpenProfileEditor = {
+                                        effectiveActiveWorkers = effectiveActiveWorkers,
+                                        onSelectProfile = { id ->
+                                            scope.launch {
+                                                try {
+                                                    settingsStore.profile.saveActiveProfile(id)
+                                                } catch (e: CancellationException) {
+                                                    throw e
+                                                } catch (e: IOException) {
+                                                    context.showRaisedToast(
+                                                        "Не удалось переключить профиль: ошибка хранилища",
+                                                        Toast.LENGTH_LONG,
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onEditProfile = { id ->
                                             editorOpen = true
                                             editorIsNew = false
-                                            openEditorId = activeProfile
+                                            openEditorId = id
+                                        },
+                                        onDeleteProfile = { id ->
+                                            scope.launch {
+                                                // Звонки закрываются до удаления: deleteProfile чистит их реестр.
+                                                val token = runCatching { settingsStore.profile.vkAccessToken(id) }
+                                                    .getOrDefault("")
+                                                if (token.isNotBlank()) {
+                                                    runCatching { VkAutoCallsManager.closeAll(context, token, id) }
+                                                }
+                                                val sessionProfile = TunnelManager.getCurrentParams()?.profile
+                                                val deleted = try {
+                                                    settingsStore.profile.deleteProfile(id)
+                                                } catch (e: CancellationException) {
+                                                    throw e
+                                                } catch (e: IOException) {
+                                                    context.showRaisedToast(
+                                                        "Не удалось удалить профиль: ошибка хранилища",
+                                                        Toast.LENGTH_LONG,
+                                                    )
+                                                    false
+                                                }
+                                                // Удалили профиль живой сессии, когда активен уже другой:
+                                                // наблюдатель смены active_profile молчит, и туннель остался бы
+                                                // с мёртвыми хешами. Пересобираем его на активном профиле.
+                                                if (
+                                                    deleted &&
+                                                    sessionProfile == id &&
+                                                    id != activeProfile &&
+                                                    activeProfile >= 0 &&
+                                                    TunnelManager.wantsTunnel()
+                                                ) {
+                                                    context.startService(
+                                                        Intent(context, TunnelService::class.java).apply {
+                                                            action = CsqttConstants.General.ACTION_RECONNECT_ACTIVE_PROFILE
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onAddProfile = {
+                                            editorOpen = true
+                                            editorIsNew = true
+                                            openEditorId = null
                                         },
                                         onInvalidConfiguration = {
                                             editorOpen = true
-                                            editorIsNew = false
-                                            openEditorId = activeProfile
+                                            if (activeProfile >= 0) {
+                                                editorIsNew = false
+                                                openEditorId = activeProfile
+                                            } else {
+                                                editorIsNew = true
+                                                openEditorId = null
+                                            }
                                         },
                                     )
                                 } else {
@@ -583,73 +645,6 @@ internal fun MainScreen(
                     )
                 }
             }
-    }
-
-    if (showProfileSheet) {
-        ProfileListSheet(
-            profiles = profileSummaries,
-            activeId = activeProfile,
-            onSelect = { id ->
-                showProfileSheet = false
-                scope.launch {
-                    try {
-                        settingsStore.profile.saveActiveProfile(id)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: IOException) {
-                        context.showRaisedToast(
-                            "Не удалось переключить профиль: ошибка хранилища",
-                            Toast.LENGTH_LONG,
-                        )
-                    }
-                }
-            },
-            onDelete = { id ->
-                scope.launch {
-                    // Звонки закрываются до удаления: deleteProfile чистит их реестр.
-                    val token = runCatching { settingsStore.profile.vkAccessToken(id) }
-                        .getOrDefault("")
-                    if (token.isNotBlank()) {
-                        runCatching { VkAutoCallsManager.closeAll(context, token, id) }
-                    }
-                    val sessionProfile = TunnelManager.getCurrentParams()?.profile
-                    val deleted = try {
-                        settingsStore.profile.deleteProfile(id)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: IOException) {
-                        context.showRaisedToast(
-                            "Не удалось удалить профиль: ошибка хранилища",
-                            Toast.LENGTH_LONG,
-                        )
-                        false
-                    }
-                    // Удалили профиль живой сессии, когда активен уже другой:
-                    // наблюдатель смены active_profile молчит, и туннель остался бы
-                    // с мёртвыми хешами. Пересобираем его на активном профиле.
-                    if (
-                        deleted &&
-                        sessionProfile == id &&
-                        id != activeProfile &&
-                        TunnelManager.wantsTunnel()
-                    ) {
-                        context.startService(
-                            Intent(context, TunnelService::class.java).apply {
-                                action = CsqttConstants.General.ACTION_RECONNECT_ACTIVE_PROFILE
-                            }
-                        )
-                    }
-                }
-            },
-            onAdd = {
-                showProfileSheet = false
-                editorOpen = true
-                editorIsNew = true
-                openEditorId = null
-            },
-            onDismiss = { showProfileSheet = false },
-            effectiveActiveWorkers = effectiveActiveWorkers,
-        )
     }
 
     editorTarget?.let { target ->

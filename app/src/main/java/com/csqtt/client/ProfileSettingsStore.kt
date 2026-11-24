@@ -30,10 +30,11 @@ private fun <T> Flow<T>.onIo(): Flow<T> = flowOn(Dispatchers.IO)
  * для шифрованного хранилища секретов и реестра звонков.
  *
  * Реестр профилей — `profile_ids` (упорядоченный список ID строкой) и
- * монотонный `next_profile_id`. Пока `profile_ids` не записан, список
- * вычисляется по данным: профиль 0, `active_profile` и все ID с непустой
- * ссылкой `csqtt_link` — поэтому ранний автостарт сервиса видит настроенные
- * профили ещё до миграции.
+ * монотонный `next_profile_id`. Реестр может быть пустым: пустая строка
+ * `profile_ids` — это мигрированное пустое состояние, а отсутствие ключа —
+ * ещё не мигрированное, и тогда ID обнаруживаются по непустым ссылкам.
+ * Схема реестра — `profile_registry_schema`; её отсутствие читается как v1,
+ * целевая версия — 2.
  *
  * Все сеттеры принимают явный `profile: Int` и игнорируют ID, которого нет в
  * реестре: запись после удаления не должна воскрешать ключи.
@@ -45,9 +46,12 @@ class ProfileSettingsStore internal constructor(
     companion object {
         private const val TAG = "ProfileSettingsStore"
 
+        private const val REGISTRY_SCHEMA_V2 = 2
+
         private val ACTIVE_PROFILE = intPreferencesKey("active_profile")
         private val PROFILE_IDS = stringPreferencesKey("profile_ids")
         private val NEXT_PROFILE_ID = intPreferencesKey("next_profile_id")
+        private val PROFILE_REGISTRY_SCHEMA = intPreferencesKey("profile_registry_schema")
 
         private val PROFILE_NAME = stringPreferencesKey("profile_name")
         private val CSQTT_LINK = stringPreferencesKey("csqtt_link")
@@ -141,13 +145,14 @@ class ProfileSettingsStore internal constructor(
     // --- Реестр профилей: чистые helpers над одним снимком Preferences ---
 
     /**
-     * Список профилей из `profile_ids`; при отсутствии или мусоре — вычисление
-     * по данным. Чистая функция: не открывает транзакций и не читает поток.
+     * Список профилей из `profile_ids`. Пустая строка — мигрированный пустой
+     * реестр; отсутствие ключа — обнаружение по непустым ссылкам. Чистая
+     * функция: не открывает транзакций и не читает поток.
      */
     internal fun profileIdsOf(prefs: Preferences): List<Int> {
         ProfileRegistryPolicy.parseIds(prefs[PROFILE_IDS])?.let { return it }
         return ProfileRegistryPolicy.discover(
-            active = prefs[ACTIVE_PROFILE],
+            active = null,
             linked = linkedIdsOf(prefs),
         )
     }
@@ -155,7 +160,7 @@ class ProfileSettingsStore internal constructor(
     /** Активный профиль, разрешённый относительно реестра и наличия ссылок. */
     internal fun activeProfileOf(prefs: Preferences): Int = ProfileRegistryPolicy.resolveActive(
         ids = profileIdsOf(prefs),
-        requested = prefs[ACTIVE_PROFILE] ?: ProfileRegistryPolicy.DEFAULT_PROFILE_ID,
+        requested = prefs[ACTIVE_PROFILE] ?: ProfileRegistryPolicy.NO_PROFILE,
         linked = linkedIdsOf(prefs),
     )
 
@@ -174,6 +179,32 @@ class ProfileSettingsStore internal constructor(
         for ((key, value) in prefs.asMap()) {
             if (value is String) put(key.name, value)
         }
+    }
+
+    /**
+     * ID профилей, у которых в хранилище остались любые профильные ключи:
+     * базовое имя — профиль 0, `<имя>_<N>` — профиль N. Нужен миграции, чтобы
+     * вычистить осиротевшие ключи и при отсутствии `profile_ids`: иначе новый
+     * профиль с переиспользованным ID унаследует старый токен и настройки.
+     */
+    private fun profileIdsInStorage(prefs: Preferences): Set<Int> {
+        val baseNames = PROFILE_STRING_KEYS.map { it.name }.toSet() +
+            PROFILE_INT_KEYS.map { it.name }
+        val ids = LinkedHashSet<Int>()
+        for (name in prefs.asMap().keys.map { it.name }) {
+            if (name in baseNames) {
+                ids += 0
+                continue
+            }
+            for (base in baseNames) {
+                val prefix = "${base}_"
+                if (!name.startsWith(prefix)) continue
+                val id = name.substring(prefix.length).toIntOrNull() ?: continue
+                if (id >= 0) ids += id
+                break
+            }
+        }
+        return ids
     }
 
     // --- Flow'ы: профиль всегда берётся из того же снимка prefs ---
@@ -555,23 +586,51 @@ class ProfileSettingsStore internal constructor(
     }
 
     /**
-     * Внешний импорт в пустой стартовый профиль 0 (design §4.5): ссылка, креды
-     * и `active_profile = 0` в одной транзакции. Возвращает `false`, если
-     * ссылка невалидна, профиля 0 нет в реестре или он уже заполнен — тогда
-     * вызывающий открывает редактор нового профиля.
+     * Внешний импорт без открытого редактора (design §4.5).
+     *
+     * Пустой реестр получает новый профиль: ID берётся из `nextProfileIdOf`
+     * (0 на чистой установке, монотонный счётчик после удаления всех), ID
+     * дописывается в `profile_ids`, ссылка/креды/режимы пишутся вместе с
+     * `active_profile` в одной транзакции.
+     *
+     * Если реестр не пуст, импорт возможен только в свободный профиль 0;
+     * заполненный 0 или реестр без 0 возвращают `false` — вызывающий открывает
+     * редактор нового профиля. Возвращает `false` и для невалидной ссылки.
      */
     suspend fun importExternalLinkIntoStartProfile(raw: String): Boolean {
         val decision = VkLinkImportPolicy.decide(raw) ?: return false
         var written = false
+        var allocatedId: Int? = null
         dataStore.edit { prefs ->
+            val ids = profileIdsOf(prefs)
+            if (ids.isEmpty()) {
+                val id = nextProfileIdOf(prefs)
+                // Переиспользованный ID не должен унаследовать старые ключи и токен.
+                // Чистим до записи ссылки, иначе удалим только что импортированное.
+                removeProfileKeys(prefs, id)
+                prefs[PROFILE_IDS] = ProfileRegistryPolicy.formatIds(ids + id)
+                prefs[NEXT_PROFILE_ID] = id + 1
+                applyLinkDecision(prefs, decision, id)
+                applyImportedLinkModes(prefs, id, decision)
+                prefs[ACTIVE_PROFILE] = id
+                allocatedId = id
+                written = true
+                return@edit
+            }
             val startId = ProfileRegistryPolicy.DEFAULT_PROFILE_ID
-            if (startId !in profileIdsOf(prefs)) return@edit
+            if (startId !in ids) return@edit
             val currentLink = prefs[getProfileKey(CSQTT_LINK, startId)] ?: ""
             if (currentLink.isNotBlank()) return@edit
             applyLinkDecision(prefs, decision, startId)
             applyImportedLinkModes(prefs, startId, decision)
             prefs[ACTIVE_PROFILE] = startId
             written = true
+        }
+        allocatedId?.let { id ->
+            runCatching { vkCalls.clear(id) }
+                .onFailure {
+                    Log.w(TAG, "Не удалось очистить реестр звонков профиля $id", it)
+                }
         }
         return written
     }
@@ -593,14 +652,29 @@ class ProfileSettingsStore internal constructor(
         dataStore.edit { prefs ->
             val ids = profileIdsOf(prefs)
             val id = nextProfileIdOf(prefs)
+            // ID может быть переиспользован после удаления: старые ключи, включая
+            // сохранённый токен, обязаны исчезнуть до записи нового профиля.
+            removeProfileKeys(prefs, id)
             prefs[PROFILE_IDS] = ProfileRegistryPolicy.formatIds(ids + id)
             prefs[NEXT_PROFILE_ID] = id + 1
             prefs[ACTIVE_PROFILE] = id
             val hasToken = decision.token.isNotEmpty() ||
                 !imported?.token.isNullOrEmpty()
             writeProfileFields(prefs, id, draft, decision, hasToken)
-            writeImportedCredentials(prefs, id, decision, imported)
+            writeImportedCredentials(
+                prefs,
+                id,
+                decision,
+                imported,
+                clearCredentialsWhenAbsent = true,
+            )
             newId = id
+        }
+        newId?.let { id ->
+            runCatching { vkCalls.clear(id) }
+                .onFailure {
+                    Log.w(TAG, "Не удалось очистить реестр звонков профиля $id", it)
+                }
         }
         return newId
     }
@@ -631,10 +705,12 @@ class ProfileSettingsStore internal constructor(
     }
 
     /**
-     * Удаляет профиль: последний профиль удалить нельзя. В одной транзакции
-     * убирает ID из реестра и, если удалён активный, выбирает замену среди
-     * оставшихся (сначала со ссылкой). `next_profile_id` не уменьшается, ID не
-     * переиспользуется. Ключи и реестр звонков чистятся best-effort после.
+     * Удаляет профиль, включая последний. В одной транзакции убирает ID из
+     * реестра (пустой остаток записывается пустой строкой), а если удалён
+     * активный — выбирает замену среди оставшихся (сначала со ссылкой). Для
+     * пустого остатка `active_profile` становится [ProfileRegistryPolicy.NO_PROFILE].
+     * `next_profile_id` не уменьшается, ID не переиспользуется. Ключи и реестр
+     * звонков чистятся best-effort после.
      */
     suspend fun deleteProfile(profile: Int): Boolean {
         var deleted = false
@@ -666,19 +742,62 @@ class ProfileSettingsStore internal constructor(
     }
 
     /**
-     * Одноразовая запись реестра. Идемпотентна: повторный вызов ничего не
-     * делает, потому что `profile_ids` уже разбирается. Guard перепроверяется
-     * внутри транзакции — два экземпляра store не разъедутся.
+     * Одноразовая миграция реестра в схему v2. Запускается, пока
+     * `profile_registry_schema` меньше 2, и делает одну запись: `profile_ids`
+     * (пустая строка для пустого реестра, ключ не удаляется), `active_profile`,
+     * `next_profile_id` и `schema = 2`. Новый список — ровно профили со
+     * ссылкой.
+     *
+     * Осиротевшие профильные ключи ищутся в самом хранилище, а не только в
+     * `profile_ids`: при отсутствии списка старые ключи иначе пережили бы
+     * миграцию и достались новому профилю с переиспользованным ID. Ключи
+     * выпавших ID удаляются в той же транзакции, что и переключение реестра.
+     * Реестр звонков чистится после, с перечитыванием списка: ID, успевший
+     * пересоздаться, не должен потерять свои звонки.
+     *
+     * Идемпотентна: guard проверяется внутри транзакции, поэтому два экземпляра
+     * store не разъедутся.
      */
     suspend fun migrateRegistryIfNeeded() {
-        dataStore.edit { prefs ->
-            if (ProfileRegistryPolicy.parseIds(prefs[PROFILE_IDS]) != null) return@edit
-            val ids = profileIdsOf(prefs)
-            val next = nextProfileIdOf(prefs)
-            val active = activeProfileOf(prefs)
-            prefs[PROFILE_IDS] = ProfileRegistryPolicy.formatIds(ids)
-            prefs[NEXT_PROFILE_ID] = next
-            prefs[ACTIVE_PROFILE] = active
+        var dropped: List<Int> = emptyList()
+        try {
+            dataStore.edit { prefs ->
+                val schema = prefs[PROFILE_REGISTRY_SCHEMA] ?: 1
+                if (schema >= REGISTRY_SCHEMA_V2) return@edit
+                val storedIds = (
+                    ProfileRegistryPolicy.parseIds(prefs[PROFILE_IDS]).orEmpty() +
+                        profileIdsInStorage(prefs)
+                    ).distinct()
+                val migration = ProfileRegistryPolicy.migrateRegistry(
+                    storedIds = storedIds,
+                    linked = linkedIdsOf(prefs),
+                    requestedActive = prefs[ACTIVE_PROFILE] ?: ProfileRegistryPolicy.NO_PROFILE,
+                    storedNext = prefs[NEXT_PROFILE_ID],
+                )
+                prefs[PROFILE_IDS] = ProfileRegistryPolicy.formatIds(migration.ids)
+                prefs[ACTIVE_PROFILE] = migration.active
+                prefs[NEXT_PROFILE_ID] = migration.next
+                prefs[PROFILE_REGISTRY_SCHEMA] = REGISTRY_SCHEMA_V2
+                for (profile in migration.dropped) removeProfileKeys(prefs, profile)
+                dropped = migration.dropped
+            }
+        } catch (error: IOException) {
+            Log.w(TAG, "Не удалось мигрировать реестр профилей", error)
+            return
+        }
+        if (dropped.isEmpty()) return
+        val current = try {
+            profileIdsOf(dataStore.data.first())
+        } catch (error: IOException) {
+            Log.w(TAG, "Не удалось перечитать реестр профилей после миграции", error)
+            return
+        }
+        for (profile in dropped) {
+            if (profile in current) continue
+            runCatching { vkCalls.clear(profile) }
+                .onFailure {
+                    Log.w(TAG, "Не удалось очистить реестр звонков профиля $profile", it)
+                }
         }
     }
 
@@ -742,20 +861,30 @@ class ProfileSettingsStore internal constructor(
     }
 
     /**
-     * Креды из ссылки важнее импортированных. При отсутствии токена в обоих
-     * источниках креды не трогаются: `saveProfileDraft` не должен стирать
-     * сохранённый токен из-за правки ссылки без `token=`.
+     * Креды из ссылки важнее импортированных.
+     *
+     * [clearCredentialsWhenAbsent] различает создание профиля и правку
+     * существующего: новый профиль (`addProfile`) не должен унаследовать чужой
+     * токен, поэтому при отсутствии токена в обоих источниках креды стираются.
+     * `saveProfileDraft` оставляет значение по умолчанию: правка ссылки без
+     * `token=` не стирает сохранённый токен — это явное правило продукта.
      */
     private fun writeImportedCredentials(
         prefs: MutablePreferences,
         profile: Int,
         decision: VkLinkImportPolicy.Decision,
         imported: ImportedLinkCredentials?,
+        clearCredentialsWhenAbsent: Boolean = false,
     ) {
         when {
             decision.token.isNotEmpty() -> putCredentials(prefs, profile, decision.token, decision.userId)
             !imported?.token.isNullOrEmpty() ->
                 putCredentials(prefs, profile, imported.token, imported.userId)
+            clearCredentialsWhenAbsent -> {
+                prefs.remove(getProfileKey(VK_ACCESS_TOKEN_ENCRYPTED, profile))
+                prefs.remove(getProfileKey(VK_ACCESS_TOKEN, profile))
+                prefs.remove(getProfileKey(VK_ACCESS_TOKEN_USER_ID, profile))
+            }
         }
     }
 
@@ -807,12 +936,15 @@ class ProfileSettingsStore internal constructor(
         }
     }
 
+    /** Убирает все профильные ключи ID из уже открытой транзакции. */
+    private fun removeProfileKeys(prefs: MutablePreferences, profile: Int) {
+        for (key in PROFILE_STRING_KEYS) prefs.remove(getProfileKey(key, profile))
+        for (key in PROFILE_INT_KEYS) prefs.remove(getProfileKey(key, profile))
+    }
+
     private suspend fun clearProfileKeys(profile: Int) {
         runCatching {
-            dataStore.edit { prefs ->
-                for (key in PROFILE_STRING_KEYS) prefs.remove(getProfileKey(key, profile))
-                for (key in PROFILE_INT_KEYS) prefs.remove(getProfileKey(key, profile))
-            }
+            dataStore.edit { prefs -> removeProfileKeys(prefs, profile) }
         }.onFailure { Log.w(TAG, "Не удалось очистить ключи удалённого профиля $profile", it) }
     }
 
