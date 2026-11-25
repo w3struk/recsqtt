@@ -62,7 +62,7 @@ class SupportReportContractTest {
         )
         assertTrue(
             "LogsTab.kt must append the support report",
-            tab.contains("buildSupport" + "Report()"),
+            tab.contains("buildSupport" + "Report("),
         )
         assertTrue(
             "LogsTab.kt must keep the copy action label",

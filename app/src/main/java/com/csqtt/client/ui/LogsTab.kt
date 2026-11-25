@@ -179,7 +179,7 @@ private fun LogsTerminal() {
                 IconButton(
                     onClick = {
                         val text = buildReportCopyText(
-                            buildSupportReport(),
+                            buildSupportReport(context),
                             currentLogs.map { LogTimestampPolicy.copyLine(it) },
                         )
                         val clipboard = context.getSystemService(ClipboardManager::class.java)

@@ -1,9 +1,11 @@
 package com.csqtt.client.ui
 
+import android.content.Context
 import android.os.Build
 import com.csqtt.client.BuildConfig
 
-internal fun buildSupportReport(): String {
+internal fun buildSupportReport(context: Context): String {
+    val operatorLines = operatorReportLines(readOperatorSnapshot(context))
     val androidVersion = Build.VERSION.RELEASE ?: "?"
     val sdkInt = Build.VERSION.SDK_INT
     val primaryAbi = Build.SUPPORTED_ABIS.firstOrNull().orEmpty().ifBlank { "unknown" }
@@ -30,6 +32,7 @@ internal fun buildSupportReport(): String {
     return buildString {
         appendLine("Версия приложения: ${BuildConfig.VERSION_NAME}")
         appendLine("Android: $androidVersion (SDK $sdkInt)")
+        operatorLines.forEach { appendLine(it) }
         appendLine("Устройство: $manufacturer / $brand / $model")
         appendLine("Код устройства: $device")
         appendLine("Продукт: $product")
