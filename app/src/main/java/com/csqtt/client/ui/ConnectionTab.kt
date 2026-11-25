@@ -59,6 +59,7 @@ import com.csqtt.client.resolveConnectionSource
 import com.csqtt.client.showRaisedToast
 import com.csqtt.client.ui.components.CsqttScreen
 import com.csqtt.client.ui.design.CsqttShapes
+import com.csqtt.client.ui.design.CsqttTheme
 import com.csqtt.client.ui.utils.parseCsqttLink
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -289,7 +290,7 @@ private fun TunnelConnectionPanel(
         emptyProfiles -> MaterialTheme.colorScheme.onSurfaceVariant
         autoPausedForWifi -> MaterialTheme.colorScheme.tertiary
         tunnelStopping -> MaterialTheme.colorScheme.tertiary
-        tunnelRunning -> MaterialTheme.colorScheme.primary
+        tunnelRunning -> CsqttTheme.extendedColors.terminalSuccess
         isStarting -> MaterialTheme.colorScheme.primary
         cooldownActive -> MaterialTheme.colorScheme.tertiary
         else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -367,7 +368,7 @@ private fun TunnelConnectionPanel(
                     )
                 }
 
-                TunnelUptimeText(tunnelRunning = tunnelRunning || autoPausedForWifi || tunnelStopping)
+                TunnelUptimeText(tunnelRunning = tunnelRunning)
             }
         }
     }
@@ -381,7 +382,7 @@ private fun TunnelUptimeText(tunnelRunning: Boolean) {
         style = MaterialTheme.typography.labelLarge,
         fontWeight = FontWeight.SemiBold,
         color = if (tunnelRunning) {
-            MaterialTheme.colorScheme.primary
+            CsqttTheme.extendedColors.terminalSuccess
         } else {
             MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
         },

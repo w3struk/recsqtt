@@ -39,11 +39,11 @@ colors:
   on-info: "#FFFFFF"
   info-container: "#D9E2FF"
   on-info-container: "#001A43"
-  terminal-background: "#15171B"
-  terminal-text: "#DDE1E8"
-  terminal-muted: "#9DA3AE"
-  terminal-error: "#FFB4AB"
-  terminal-success: "#9BD4AF"
+  terminal-background: "transparent"
+  terminal-text: "#1E293B"
+  terminal-muted: "#64748B"
+  terminal-error: "#DC2626"
+  terminal-success: "#15803D"
 typography:
   display-large:
     fontFamily: Roboto
@@ -159,32 +159,33 @@ Android-клиент маскирует сетевой туннель под м�
 - **Secondary:** вторичный акцент; совпадает с основным, чтобы бренд оставался монохромным.
 - **Tertiary:** предупреждающий янтарный акцент для промежуточных состояний и сервисных уведомлений.
 - **Surface & Background:** поверхности экрана и карточек; контрастная подложка контента.
-- **Terminal Palette:** отдельные оттенки (фон, основной текст, приглушенный текст, маркеры успеха и ошибки) для встроенного журнала событий и сетевой телеметрии.
+- **Terminal Palette:** палитра встроенного журнала событий и сетевой телеметрии следует теме: в светлой теме светлый фон и тёмный текст, в тёмной — тёмный фон и светлый текст. Фон журнала прозрачный и наследует фон экрана.
+- **Connected state:** статус «Подключено» и таймер используют `terminal-success`, а не `primary`; в остальных состояниях таймер приглушён.
 
 ## Themes
 
 | Token | Light (Default) | Dark |
 | --- | --- | --- |
-| primary | #1A73E8 | #1565D8 |
+| primary | #1A73E8 | #4D6BFE |
 | on-primary | #FFFFFF | #FFFFFF |
 | primary-container | #E8F0FE | #173B72 |
-| on-primary-container | #111215 | #FFFFFF |
-| secondary | #1A73E8 | #1565D8 |
+| on-primary-container | #111215 | #F5F8FF |
+| secondary | #1A73E8 | #4D6BFE |
 | on-secondary | #FFFFFF | #FFFFFF |
 | secondary-container | #E8F0FE | #173B72 |
-| on-secondary-container | #111215 | #FFFFFF |
+| on-secondary-container | #111215 | #F5F8FF |
 | tertiary | #D27D00 | #FFB74D |
 | on-tertiary | #FFFFFF | #271500 |
 | tertiary-container | #FFE4B7 | #5A3900 |
 | on-tertiary-container | #241400 | #FFE5BD |
-| background | #FDFDFE | #09090A |
-| on-background | #111215 | #FAFAFA |
-| surface | #FFFFFF | #121214 |
-| on-surface | #111215 | #FAFAFA |
-| surface-variant | #F2F2F4 | #202024 |
-| on-surface-variant | #5F6067 | #C9C9CF |
-| outline | #898B92 | #8C8C94 |
-| outline-variant | #D7D8DD | #35353A |
+| background | #FDFDFE | #090C15 |
+| on-background | #111215 | #F5F8FF |
+| surface | #FFFFFF | #131A2B |
+| on-surface | #111215 | #F5F8FF |
+| surface-variant | #F2F2F4 | #1C2640 |
+| on-surface-variant | #5F6067 | #A3AAB8 |
+| outline | #898B92 | #353A47 |
+| outline-variant | #D7D8DD | #232A3A |
 | error | #BA1A1A | #FFB4AB |
 | on-error | #FFFFFF | #690005 |
 | error-container | #FFDAD6 | #93000A |
@@ -193,19 +194,19 @@ Android-клиент маскирует сетевой туннель под м�
 | on-success | #FFFFFF | #06391E |
 | success-container | #B8F2CE | #1D5134 |
 | on-success-container | #082014 | #B7F1CD |
-| warning | #7B5800 | #F2C25B |
-| on-warning | #FFFFFF | #402D00 |
-| warning-container | #FFDEA2 | #5C4200 |
-| on-warning-container | #271900 | #FFDEA2 |
-| info | #475D92 | #B2C5FF |
+| warning | #7B5800 | #FFB74D |
+| on-warning | #FFFFFF | #271500 |
+| warning-container | #FFDEA2 | #5A3900 |
+| on-warning-container | #271900 | #FFE5BD |
+| info | #475D92 | #9DB6FF |
 | on-info | #FFFFFF | #172E60 |
-| info-container | #D9E2FF | #304577 |
+| info-container | #D9E2FF | #1C2E52 |
 | on-info-container | #001A43 | #D9E2FF |
-| terminal-background | #15171B | #101216 |
-| terminal-text | #DDE1E8 | #DDE1E8 |
-| terminal-muted | #9DA3AE | #9DA3AE |
-| terminal-error | #FFB4AB | #FFB4AB |
-| terminal-success | #9BD4AF | #9BD4AF |
+| terminal-background | transparent | transparent |
+| terminal-text | #1E293B | #E2E8F0 |
+| terminal-muted | #64748B | #64748B |
+| terminal-error | #DC2626 | #F87171 |
+| terminal-success | #15803D | #4ADE80 |
 
 ## Typography
 
@@ -248,7 +249,12 @@ Android-клиент маскирует сетевой туннель под м�
 - **Секционная карточка (`AppSectionCard`):** группирует блоки настроек; внутренние поля заданы шкалой отступов.
 - **Строка настроек (`CsqttSettingRow`):** полноширинная интерактивная строка с шагом отступа, пояснительным текстом и тумблером переключения.
 - **Сегментированный переключатель (`CsqttSegmentedControl`):** полноширинный переключатель взаимоисключающих опций; скругление пилюли, активный выбор подсвечен.
+- **Список профилей (`ProfileListSection`):** постоянная секция на «Подключении»; активная строка выделена заливкой и рамкой, без бейджа «АКТИВЕН». Tune и удаление — отдельные иконки, добавление — кнопка «Добавить». При нуле профилей показывается пустое состояние с этой кнопкой.
+- **Редактор профиля (`ProfileEditorScreen`):** полноэкранный диалог; имя редактируется карандашом в заголовке, отдельной карточки имени нет. Параметры соединения сгруппированы в карточку, закрытие звонков VK живёт рядом с VK-кредами.
+- **Журнал (`LogsTab`):** без карточки-обёртки, строки на всю ширину; действия копирования и очистки собраны в плавающую пилюлю над навигацией.
 
 ## Do's and Don'ts
 
 - Do: задавайте масштаб текста только через корневой провайдер темы (`fontScale = 1.0f`), как в этой спецификации.
+- Do: окрашивайте статус «Подключено» и таймер в `terminal-success`.
+- Don't: используйте `primary` для состояния «Подключено» или бейдж «АКТИВЕН» в списке профилей; активность передаётся заливкой и рамкой строки.
