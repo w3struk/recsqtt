@@ -11,22 +11,16 @@
                             <div id="dns_selection" class="dns-selection">
                             <select id="dns_provider">
                                 <option value="custom">Ручной DNS</option>
-                                <option value="yandex" selected>Yandex DNS</option>
-                                <option value="cloudflare">Cloudflare DNS</option>
+                                <option value="cloudflare" selected>Cloudflare DNS</option>
                                 <option value="google">Google DNS</option>
                                 <option value="adguard">AdGuard DNS</option>
-                                <option value="xbox">Xbox DNS</option>
-                                <option value="comms">Comms DNS</option>
-                                <option value="geohide">Geohide DNS</option>
                                 <option value="quad9">Quad9 DNS</option>
                                 <option value="opendns">OpenDNS</option>
-                                <option value="rostelecom">Rostelecom DNS</option>
                                 <option value="nextdns">NextDNS</option>
-                                <option value="bizone">BI.ZONE DNS</option>
-                                <option value="nsdi">НСДИ DNS</option>
                             </select>
                             <input id="dns_manual" class="dns-manual-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="ipv4,ipv4" aria-label="Ручной DNS">
                             </div>
+                            <div class="field-hint">Только рекурсивные резолверы. DNS применяется к приложениям в туннеле; запросы выходят из сети VPS. Если VPS в РФ и нейтральные недоступны — задайте ручной DNS.</div>
                         </div>
                         <button id="saveDnsBtn" class="btn btn-primary" style="width: 100%; margin-top: 22px;" onclick="saveDnsSettings()" disabled>Применить DNS</button>
                     </div>

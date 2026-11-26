@@ -29,8 +29,8 @@ mod vk;
 // Внутри панели модули видят друг друга через этот реэкспорт. Наружу
 // (`main.rs`, `protocol.rs`) панель отдаёт только `run`, шифрование ссылок
 // (`encrypt_csqtt_link`, `decrypt_csqtt_link`, `CSQTT_CIPHER_KEY_SEED`) и
-// DNS-хелперы (`dns_provider_id`, `dns_provider_is_known`, `provider_dns_by_id`,
-// `deploy_dns_profile_or_yandex`); остальные имена — внутренние для панели.
+// DNS-хелперы (`dns_provider_id`, `normalize_dns_selection`); остальные имена —
+// внутренние для панели.
 pub(crate) use auth::*;
 pub(crate) use clients::*;
 pub(crate) use clients_batch::*;

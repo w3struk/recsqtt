@@ -232,9 +232,11 @@ pub(crate) async fn api_import_post(
             }
             if do_settings {
                 if !export.dns.is_empty() {
-                    applied_dns = (db.dns != export.dns).then(|| export.dns.clone());
-                    db.dns = export.dns;
-                    db.dns_provider = export.dns_provider;
+                    let (dns, dns_provider) =
+                        normalize_dns_selection(&export.dns, &export.dns_provider);
+                    applied_dns = (db.dns != dns).then(|| dns.clone());
+                    db.dns = dns;
+                    db.dns_provider = dns_provider;
                 }
                 if let Some(hours) = export.auto_restart_interval_hours {
                     db.set_auto_restart_interval_hours(hours);

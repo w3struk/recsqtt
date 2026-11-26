@@ -14,12 +14,12 @@ pub(crate) struct DnsProvider {
     pub(crate) secondary: &'static str,
 }
 
-pub(crate) const DNS_PROVIDERS: [DnsProvider; 13] = [
-    DnsProvider {
-        id: "yandex",
-        primary: "77.88.8.8",
-        secondary: "77.88.8.1",
-    },
+/// Резолверы, которые панель предлагает как пресеты.
+///
+/// Остаются только нейтральные рекурсивные резолверы: DNS применяется к
+/// приложениям в туннеле, и запросы выходят из сети VPS. Первый элемент —
+/// default (`cloudflare`).
+pub(crate) const DNS_PROVIDERS: [DnsProvider; 6] = [
     DnsProvider {
         id: "cloudflare",
         primary: "1.1.1.1",
@@ -36,21 +36,6 @@ pub(crate) const DNS_PROVIDERS: [DnsProvider; 13] = [
         secondary: "94.140.15.14",
     },
     DnsProvider {
-        id: "xbox",
-        primary: "111.88.96.54",
-        secondary: "111.88.96.55",
-    },
-    DnsProvider {
-        id: "comms",
-        primary: "83.220.169.155",
-        secondary: "212.109.195.93",
-    },
-    DnsProvider {
-        id: "geohide",
-        primary: "193.233.112.67",
-        secondary: "193.233.112.88",
-    },
-    DnsProvider {
         id: "quad9",
         primary: "9.9.9.9",
         secondary: "149.112.112.112",
@@ -61,24 +46,9 @@ pub(crate) const DNS_PROVIDERS: [DnsProvider; 13] = [
         secondary: "208.67.220.220",
     },
     DnsProvider {
-        id: "rostelecom",
-        primary: "95.189.32.74",
-        secondary: "195.208.5.1",
-    },
-    DnsProvider {
         id: "nextdns",
         primary: "45.90.28.181",
         secondary: "45.90.30.181",
-    },
-    DnsProvider {
-        id: "bizone",
-        primary: "195.208.6.1",
-        secondary: "195.208.7.1",
-    },
-    DnsProvider {
-        id: "nsdi",
-        primary: "195.208.4.1",
-        secondary: "195.208.5.1",
     },
 ];
 
@@ -87,10 +57,6 @@ pub(crate) fn dns_provider_by_id(id: &str) -> Option<DnsProvider> {
         .iter()
         .copied()
         .find(|provider| provider.id == id)
-}
-
-pub(crate) fn dns_provider_is_known(id: &str) -> bool {
-    dns_provider_by_id(id).is_some()
 }
 
 pub(crate) fn dns_provider_id(dns: &str) -> Option<&'static str> {
@@ -132,24 +98,12 @@ pub(crate) fn manual_dns(
     })
 }
 
-pub(crate) fn deploy_dns_profile_or_yandex(existing_dns: &str) -> String {
+pub(crate) fn deploy_dns_profile_or_default(existing_dns: &str) -> String {
     let addresses: Vec<_> = existing_dns
         .split(',')
         .map(str::trim)
         .filter(|address| !address.is_empty())
         .collect();
-    if addresses
-        .iter()
-        .any(|&a| a == "95.182.120.241" || a == "37.230.192.51")
-    {
-        return "193.233.112.67,193.233.112.88".to_owned();
-    }
-    if addresses
-        .iter()
-        .any(|&a| a == "111.88.96.50" || a == "111.88.96.51")
-    {
-        return "111.88.96.54,111.88.96.55".to_owned();
-    }
     let first = addresses.first().copied();
     let selected = DNS_PROVIDERS
         .iter()
@@ -171,6 +125,23 @@ pub(crate) fn deploy_dns_profile_or_yandex(existing_dns: &str) -> String {
         .map(|(provider, _)| *provider)
         .unwrap_or(DNS_PROVIDERS[0]);
     provider_dns(selected)
+}
+
+/// Приводит сохранённую пару `dns`/`dns_provider` к каталогу пресетов.
+///
+/// `custom` не трогаем, известный id разворачиваем в его пару, а удалённые и
+/// неизвестные значения нормализуем по адресам с откатом на `cloudflare`.
+/// Идемпотентна; используется при старте и при импорте конфигурации.
+pub(crate) fn normalize_dns_selection(dns: &str, provider: &str) -> (String, String) {
+    if provider == "custom" {
+        return (dns.to_owned(), provider.to_owned());
+    }
+    if let Some(known_dns) = provider_dns_by_id(provider) {
+        return (known_dns, provider.to_owned());
+    }
+    let dns = deploy_dns_profile_or_default(dns);
+    let provider = dns_provider_id(&dns).unwrap_or("cloudflare").to_owned();
+    (dns, provider)
 }
 
 #[derive(Deserialize)]

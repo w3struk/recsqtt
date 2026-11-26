@@ -155,6 +155,26 @@ async fn import_validates_all_rules_before_mutating_memory_or_storage() {
 }
 
 #[tokio::test]
+async fn import_normalizes_removed_dns_provider_to_cloudflare() {
+    let target = Fixture::new(Database::default()).await;
+    let mut export: Value = serde_json::from_slice(&target.export().await).unwrap();
+    export["dns"] = json!("77.88.8.8,77.88.8.1");
+    export["dns_provider"] = json!("yandex");
+    let body = serde_json::to_vec(&json!({"config": export})).unwrap();
+    let response = target.request("POST", "/api/import", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    {
+        let db = target.app.db.read().await;
+        assert_eq!(db.dns, "1.1.1.1,1.0.0.1");
+        assert_eq!(db.dns_provider, "cloudflare");
+    }
+    assert_eq!(*target.app.dns.read().await, "1.1.1.1,1.0.0.1");
+    let persisted = model::load_database(&target.app.config_dir).unwrap();
+    assert_eq!(persisted.dns, "1.1.1.1,1.0.0.1");
+    assert_eq!(persisted.dns_provider, "cloudflare");
+}
+
+#[tokio::test]
 async fn import_limit_is_256_kib_without_expanding_other_endpoints() {
     assert_eq!(WEB_BODY_LIMIT_BYTES, 16 * 1024);
     assert_eq!(ROUTING_RULE_BODY_LIMIT_BYTES, 256 * 1024);

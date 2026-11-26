@@ -262,6 +262,15 @@ sudo csqttctl status
     `PWA_SERVICE_WORKER` остаётся в `web_panel.rs`: его `CACHE_NAME` правит
     `scripts/bump_version.sh`.
 
+11. **DNS — две плоскости, два разных владельца.** Серверный `DNS_PROVIDERS`
+    (`rust-server/web_panel/dns.rs`) — только нейтральные рекурсивные резолверы,
+    `cloudflare` по умолчанию; российские, государственные и smart-DNS пресеты
+    не возвращать. Удалённые и неизвестные id/адреса нормализуются в `cloudflare`
+    при старте и импорте (`normalize_dns_selection`). Клиентский bootstrap
+    (`rust-client/dns.rs`) от сервера не зависит и сейчас остаётся жёстким; его
+    целевое состояние — `LinkProperties` физической сети → system → жёсткие адреса
+    последним шансом, отдельным планом. Меняя одну плоскость, не ломайте другую.
+
 ## Правила Rust, которые роняют сборку
 
 - **У клиента линт строже, чем у сервера:** `rust-client/check_no_runtime_panics.sh` запрещает

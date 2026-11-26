@@ -31,8 +31,8 @@ pub(crate) async fn settings_get(State(state): State<WebState>) -> impl IntoResp
     let db = state.app.db.read().await;
     let dns = db.dns.clone();
     let mut parts = dns.splitn(2, ',');
-    let primary = parts.next().unwrap_or("77.88.8.8").trim().to_owned();
-    let secondary = parts.next().unwrap_or("77.88.8.1").trim().to_owned();
+    let primary = parts.next().unwrap_or("1.1.1.1").trim().to_owned();
+    let secondary = parts.next().unwrap_or("1.0.0.1").trim().to_owned();
     let provider = if db.dns_provider == "custom" || dns_provider_by_id(&db.dns_provider).is_some()
     {
         db.dns_provider.as_str()

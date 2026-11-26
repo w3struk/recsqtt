@@ -1748,7 +1748,7 @@ pub async fn refresh_credentials(app: &Arc<App>) -> Result<()> {
     command(app, ProtocolCommand::ReplaceCredentials(credentials))
 }
 
-pub const FALLBACK_DNS: &str = "77.88.8.8,77.88.8.1";
+pub const FALLBACK_DNS: &str = "1.1.1.1,1.0.0.1";
 
 pub async fn effective_dns(app: &Arc<App>) -> String {
     let configured = app.dns.read().await.clone();
@@ -7780,8 +7780,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dns_fallback_identifies_yandex_immediately_without_network() {
-        assert_eq!(FALLBACK_DNS, "77.88.8.8,77.88.8.1");
+    async fn dns_fallback_is_cloudflare_without_network() {
+        assert_eq!(FALLBACK_DNS, "1.1.1.1,1.0.0.1");
     }
 
     fn routing_fixture_rule(preset_apps: bool) -> crate::model::RoutingRule {

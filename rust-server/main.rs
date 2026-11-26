@@ -1039,25 +1039,20 @@ async fn async_main() -> Result<()> {
     db.bot_token.clear();
     db.web_sessions.clear();
 
-    let runtime_dns =
-        if let Some(configured) = args.dns.as_deref().filter(|value| !value.trim().is_empty()) {
-            normalize_dns(configured)?
-        } else if let Some(known_dns) = web_panel::provider_dns_by_id(&db.dns_provider) {
-            known_dns
-        } else if !db.dns.trim().is_empty() {
-            web_panel::deploy_dns_profile_or_yandex(&db.dns)
-        } else {
-            "77.88.8.8,77.88.8.1".to_owned()
-        };
+    let explicit_dns = args
+        .dns
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let (runtime_dns, runtime_dns_provider) = if let Some(configured) = explicit_dns {
+        // Явный `--dns` не переопределяем: кастомный адрес остаётся `custom`.
+        let dns = normalize_dns(configured)?;
+        let provider = web_panel::dns_provider_id(&dns).unwrap_or("custom");
+        (dns, provider.to_owned())
+    } else {
+        web_panel::normalize_dns_selection(&db.dns, &db.dns_provider)
+    };
     db.dns = runtime_dns.clone();
-    db.dns_provider =
-        if db.dns_provider == "custom" || web_panel::dns_provider_is_known(&db.dns_provider) {
-            db.dns_provider.clone()
-        } else {
-            web_panel::dns_provider_id(&db.dns)
-                .unwrap_or("custom")
-                .to_owned()
-        };
+    db.dns_provider = runtime_dns_provider;
     if !matches!(db.auto_restart_interval_hours(), 0 | 12 | 24 | 48 | 72) {
         db.set_auto_restart_interval_hours(DEFAULT_AUTO_RESTART_INTERVAL_HOURS);
     }
