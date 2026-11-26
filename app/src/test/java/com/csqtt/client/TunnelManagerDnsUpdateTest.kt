@@ -66,7 +66,7 @@ class TunnelManagerDnsUpdateTest {
             val epoch = lifecycle.requestStart()
             val ticket = requireNotNull(lifecycle.reserveProcess(epoch, processIsNull = true))
             // Тот же путь публикации, что у startProcessLocked, а не его копия.
-            requireNotNull(invoke("attachProcessIdentity", process, ticket))
+            requireNotNull(invoke("attachProcessIdentity", process, ticket, 100))
         }
     }
 

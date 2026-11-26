@@ -65,8 +65,8 @@ use tokio_util::sync::CancellationToken;
 use turn_endpoint::TurnTransportMode;
 use turn_ip_pool::{TurnIpPool, parse_custom_turn_ips};
 use worker::{
-    GROUPS_PER_CREDENTIAL, GroupContext, PauseGate, RuntimeParams, WORKER_START_INTERVAL,
-    WORKERS_PER_GROUP, WorkerStartPacer, parse_hashes, run_groups,
+    CREDENTIAL_FETCH_CONCURRENCY, GROUPS_PER_CREDENTIAL, GroupContext, PauseGate, RuntimeParams,
+    WORKER_START_INTERVAL, WORKERS_PER_GROUP, WorkerStartPacer, parse_hashes, run_groups,
 };
 use wrap::derive_wrap_key;
 
@@ -443,7 +443,7 @@ async fn run(arguments: Arguments) -> Result<i32> {
         paused,
         config_tx,
         start_pacer: Arc::new(WorkerStartPacer::new(WORKER_START_INTERVAL)),
-        credential_pacer: Arc::new(tokio::sync::Mutex::new(())),
+        credential_pacer: Arc::new(tokio::sync::Semaphore::new(CREDENTIAL_FETCH_CONCURRENCY)),
         ready_credential_tx,
         config_sent: Arc::new(AtomicBool::new(false)),
         config_in_flight: Arc::new(AtomicBool::new(false)),

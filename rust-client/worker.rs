@@ -41,6 +41,12 @@ pub const GROUPS_PER_CREDENTIAL: usize = 1;
 pub const WORKERS_PER_CREDENTIAL: usize = WORKERS_PER_GROUP * GROUPS_PER_CREDENTIAL;
 const _: () = assert!(WORKERS_PER_CREDENTIAL == 10);
 pub const WORKER_START_INTERVAL: Duration = Duration::from_millis(100);
+/// Сколько когорт одновременно запрашивают TURN-креды. Один запрос — это три
+/// последовательных HTTPS-вызова VK, поэтому параллелизм ограничен: при десяти
+/// группах выигрыш уже многократный, а всплеск к VK остаётся умеренным.
+pub const CREDENTIAL_FETCH_CONCURRENCY: usize = 3;
+/// Разброс стартов запросов, чтобы три разрешения не уходили одним залпом.
+const CREDENTIAL_FETCH_JITTER_MS: u64 = 150;
 const CREDENTIAL_POST_DELAY: Duration = Duration::from_millis(100);
 const CREDENTIAL_FETCH_TIMEOUT: Duration = Duration::from_secs(240);
 const FATAL_RETRY_BASE: Duration = Duration::from_secs(5);
@@ -136,7 +142,10 @@ pub struct GroupContext {
     pub paused: Arc<PauseGate>,
     pub config_tx: mpsc::Sender<String>,
     pub start_pacer: Arc<WorkerStartPacer>,
-    pub credential_pacer: Arc<tokio::sync::Mutex<()>>,
+    /// Ограничивает число одновременных запросов TURN-креденшелов
+    /// (`CREDENTIAL_FETCH_CONCURRENCY`). Раньше здесь был глобальный `Mutex`,
+    /// и десять когорт выстраивались в очередь по ~1.7 с каждая.
+    pub credential_pacer: Arc<tokio::sync::Semaphore>,
     pub ready_credential_tx: Option<mpsc::UnboundedSender<usize>>,
     pub config_sent: Arc<AtomicBool>,
     pub config_in_flight: Arc<AtomicBool>,
@@ -746,10 +755,26 @@ impl GroupCredentials {
         if let Some(lease) = self.state.lock().await.reserve() {
             return Some(lease);
         }
-        let _guard = tokio::select! {
+        // Разброс стартов, чтобы три разрешения не уходили одним залпом из
+        // трёх одновременных выборок по три HTTPS-вызова VK.
+        let jitter = credential_fetch_jitter_ms(rand::random::<u64>());
+        if jitter > 0 {
+            let slept = tokio::select! {
+                _ = self.context.cancel.cancelled() => false,
+                _ = self.availability.cancel.cancelled() => false,
+                _ = tokio::time::sleep(Duration::from_millis(jitter)) => true,
+            };
+            if !slept {
+                return None;
+            }
+        }
+        let permit = tokio::select! {
             _ = self.context.cancel.cancelled() => return None,
             _ = self.availability.cancel.cancelled() => return None,
-            guard = self.context.credential_pacer.lock() => guard,
+            permit = self.context.credential_pacer.acquire() => match permit {
+                Ok(permit) => permit,
+                Err(_) => return None,
+            },
         };
         if self.is_unavailable() || self.is_exhausted() {
             return None;
@@ -791,6 +816,9 @@ impl GroupCredentials {
                         "[TURN][RETRY] VK вернул прежний credential после 486; новый запрос через {:?}",
                         delay
                     );
+                    // Пауза не должна занимать слот параллелизма: иначе три
+                    // сбойные когорты блокируют прогрев остальных.
+                    drop(permit);
                     tokio::select! {
                         _ = self.context.cancel.cancelled() => return None,
                         _ = self.availability.cancel.cancelled() => return None,
@@ -847,6 +875,8 @@ impl GroupCredentials {
                     "[КРЕД #{}] Ошибка: {error:#}. Повторяем через {delay:?}...",
                     self.credential_id
                 );
+                // Слот нужен другим когортам: backoff — не сетевой запрос.
+                drop(permit);
                 tokio::select! {
                     _ = self.context.cancel.cancelled() => return None,
                     _ = self.availability.cancel.cancelled() => return None,
@@ -1322,6 +1352,11 @@ async fn worker_loop(
 
 fn worker_retry_delay(attempt: usize) -> Duration {
     worker_retry_delay_with_jitter(attempt, rand::random::<u64>() % 251)
+}
+
+/// Разброс старта запроса креденшелов: `0..=CREDENTIAL_FETCH_JITTER_MS`.
+fn credential_fetch_jitter_ms(random: u64) -> u64 {
+    random % (CREDENTIAL_FETCH_JITTER_MS + 1)
 }
 
 fn worker_retry_delay_with_jitter(attempt: usize, jitter_ms: u64) -> Duration {
@@ -2053,6 +2088,23 @@ mod tests {
                 Duration::from_millis(minimum_ms + 250)
             );
         }
+    }
+
+    #[test]
+    fn credential_fetch_jitter_stays_within_its_window() {
+        assert_eq!(credential_fetch_jitter_ms(0), 0);
+        assert_eq!(credential_fetch_jitter_ms(150), 150);
+        assert_eq!(credential_fetch_jitter_ms(151), 0);
+        assert!(credential_fetch_jitter_ms(u64::MAX) <= 150);
+    }
+
+    #[test]
+    fn credential_fetches_overlap_but_stay_bounded() {
+        assert_eq!(CREDENTIAL_FETCH_CONCURRENCY, 3);
+        const _: () = assert!(
+            CREDENTIAL_FETCH_CONCURRENCY < crate::MAX_WORKERS / WORKERS_PER_GROUP,
+            "когорты должны прогреваться параллельно, а не строго по одной"
+        );
     }
 
     #[test]

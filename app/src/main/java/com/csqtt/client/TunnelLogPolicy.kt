@@ -27,6 +27,11 @@ object TunnelLogPolicy {
         "stats",
         StartupDiagnosticPolicy.CREDENTIALS_KEY,
         StartupDiagnosticPolicy.TURN_KEY,
+        // Одна агрегированная строка ожидания креденшелов и две точки прогрева:
+        // без них отчёт о медленном старте снова потеряет причину.
+        CredentialWaitLogPolicy.STATUS_KEY,
+        StartupTimingPolicy.FIRST_KEY,
+        StartupTimingPolicy.ALL_KEY,
     )
 
     fun isAllowedWhenInactiveLogging(key: String, isError: Boolean, level: LogLevel?): Boolean {

@@ -147,7 +147,7 @@ class RoutingManagerRegressionTest {
             val epoch = lifecycle.requestStart()
             val ticket = requireNotNull(lifecycle.reserveProcess(epoch, processIsNull = true))
             // The same publication transition used by startProcessLocked, not a mirror.
-            requireNotNull(invoke("attachProcessIdentity", process, ticket))
+            requireNotNull(invoke("attachProcessIdentity", process, ticket, 100))
         }
     }
 

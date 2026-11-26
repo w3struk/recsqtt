@@ -144,9 +144,18 @@ object TunnelManager {
         val generation: Long,
         val ticket: TunnelLifecycleTicket,
         val shutdownGraceMs: Long,
+        /** Сколько потоков запрошено у клиента (`-n`); сервер может урезать цель. */
+        val targetWorkers: Int,
         val startupProgress: TunnelStartupProgress = TunnelStartupProgress(),
     ) {
         val inputLock = Any()
+        /** Сериализует состояние журнала, собираемое из stdout и stderr. */
+        val logStateLock = Any()
+        val credentialWaits = CredentialWaitTracker()
+        /** `elapsedRealtime` первого готового потока; 0 — ещё не было. */
+        var firstReadyAtMs = 0L
+        /** Для какой цели строка «все потоки готовы» уже записана. */
+        var allReadyLoggedTarget = 0
         /** Сериализует применение правила процесса; не мешает остановке VPN
          *  и проверкам identity, которые держат только `pendingRoutingReload`. */
         val routingApplyLock = Any()
@@ -793,6 +802,7 @@ object TunnelManager {
                 if (event.worker == 0 || identity.readyWorkers.add(event.worker)) {
                     updateProcessLog(identity, "ready", "[ВОРКЕР] Поток готов ✓", 20, false, LogLevel.OK)
                 }
+                recordReadyTiming(identity)
                 markConnected(identity)
             }
             is TunnelEventParser.Event.Dtls -> {
@@ -911,6 +921,45 @@ object TunnelManager {
         synchronized(pendingRoutingReload) {
             if (!isCurrent(identity)) return
             serverAssignedWorkers.value = workers
+        }
+        // Сервер мог урезать цель ниже уже готовых потоков — тогда итоговая
+        // строка старта должна появиться без нового события Ready.
+        recordReadyTiming(identity)
+    }
+
+    /**
+     * Записывает в журнал две измеримые точки прогрева: первый готовый поток и
+     * момент, когда готовы все потоки текущей цели. Раньше обе точки приходилось
+     * восстанавливать по строкам «Активных: N», где их не видно.
+     */
+    private fun recordReadyTiming(identity: ProcessIdentity) {
+        if (!isCurrent(identity)) return
+        val startedAt = processStartedAtMs
+        if (startedAt <= 0L) return
+        val target = StartupTimingPolicy.effectiveTarget(identity.targetWorkers, serverAssignedWorkers.value)
+        if (target <= 0) return
+        val now = SystemClock.elapsedRealtime()
+        if (identity.firstReadyAtMs == 0L) {
+            identity.firstReadyAtMs = now
+            updateProcessLog(
+                identity,
+                StartupTimingPolicy.FIRST_KEY,
+                StartupTimingPolicy.firstReadyMessage(startedAt, now),
+                21,
+                false,
+                LogLevel.OK,
+            )
+        }
+        if (identity.readyWorkers.size >= target && identity.allReadyLoggedTarget != target) {
+            identity.allReadyLoggedTarget = target
+            updateProcessLog(
+                identity,
+                StartupTimingPolicy.ALL_KEY,
+                StartupTimingPolicy.allReadyMessage(startedAt, now, target),
+                22,
+                false,
+                LogLevel.OK,
+            )
         }
     }
 
@@ -1410,10 +1459,14 @@ object TunnelManager {
                 lifecycleState.accepts(identity.ticket)
         }
 
-    private fun attachProcessIdentity(startedProcess: Process, ticket: TunnelLifecycleTicket): ProcessIdentity {
+    private fun attachProcessIdentity(
+        startedProcess: Process,
+        ticket: TunnelLifecycleTicket,
+        targetWorkers: Int,
+    ): ProcessIdentity {
         val identity = synchronized(pendingRoutingReload) {
             processGeneration = if (processGeneration == Long.MAX_VALUE) 1L else processGeneration + 1L
-            ProcessIdentity(startedProcess, processGeneration, ticket, 3_500L).also {
+            ProcessIdentity(startedProcess, processGeneration, ticket, 3_500L, targetWorkers).also {
                 process = startedProcess
                 processIdentity = it
                 pendingRoutingReload.begin(it.generation)
@@ -1695,7 +1748,7 @@ object TunnelManager {
                 return
             }
         }
-        val identity = attachProcessIdentity(startedProcess, ticket)
+        val identity = attachProcessIdentity(startedProcess, ticket, totalWorkers)
         callRecoveryPending.set(false)
         nativeProcessPid = processIdOf(startedProcess)
         processStartedAtMs = SystemClock.elapsedRealtime()
@@ -1957,6 +2010,32 @@ object TunnelManager {
             if (event != null && handleTunnelEvent(event, identity)) {
                 return
             }
+        }
+
+        // Строки выдачи TURN-креденшелов не теряем: сводим их в одну запись
+        // «сколько групп ждут и почему». Раньше такие строки целиком съедал
+        // `TunnelLogPolicy.isInternalRecovery`, и причина медленного прогрева
+        // исчезала из отчёта.
+        val credentialSignal = CredentialWaitLogPolicy.parse(lineTrim)
+        if (credentialSignal != null) {
+            lastDiagnostic.set(lineTrim.take(240))
+            val groups = CredentialWaitLogPolicy.groupsForTarget(
+                StartupTimingPolicy.effectiveTarget(identity.targetWorkers, serverAssignedWorkers.value),
+            )
+            val message = synchronized(identity.logStateLock) {
+                identity.credentialWaits.apply(credentialSignal, groups)
+            }
+            if (message != null) {
+                updateProcessLog(
+                    identity,
+                    CredentialWaitLogPolicy.STATUS_KEY,
+                    message,
+                    45,
+                    false,
+                    LogLevel.TURN,
+                )
+            }
+            return
         }
 
         val isCritical = lineTrim.startsWith("CAPTCHA_SOLVE|") ||
