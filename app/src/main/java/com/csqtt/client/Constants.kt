@@ -30,6 +30,12 @@ object CsqttConstants {
         const val BINARY_NAME = "libclient.so"
         const val PROCESS_ENV_EVENTS = "CSQTT_EVENTS"
 
+        /**
+         * Кэш последнего удачного IP пира в `filesDir`; путь уходит Rust флагом
+         * `--peer-cache`. Файлом владеет клиент — Kotlin его не читает и не пишет.
+         */
+        const val PEER_CACHE_NAME = "peer_cache.json"
+
         const val DEFAULT_FINGERPRINT = "firefox"
         const val DEFAULT_CLIENT_IDS = "8202606,6287487"
         const val DEFAULT_OBFS_MODE = "unified"

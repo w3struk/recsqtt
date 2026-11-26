@@ -70,7 +70,10 @@ fn normalize_dns_selection_replaces_removed_providers_and_keeps_custom() {
     );
     assert_eq!(
         normalize_dns_selection("208.67.222.222,208.67.220.220", "removed-id"),
-        ("208.67.222.222,208.67.220.220".to_owned(), "opendns".to_owned())
+        (
+            "208.67.222.222,208.67.220.220".to_owned(),
+            "opendns".to_owned()
+        )
     );
 }
 

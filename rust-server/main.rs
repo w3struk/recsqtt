@@ -1039,10 +1039,7 @@ async fn async_main() -> Result<()> {
     db.bot_token.clear();
     db.web_sessions.clear();
 
-    let explicit_dns = args
-        .dns
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
+    let explicit_dns = args.dns.as_deref().filter(|value| !value.trim().is_empty());
     let (runtime_dns, runtime_dns_provider) = if let Some(configured) = explicit_dns {
         // Явный `--dns` не переопределяем: кастомный адрес остаётся `custom`.
         let dns = normalize_dns(configured)?;

@@ -14,6 +14,7 @@ mod logging;
 mod namegen;
 mod obfs;
 mod packet;
+mod peer_cache;
 mod profiles;
 mod protocol;
 mod repair;
@@ -45,6 +46,7 @@ use dispatcher::{Dispatcher, Termination};
 use events::Events;
 use obfs::ObfsMode;
 use packet::{PacketPool, packet_pool_size};
+use peer_cache::{PeerCache, PeerCacheGuard};
 use repair::RepairState;
 use session::ShutdownCoordinator;
 use srtp_mode::SrtpMode;
@@ -52,7 +54,7 @@ use stats::Stats;
 use std::{
     collections::HashSet,
     io::BufRead,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -95,6 +97,10 @@ struct Arguments {
     vk_hash_mode: String,
     #[arg(long, default_value = "")]
     peer: String,
+    #[arg(long = "dns-servers", default_value = "")]
+    dns_servers: String,
+    #[arg(long = "peer-cache", default_value = "")]
+    peer_cache: String,
     #[arg(short = 'n', long, default_value_t = 18)]
     workers: usize,
     #[arg(long, default_value_t = 0)]
@@ -239,7 +245,17 @@ async fn run(arguments: Arguments) -> Result<i32> {
         bail!("[КЛИЕНТ] Нужен пароль в переменной CSQTT_PASSWORD");
     }
     let mut stdin = spawn_stdin_reader();
-    let peer = resolve_peer(&arguments.peer).await?;
+    let events = Events::from_env();
+    dns::global().update_link_servers(&arguments.dns_servers);
+    let peer_cache = PeerCache::new(&arguments.peer_cache);
+    let (peer, peer_from_cache, peer_cache_key) =
+        resolve_peer(&arguments.peer, &peer_cache).await?;
+    let peer_cache_guard = Arc::new(PeerCacheGuard::new(
+        peer_cache,
+        peer_from_cache,
+        events.ready_flag(),
+        peer_cache_key,
+    ));
     let mode = ObfsMode::parse(&arguments.obfs)?;
     let turn_transport = TurnTransportMode::parse(&arguments.turn_transport)?;
     let srtp_mode = SrtpMode::parse(&arguments.srtp_mode)?;
@@ -273,7 +289,6 @@ async fn run(arguments: Arguments) -> Result<i32> {
     let groups = workers.div_ceil(WORKERS_PER_GROUP);
     let cancel = CancellationToken::new();
     let captcha = CaptchaSolver::new(&arguments.captcha_mode, cancel.clone());
-    let events = Events::from_env();
     let client_ids: Vec<_> = arguments
         .client_ids
         .split(',')
@@ -402,7 +417,6 @@ async fn run(arguments: Arguments) -> Result<i32> {
                 continue;
             }
             if let Some(value) = config.strip_prefix("TUNCONF:") {
-                dns::mark_tunnel_active();
                 let mut fields = value.splitn(3, ':');
                 let ip = fields.next().unwrap_or_default();
                 let dns = fields.next().unwrap_or_default();
@@ -501,6 +515,8 @@ async fn run(arguments: Arguments) -> Result<i32> {
         }
     }
     let termination = dispatcher.termination();
+    // Пир из кэша без первого READY — адрес устарел, файл удаляется.
+    peer_cache_guard.finish();
     shutdown_events.stopped();
     crate::log_error!("[КЛИЕНТ] Все воркеры завершены");
     match termination {
@@ -572,6 +588,8 @@ fn normalize_cli_argument(argument: String) -> String {
         "vk",
         "vk-hash-mode",
         "peer",
+        "dns-servers",
+        "peer-cache",
         "client-ids",
         "vk-auth-mode",
         "captcha-mode",
@@ -728,17 +746,56 @@ async fn run_vk_hash_validation(arguments: &Arguments) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_peer(peer: &str) -> Result<SocketAddr> {
-    let mut last_error = None;
-    for _ in 0..15 {
-        match dns::resolve_socket(peer).await {
-            Ok(address) => return Ok(address),
-            Err(error) => last_error = Some(error),
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+/// Резолв `--peer`: один проход ладдера (повтор после полной тишины уже внутри
+/// `dns`), кэш последнего IP — только после отказа DNS.
+async fn resolve_peer(
+    peer: &str,
+    cache: &PeerCache,
+) -> Result<(SocketAddr, bool, Option<(String, IpAddr)>)> {
+    resolve_peer_with(
+        peer,
+        |host| async move { dns::global().lookup_a(&host).await },
+        cache,
+    )
+    .await
+}
+
+/// Тестируемая часть `resolve_peer`: lookup инжектируется, кэш — снаружи.
+///
+/// Возвращает адрес, признак «взят из кэша» и ключ для записи в кэш после
+/// первого READY. Литеральный адрес ключа не даёт; успешный DNS и попадание
+/// в кэш дают `(host, ip)`. До READY файл не пишется, поэтому SIGKILL не
+/// оставляет непроверенный IP.
+async fn resolve_peer_with<F, Fut>(
+    peer: &str,
+    lookup: F,
+    cache: &PeerCache,
+) -> Result<(SocketAddr, bool, Option<(String, IpAddr)>)>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<IpAddr>>>,
+{
+    let peer = peer.trim();
+    if let Ok(address) = peer.parse::<SocketAddr>() {
+        return Ok((address, false, None));
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("пустой DNS-ответ для пира")))
-        .context("ошибка разбора пира")
+    let (host, port) = dns::split_host_port(peer).context("ошибка разбора пира")?;
+    match lookup(host.clone()).await {
+        Ok(addresses) => {
+            let ip = addresses
+                .into_iter()
+                .next()
+                .context("пустой DNS-ответ для пира")?;
+            Ok((SocketAddr::new(ip, port), false, Some((host, ip))))
+        }
+        Err(error) => match cache.read(&host) {
+            Some(ip) => {
+                crate::log_error!("[DNS] Использован последний IP пира {ip} для {host}");
+                Ok((SocketAddr::new(ip, port), true, Some((host, ip))))
+            }
+            None => Err(error.context("ошибка разбора пира")),
+        },
+    }
 }
 
 fn start_control_input(
@@ -798,6 +855,19 @@ fn start_control_input(
                         }
                     } else if let Some(payload) = line.strip_prefix("UPDATE_DOMAINS|") {
                         dispatcher.update_domain_routing(payload);
+                    } else if let Some(payload) = line.strip_prefix("UPDATE_DNS|") {
+                        // Список для лога берём из того же парсера, что применяет
+                        // резолвер; неверные адреса просто отбрасываются.
+                        let (link, _) = dns::parse_link_servers(payload);
+                        let (accepted, dropped) = dns::global().update_link_servers(payload);
+                        let link = link
+                            .iter()
+                            .map(|server| server.ip().to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        crate::log_error!(
+                            "[DNS] UPDATE_DNS: принято {accepted}, отброшено {dropped}, link=[{link}]"
+                        );
                     } else if let Some(payload) = line.strip_prefix("UPDATE_IPS|") {
                         let (sha, blob) = payload.split_once('|').unwrap_or((payload, ""));
                         if let Err(error) = dispatcher
@@ -885,6 +955,24 @@ fn print_configuration(
     );
     crate::log_error!("[WRAP] WRAP Ключ вычислен ✓");
     crate::log_error!("[КЛИЕНТ] Captcha: {captcha}");
+    let (link_servers, _) = dns::parse_link_servers(&arguments.dns_servers);
+    let link = if link_servers.is_empty() {
+        "пусто".to_owned()
+    } else {
+        link_servers
+            .iter()
+            .map(|server| server.ip().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let peer_cache = if arguments.peer_cache.trim().is_empty() {
+        "выкл".to_owned()
+    } else {
+        arguments.peer_cache.trim().to_owned()
+    };
+    crate::log_error!(
+        "[КЛИЕНТ] Bootstrap DNS: link=[{link}] | static=Яндекс,НСДИ | system=on | peer-cache={peer_cache}"
+    );
     if arguments.domain_routing {
         crate::log_error!(
             "[КЛИЕНТ] Доменная маршрутизация: ВКЛ (кастомных доменов: {})",
@@ -1112,5 +1200,225 @@ mod worker_count_tests {
             .map(|s| normalize_cli_argument(s.to_string()));
         let arguments = Arguments::try_parse_from(normalized).unwrap();
         assert_eq!(arguments.domains_file, vec!["domains.txt"]);
+    }
+
+    #[test]
+    fn bootstrap_dns_flags_parse_with_single_and_double_dashes() {
+        let arguments = Arguments::try_parse_from([
+            "csqtt-client",
+            "--vk",
+            "abc",
+            "--peer",
+            "127.0.0.1:9000",
+            "--dns-servers",
+            "95.167.167.95,95.167.167.96",
+            "--peer-cache",
+            "/data/files/peer_cache.json",
+        ])
+        .unwrap();
+        assert_eq!(arguments.dns_servers, "95.167.167.95,95.167.167.96");
+        assert_eq!(arguments.peer_cache, "/data/files/peer_cache.json");
+
+        let normalized = [
+            "csqtt-client",
+            "--vk",
+            "abc",
+            "--peer",
+            "127.0.0.1:9000",
+            "-dns-servers",
+            "95.167.167.95",
+            "-peer-cache",
+            "/data/files/peer_cache.json",
+        ]
+        .iter()
+        .map(|s| normalize_cli_argument(s.to_string()));
+        let arguments = Arguments::try_parse_from(normalized).unwrap();
+        assert_eq!(arguments.dns_servers, "95.167.167.95");
+        assert_eq!(arguments.peer_cache, "/data/files/peer_cache.json");
+
+        let defaults =
+            Arguments::try_parse_from(["csqtt-client", "--vk", "abc", "--peer", "127.0.0.1:9000"])
+                .unwrap();
+        assert!(
+            defaults.dns_servers.is_empty(),
+            "пустой link-тир по умолчанию"
+        );
+        assert!(
+            defaults.peer_cache.is_empty(),
+            "кэш пира выключен по умолчанию"
+        );
+    }
+
+    #[test]
+    fn normalize_cli_argument_rewrites_bootstrap_dns_flags() {
+        assert_eq!(
+            normalize_cli_argument("-dns-servers".to_owned()),
+            "--dns-servers"
+        );
+        assert_eq!(
+            normalize_cli_argument("-peer-cache".to_owned()),
+            "--peer-cache"
+        );
+        assert_eq!(
+            normalize_cli_argument("-peer-cache=/data/peer_cache.json".to_owned()),
+            "--peer-cache=/data/peer_cache.json"
+        );
+    }
+
+    #[test]
+    fn update_dns_payload_stays_visible_in_stdin_logs() {
+        assert_eq!(
+            loggable_stdin_line("UPDATE_DNS|95.167.167.95,95.167.167.96"),
+            "UPDATE_DNS|95.167.167.95,95.167.167.96"
+        );
+    }
+}
+
+#[cfg(test)]
+mod peer_resolution_tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    const PEER_IP: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 5);
+
+    fn temp_cache(name: &str) -> (PeerCache, std::path::PathBuf) {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let unique = format!(
+            "csqtt-resolve-peer-{}-{}-{name}.json",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        );
+        let path = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_file(&path);
+        (PeerCache::new(path.to_string_lossy().as_ref()), path)
+    }
+
+    fn dns_failure() -> anyhow::Error {
+        anyhow::anyhow!("DNS недоступен")
+    }
+
+    #[tokio::test]
+    async fn resolve_peer_does_not_write_before_ready() {
+        let (cache, path) = temp_cache("success");
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let counter = lookups.clone();
+        let (socket, from_cache, key) = resolve_peer_with(
+            "peer.example:46000",
+            move |host| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(host, "peer.example");
+                    Ok(vec![IpAddr::V4(PEER_IP)])
+                }
+            },
+            &cache,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(socket, SocketAddr::new(IpAddr::V4(PEER_IP), 46000));
+        assert!(!from_cache);
+        assert_eq!(lookups.load(Ordering::SeqCst), 1, "один проход ладдера");
+        assert_eq!(key, Some(("peer.example".to_owned(), IpAddr::V4(PEER_IP))));
+        let cache = PeerCache::new(path.to_string_lossy().as_ref());
+        assert_eq!(cache.read("peer.example"), None, "до READY файл не пишется");
+
+        let guard = PeerCacheGuard::new(
+            cache,
+            false,
+            Arc::new(AtomicBool::new(true)),
+            Some(("peer.example".to_owned(), IpAddr::V4(PEER_IP))),
+        );
+        guard.finish();
+        let cache = PeerCache::new(path.to_string_lossy().as_ref());
+        assert_eq!(cache.read("peer.example"), Some(IpAddr::V4(PEER_IP)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn resolve_peer_falls_back_to_the_last_good_ip() {
+        let (cache, path) = temp_cache("fallback");
+        cache.write("peer.example", IpAddr::V4(PEER_IP));
+        let (socket, from_cache, key) = resolve_peer_with(
+            "peer.example:46000",
+            |_| async { Err::<Vec<IpAddr>, _>(dns_failure()) },
+            &cache,
+        )
+        .await
+        .unwrap();
+
+        assert!(from_cache, "IP должен прийти из кэша");
+        assert_eq!(socket, SocketAddr::new(IpAddr::V4(PEER_IP), 46000));
+        assert_eq!(key, Some(("peer.example".to_owned(), IpAddr::V4(PEER_IP))));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn resolve_peer_without_a_cached_ip_reports_the_dns_error_once() {
+        let (cache, path) = temp_cache("no-cache");
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let counter = lookups.clone();
+        let error = resolve_peer_with(
+            "peer.example:46000",
+            move |_| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Err::<Vec<IpAddr>, _>(dns_failure())
+                }
+            },
+            &cache,
+        )
+        .await
+        .expect_err("без кэша пир не резолвится");
+
+        assert_eq!(lookups.load(Ordering::SeqCst), 1, "не 15 попыток");
+        assert!(format!("{error:#}").contains("DNS недоступен"), "{error:#}");
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn resolve_peer_literal_address_skips_dns_and_cache() {
+        let (cache, path) = temp_cache("literal");
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let counter = lookups.clone();
+        let (socket, from_cache, key) = resolve_peer_with(
+            "127.0.0.1:46000",
+            move |_| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Err::<Vec<IpAddr>, _>(dns_failure())
+                }
+            },
+            &cache,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(socket, "127.0.0.1:46000".parse().unwrap());
+        assert!(!from_cache);
+        assert_eq!(key, None, "литеральный адрес не кэшируется");
+        assert_eq!(lookups.load(Ordering::SeqCst), 0, "литерал без DNS");
+        assert!(!path.exists(), "литеральный адрес кэш не пишет");
+    }
+
+    #[tokio::test]
+    async fn resolve_peer_guard_deletes_a_cached_ip_without_ready() {
+        let (cache, path) = temp_cache("guard");
+        cache.write("peer.example", IpAddr::V4(PEER_IP));
+        let (_, from_cache, key) = resolve_peer_with(
+            "peer.example:46000",
+            |_| async { Err::<Vec<IpAddr>, _>(dns_failure()) },
+            &cache,
+        )
+        .await
+        .unwrap();
+        assert!(from_cache);
+
+        let guard = PeerCacheGuard::new(cache, from_cache, Arc::new(AtomicBool::new(false)), key);
+        guard.finish();
+        assert!(!path.exists(), "без READY кэш удаляется");
     }
 }

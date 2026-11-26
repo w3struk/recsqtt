@@ -272,7 +272,13 @@ pub(crate) async fn group_sub_page(
     let count = items.len();
     let clients_json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
     let asset_base = sub_asset_base(group_sub_uuid);
-    Html(render_group_sub_html(&group.name, &clients_json, count, &asset_base)).into_response()
+    Html(render_group_sub_html(
+        &group.name,
+        &clients_json,
+        count,
+        &asset_base,
+    ))
+    .into_response()
 }
 
 pub(crate) async fn group_sub_json(
@@ -364,9 +370,7 @@ pub(crate) async fn universal_sub_json(
         Some(SubUuidKind::Client) => {
             client_sub_json(State(state), Path(uuid), headers, token).await
         }
-        Some(SubUuidKind::Group) => {
-            group_sub_json(State(state), Path(uuid), headers, token).await
-        }
+        Some(SubUuidKind::Group) => group_sub_json(State(state), Path(uuid), headers, token).await,
         None => {
             if let Some(Extension(ctrl)) = token {
                 ctrl.abort();

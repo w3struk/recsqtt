@@ -14,6 +14,7 @@ const NETWORK_TIMEOUT_BURST_WINDOW: Duration = Duration::from_secs(15);
 #[derive(Clone)]
 pub struct Events {
     enabled: bool,
+    ready_seen: Arc<AtomicBool>,
     panel_restart_emitted: Arc<AtomicBool>,
     network_suspect_emitted: Arc<AtomicBool>,
     network_timeouts: Arc<AtomicUsize>,
@@ -29,6 +30,7 @@ impl Events {
     pub(crate) fn new(enabled: bool) -> Self {
         Self {
             enabled,
+            ready_seen: Arc::new(AtomicBool::new(false)),
             panel_restart_emitted: Arc::new(AtomicBool::new(false)),
             network_suspect_emitted: Arc::new(AtomicBool::new(false)),
             network_timeouts: Arc::new(AtomicUsize::new(0)),
@@ -41,6 +43,13 @@ impl Events {
         self.enabled
     }
 
+    /// Флаг первого `READY` воркера; общий с кэшем последнего IP пира.
+    ///
+    /// `TUNCONF` о готовности не говорит — она приходит только из воркера.
+    pub fn ready_flag(&self) -> Arc<AtomicBool> {
+        self.ready_seen.clone()
+    }
+
     fn emit<T: Serialize>(&self, kind: &str, payload: impl FnOnce() -> T) {
         if !self.enabled {
             return;
@@ -51,6 +60,9 @@ impl Events {
     }
 
     pub fn ready(&self, worker: usize) {
+        // Готовность отмечается до emit и независимо от `enabled`: по ней
+        // решается судьба кэша последнего IP пира.
+        self.ready_seen.store(true, Ordering::Release);
         self.emit("READY", || serde_json::json!({"worker": worker}));
     }
 
@@ -310,6 +322,18 @@ mod tests {
             .expect("a routing rule above the old 4 KiB limit must still fit");
         assert!(line.starts_with("__CSQTT_EVENT__|ROUTING|{"));
         assert!(!line.contains("event_payload_too_large"));
+    }
+
+    #[test]
+    fn ready_event_sets_the_shared_flag_even_without_protocol_events() {
+        let events = Events::new(false);
+        let flag = events.ready_flag();
+        assert!(!flag.load(Ordering::Acquire));
+        events.ready(3);
+        assert!(
+            flag.load(Ordering::Acquire),
+            "READY из воркера отмечает готовность независимо от CSQTT_EVENTS"
+        );
     }
 
     #[test]

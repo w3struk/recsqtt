@@ -281,7 +281,10 @@ mod secret_path {
             (format!("/{SUB_UUID}/sub"), format!("/{SUB_UUID}")),
             (format!("/{SUB_UUID}/sub/"), format!("/{SUB_UUID}")),
             (format!("/{GROUP_UUID}/sub-group"), format!("/{GROUP_UUID}")),
-            (format!("/{GROUP_UUID}/sub-group/"), format!("/{GROUP_UUID}")),
+            (
+                format!("/{GROUP_UUID}/sub-group/"),
+                format!("/{GROUP_UUID}"),
+            ),
         ] {
             let response = target
                 .request_with_header("GET", &uri, "user-agent", "browser")
@@ -318,10 +321,7 @@ mod secret_path {
             format!("/{SECRET}/")
         );
         for name in ["x-content-type-options", "strict-transport-security"] {
-            assert!(
-                headers.contains_key(name),
-                "редирект без заголовка {name}"
-            );
+            assert!(headers.contains_key(name), "редирект без заголовка {name}");
         }
     }
 

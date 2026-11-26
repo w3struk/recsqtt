@@ -198,9 +198,11 @@ sudo csqttctl status
 
 1. **CLI-флаги.** `TunnelManager.startProcessLocked` (Kotlin) вручную собирает argv; его определяет
    `#[derive(Parser)] struct Arguments` в `rust-client/main.rs`. Новый флаг требует правок в обоих местах.
+   `-dns-servers` и `-peer-cache` — тот же контракт: Kotlin добавляет одиночный дефис, `LONG_FLAGS`
+   нормализует его в `--`.
 2. **Канал управления через stdin.** Kotlin пишет строки в stdin дочернего процесса; `rust-client/main.rs`
    в `start_control_input` принимает `PAUSE`, `RESUME`, `STOP`, `FINISH_VK_CALLS`, `CAPTCHA_RESULT|<payload>`,
-   `UPDATE_DOMAINS|<json>`, `VK_JS_BOOTSTRAP:<base64>`. Канал считается **обязательным** — закрытый или
+   `UPDATE_DOMAINS|<json>`, `UPDATE_DNS|<csv>`, `VK_JS_BOOTSTRAP:<base64>`. Канал считается **обязательным** — закрытый или
    отдавший ошибку stdin отменяет туннель, когда включены события.
 3. **События в stdout.** Формат `__CSQTT_EVENT__|KIND|{json}`, отправляются только при `CSQTT_EVENTS=1`
    в окружении (Kotlin всегда его ставит). Определены в `rust-client/events.rs` (`EVENT_PREFIX`),
@@ -267,9 +269,11 @@ sudo csqttctl status
     `cloudflare` по умолчанию; российские, государственные и smart-DNS пресеты
     не возвращать. Удалённые и неизвестные id/адреса нормализуются в `cloudflare`
     при старте и импорте (`normalize_dns_selection`). Клиентский bootstrap
-    (`rust-client/dns.rs`) от сервера не зависит и сейчас остаётся жёстким; его
-    целевое состояние — `LinkProperties` физической сети → system → жёсткие адреса
-    последним шансом, отдельным планом. Меняя одну плоскость, не ломайте другую.
+    (`rust-client/dns.rs`) от сервера не зависит: ладдер `LinkProperties`
+    физической сети → static (Яндекс, НСДИ) → system, бюджет 5,2 с, мягкий
+    `NXDOMAIN`, health и кэш; последний IP пира — `-peer-cache`. Kotlin передаёт
+    DNS физической сети через `-dns-servers` и `UPDATE_DNS|`. Меняя одну
+    плоскость, не ломайте другую.
 
 ## Правила Rust, которые роняют сборку
 
@@ -377,3 +381,5 @@ https://github.com/Ivan4537/WDTT-Plus
 https://github.com/kulikov0/whitelist-bypass
 https://github.com/SanityProtocol/swg-panel
 https://github.com/cacggghp/vk-turn-proxy
+https://github.com/WINGS-N/WINGSV
+https://github.com/openlibrecommunity/olcrtc - это TCP-over-WebRTC через SFU-провайдеров (`jitsi`/`telemost`/`wbstream`), с `smux` и XChaCha20-Poly1305.

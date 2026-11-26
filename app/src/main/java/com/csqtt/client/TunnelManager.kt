@@ -105,6 +105,13 @@ object TunnelManager {
     private var processIdentity: ProcessIdentity? = null
     @Volatile
     private var nativeProcessPid: Int? = null
+    /**
+     * DNS физической сети (VPN отфильтрован) для bootstrap-резолва клиента.
+     * Список переживает пересоздание процесса: он уходит в argv каждого старта
+     * и в stdin `UPDATE_DNS|...` при смене сети.
+     */
+    @Volatile
+    private var physicalDnsServers: List<String> = emptyList()
     @Volatile
     private var readerJob: Job? = null
     @Volatile
@@ -126,6 +133,7 @@ object TunnelManager {
     private const val VPN_START_RETRY_MS = 10_000L
     private const val TUN_LOSS_REBUILD_WINDOW_MS = 60_000L
     private const val IPS_WRITE_ERROR = "routing_ips_write_err"
+    private const val DNS_COMMAND_ERROR = "dns_command_error"
 
     private val startStopMutex = kotlinx.coroutines.sync.Mutex()
     private val lifecycleState = TunnelLifecycleState()
@@ -480,6 +488,24 @@ object TunnelManager {
         activeScope.launch {
             writeProcessCommand(identity, "RESUME", "network_resume_command_error")
         }
+    }
+
+    /**
+     * DNS физической сети изменились (смена Wi-Fi/LTE, потеря сети).
+     *
+     * Без живого процесса список только сохраняется — он станет argv следующего
+     * старта. Живому процессу уходит `UPDATE_DNS|...`, и только при реальном
+     * изменении: колбэки приходят пачками на одну и ту же сеть. Ошибка записи
+     * не терминальна — DNS-ладдер клиента переживёт мёртвый link-тир.
+     */
+    fun onPhysicalDnsChanged(servers: List<String>) {
+        val normalized = PhysicalDnsPolicy.normalize(servers)
+        val identity = synchronized(pendingRoutingReload) {
+            if (physicalDnsServers == normalized) return
+            physicalDnsServers = normalized
+            processIdentity
+        } ?: return
+        writeProcessCommand(identity, PhysicalDnsPolicy.command(normalized), DNS_COMMAND_ERROR)
     }
 
     fun onVpnInterfaceReady(dns: String? = null) {
@@ -1384,17 +1410,24 @@ object TunnelManager {
                 lifecycleState.accepts(identity.ticket)
         }
 
-    private fun attachProcessIdentity(startedProcess: Process, ticket: TunnelLifecycleTicket): ProcessIdentity =
-        synchronized(pendingRoutingReload) {
+    private fun attachProcessIdentity(startedProcess: Process, ticket: TunnelLifecycleTicket): ProcessIdentity {
+        val identity = synchronized(pendingRoutingReload) {
             processGeneration = if (processGeneration == Long.MAX_VALUE) 1L else processGeneration + 1L
-            val identity = ProcessIdentity(startedProcess, processGeneration, ticket, 3_500L)
-            process = startedProcess
-            processIdentity = identity
-            pendingRoutingReload.begin(identity.generation)
-            routingTerminal = false
-            vpnReady.value = false
-            identity
+            ProcessIdentity(startedProcess, processGeneration, ticket, 3_500L).also {
+                process = startedProcess
+                processIdentity = it
+                pendingRoutingReload.begin(it.generation)
+                routingTerminal = false
+                vpnReady.value = false
+            }
         }
+        // Окно между argv-снимком и публикацией identity: список DNS мог смениться,
+        // пока процесса ещё не было, и тогда `onPhysicalDnsChanged` только сохранил его.
+        // Досылаем текущий список один раз — `UPDATE_DNS` идемпотентно заменяет
+        // link-тир, поэтому повтор того же значения безопасен.
+        writeProcessCommand(identity, PhysicalDnsPolicy.command(physicalDnsServers), DNS_COMMAND_ERROR)
+        return identity
+    }
 
     private fun detachProcessIdentity() {
         synchronized(pendingRoutingReload) {
@@ -1568,6 +1601,9 @@ object TunnelManager {
             "-listen", "${CsqttConstants.Network.LOCAL_LISTEN_HOST}:${params.port}",
             "-tun-uds", "csqtt_tun_uds",
         )
+        PhysicalDnsArgvPolicy.flag(physicalDnsServers).forEach(cmd::add)
+        cmd.add("-peer-cache")
+        cmd.add(File(context.filesDir, CsqttConstants.Tunnel.PEER_CACHE_NAME).absolutePath)
         if (hashList.isNotEmpty()) {
             cmd.add("-vk")
             cmd.add(hashList.joinToString(","))
@@ -1629,6 +1665,13 @@ object TunnelManager {
             failStartLocked("critical_start_error", "Критическая ошибка запуска: ${e.readableMessage()}")
             return
         }
+        // Метка для замеров «EXEC → первый READY»: ровно одна строка на старт.
+        // Стоит до записи bootstrap, чтобы не нарушить контракт первого stdin-сообщения.
+        val startedPid = processIdOf(startedProcess)
+        Log.i(
+            "CSQTT/Exec",
+            if (startedPid != null) "Rust client started pid=$startedPid" else "Rust client started",
+        )
         if (jsHashMode) {
             val bootstrap = JSONObject()
                 .put("token", params.vkAccessToken)

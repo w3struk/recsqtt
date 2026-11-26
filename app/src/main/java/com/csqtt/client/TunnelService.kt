@@ -19,6 +19,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -40,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.net.HttpURLConnection
+import java.net.Inet4Address
 import java.net.URL
 
 private const val TUNNEL_NOTIFICATION_CHANNEL_ID = CsqttConstants.Notifications.TUNNEL_CHANNEL_ID
@@ -813,6 +815,10 @@ class TunnelService : Service() {
 
         CaptchaWebViewManager.onTunnelStart(applicationContext)
 
+        // Синхронный снимок физических сетей перед `TunnelManager.start`: callback'и
+        // асинхронны, и без этого первый процесс мог бы стартовать с пустым list-тиром.
+        refreshPhysicalDnsServers()
+
         serviceScope.launch {
             runCatching { SettingsStore(applicationContext).saveTunnelWasRunning(true) }
         }
@@ -834,6 +840,7 @@ class TunnelService : Service() {
                 networkLossJob = null
                 requestWifiAutoPauseReconciliation()
                 rememberPhysicalCandidate(network)
+                refreshPhysicalDnsServers()
                 if (autoPausedForWifi) return
                 startVkNetworkProbe(network)
             }
@@ -843,17 +850,22 @@ class TunnelService : Service() {
                 requestWifiAutoPauseReconciliation()
                 if (hasPhysicalInternetCapability(capabilities)) {
                     rememberPhysicalCandidate(network)
-                    if (autoPausedForWifi) return
-                    startVkNetworkProbe(network)
+                    if (!autoPausedForWifi) startVkNetworkProbe(network)
                 } else {
                     forgetPhysicalNetwork(network)
                 }
+                refreshPhysicalDnsServers()
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                refreshPhysicalDnsServers()
             }
 
             override fun onLost(network: Network) {
                 forgetPhysicalWifiNetwork(network)
                 requestWifiAutoPauseReconciliation()
                 forgetPhysicalNetwork(network)
+                refreshPhysicalDnsServers()
             }
         }
         networkCallback = callback
@@ -1208,6 +1220,48 @@ class TunnelService : Service() {
             wifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
             cellular = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
         )
+
+    /**
+     * Читает DNS физической сети — не VPN. Пока туннель поднят, `activeNetwork`
+     * это VPN, и его DNS (`77.88.8.8` на TUN) клиенту напрямую недоступен,
+     * поэтому перебираются ВСЕ сети. Вызов идёт на callback-потоке и делает
+     * только binder-снимок: тяжёлой работы нет.
+     */
+    private fun readPhysicalDnsCandidates(): List<PhysicalDnsCandidate> {
+        // allNetworks устарел (API 31), но только он даёт все сети без гонки:
+        // callback-карта на старте ещё пуста.
+        @Suppress("DEPRECATION")
+        val networks = runCatching { connectivityManager.allNetworks }.getOrNull() ?: return emptyList()
+        val activeNetwork = runCatching { connectivityManager.activeNetwork }.getOrNull()
+        return networks.mapNotNull { network ->
+            val capabilities = runCatching { connectivityManager.getNetworkCapabilities(network) }
+                .getOrNull() ?: return@mapNotNull null
+            val linkProperties = runCatching { connectivityManager.getLinkProperties(network) }
+                .getOrNull() ?: return@mapNotNull null
+            val isVpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            val hasInternet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            // Captive portal: INTERNET без VALIDATED, DNS при этом может работать.
+            if (isVpn || !hasInternet) return@mapNotNull null
+            PhysicalDnsCandidate(
+                active = network == activeNetwork,
+                // `usable` — это «VK достижим», а не «DNS жив»: политика сортирует
+                // по нему, но не отбрасывает сеть с ещё не подтверждённым VK.
+                usable = physicalNetworks.isUsable(network),
+                isVpn = isVpn,
+                hasInternet = hasInternet,
+                isWifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+                isCellular = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+                // Bootstrap — только IPv4; IPv6-адреса в link-тир не попадают.
+                ipv4Servers = linkProperties.dnsServers
+                    .filterIsInstance<Inet4Address>()
+                    .mapNotNull { it.hostAddress },
+            )
+        }
+    }
+
+    private fun refreshPhysicalDnsServers() {
+        TunnelManager.onPhysicalDnsChanged(PhysicalDnsPolicy.select(readPhysicalDnsCandidates()))
+    }
 
     private fun isAirplaneModeOn(): Boolean =
         runCatching {
