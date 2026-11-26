@@ -556,6 +556,8 @@ async fn routing_learned_a_to_b_update_changes_udp_verdict_and_observed_delivery
             .learned_test_hooks
             .checkpoint(LearnedCheckpointStage::PreresolveBeforeCommit, domain);
         dispatcher.update_domain_routing(&format!("enabled=1;domains={domain}"));
+        // В ЧС применение конфигурации больше не запускает предрезолв.
+        direct.preresolve_domains(vec![domain.to_owned()]);
         tokio::time::timeout(Duration::from_secs(2), reached.notified())
             .await
             .unwrap();

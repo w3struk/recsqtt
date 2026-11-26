@@ -1453,18 +1453,28 @@ impl Dispatcher {
                     &config.direct_domains,
                 );
             let known = self.direct_ips.load_full();
-            if self.dns_domain_map.publish_routing_learning(
+            let published = self.dns_domain_map.publish_routing_learning(
                 &self.domain_routing,
                 &self.direct_ips,
                 &origin,
                 &domain,
                 &ips,
                 direct,
-            ) && direct
-            {
+            );
+            if published && direct {
                 for ip in ips.iter().filter(|ip| !known.contains(ip)) {
                     crate::log_error!("[DNS-РОУТИНГ] Прямой домен: {domain} -> {ip}");
                 }
+            }
+            // Запрос без ответа (или ответ, который приложение получит не через
+            // TUN) не даёт пары домен→IP. Ставим домен в приоритет добора,
+            // чтобы не ждать конца очереди.
+            if published
+                && direct
+                && ips.is_empty()
+                && let Some(relay) = &self.direct_relay
+            {
+                relay.request_backfill(&domain);
             }
         }
         if let Some((sni, _port)) = crate::sni::parse_ip_packet_sni(slice)

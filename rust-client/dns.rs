@@ -25,11 +25,23 @@
 //! | мягкий `NXDOMAIN` не кэшируется                               | `cache_soft_nxdomain_not_cached`                 |
 //! | `UPDATE_DNS` сохраняет положительный кэш                       | `cache_update_dns_preserves_positive`            |
 //! | `UPDATE_DNS` отменяет in-flight проход и перезапускает ладдер  | `update_dns_replaces_link_and_cancels_inflight`  |
+//! | параллельные одинаковые lookup делят один проход ладдера       | `singleflight_shares_one_ladder_pass`            |
+//! | отмена ведущего не отменяет ведомого и не залипает запись      | `singleflight_leader_abort_does_not_cancel_follower` |
+//! | отказ кэшируется только после исчерпания повторов              | `failure_cache_written_only_after_retry_exhaustion` |
+//! | TTL отказа растёт вдвое, ответ стирает запись                  | `failure_cache_backoff_and_clear`                |
+//! | кулдаун — со второго подряд отказа, счётчик свой у каждого     | `cooldown_needs_two_consecutive_failures`         |
+//! | `SERVFAIL` не уводит в кулдаун с первого раза                  | `servfail_needs_two_consecutive_failures_for_cooldown` |
+//! | локальная ошибка не считается отказом сервера                  | `local_failure_does_not_strike_server`           |
 //! | таймаут сервера уводит его в кулдаун                          | `health_skips_timed_out_server`                  |
 //! | успешный источник пробуется первым в следующем lookup         | `health_preferred_source_first`                  |
 //!
 //! Bootstrap — только IPv4: DNS-серверы, адрес пира и статический список. AAAA
 //! запрашивается лишь после `NODATA` для A, а `lookup_a` (пир) AAAA не делает вовсе.
+//!
+//! Отказы живут в трёх независимых плоскостях: singleflight (`flights`) делят
+//! один проход между одинаковыми запросами, `failures` помнят исчерпанный отказ
+//! пары `(host, qtype)` на 2–30 с, а `HealthState.strikes` считает подряд идущие
+//! отказы каждого сервера до кулдауна 15–30 с.
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -65,10 +77,22 @@ const RETRY_DELAY: Duration = Duration::from_millis(1000);
 const RETRY_ATTEMPTS: usize = 1;
 /// Сколько раз `lookup` перезапускает проход после смены DNS-списка.
 const MAX_RESTARTS: usize = 4;
-/// Кулдаун сервера/источника после таймаута или `SERVFAIL`.
-const COOLDOWN: Duration = Duration::from_secs(45);
+/// Порог подряд идущих отказов сервера, после которого начинается кулдаун.
+/// Одиночный таймаут сервер не карантинит.
+const FAILURE_THRESHOLD: u32 = 2;
+/// Кулдаун сервера/источника: база 15 с, удвоение на каждый следующий отказ,
+/// потолок 30 с.
+const COOLDOWN_BASE: Duration = Duration::from_secs(15);
+const COOLDOWN_MAX: Duration = Duration::from_secs(30);
 const POSITIVE_CACHE_MAX_TTL: Duration = Duration::from_secs(900);
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(45);
+/// Негативный кэш отказов (после исчерпания повторов): база 2 с, удвоение на
+/// каждый следующий подряд отказ, потолок 30 с, разброс ±20 %.
+const FAILURE_CACHE_BASE_TTL: Duration = Duration::from_secs(2);
+const FAILURE_CACHE_MAX_TTL: Duration = Duration::from_secs(30);
+/// Сколько ведомый участник общего резолва ждёт результата ведущего: полный
+/// бюджет `lookup_qtype` (до `MAX_RESTARTS + 1` проходов с повтором) плюс запас.
+const FLIGHT_WAIT: Duration = Duration::from_secs(35);
 const CACHE_MAX_ENTRIES: usize = 1024;
 const DNS_A_RECORD: u16 = 1;
 const DNS_AAAA_RECORD: u16 = 28;
@@ -138,9 +162,17 @@ struct ResolverConfig {
     retry_delay: Duration,
     retry_attempts: usize,
     query_timeout: Duration,
-    cooldown: Duration,
+    /// Отказов подряд до кулдауна сервера/системного резолвера.
+    failure_threshold: u32,
+    cooldown_base: Duration,
+    cooldown_max: Duration,
     positive_cache_max_ttl: Duration,
     negative_cache_ttl: Duration,
+    /// Негативный кэш отказов: база и потолок TTL.
+    failure_cache_base_ttl: Duration,
+    failure_cache_max_ttl: Duration,
+    /// Таймаут ведомого участника общего резолва.
+    flight_wait: Duration,
     cache_max_entries: usize,
     /// Порт, который получают адреса из `-dns-servers`/`UPDATE_DNS` (в тестах — эфемерный).
     link_port: u16,
@@ -157,9 +189,14 @@ impl ResolverConfig {
             retry_delay: RETRY_DELAY,
             retry_attempts: RETRY_ATTEMPTS,
             query_timeout: DNS_TIMEOUT,
-            cooldown: COOLDOWN,
+            failure_threshold: FAILURE_THRESHOLD,
+            cooldown_base: COOLDOWN_BASE,
+            cooldown_max: COOLDOWN_MAX,
             positive_cache_max_ttl: POSITIVE_CACHE_MAX_TTL,
             negative_cache_ttl: NEGATIVE_CACHE_TTL,
+            failure_cache_base_ttl: FAILURE_CACHE_BASE_TTL,
+            failure_cache_max_ttl: FAILURE_CACHE_MAX_TTL,
+            flight_wait: FLIGHT_WAIT,
             cache_max_entries: CACHE_MAX_ENTRIES,
             link_port: DNS_PORT,
             static_providers: STATIC_PROVIDERS.to_vec(),
@@ -193,7 +230,12 @@ enum QueryOutcome {
     Answer(DnsAnswer),
     NoData,
     NxDomain,
+    /// Сервер ответил `SERVFAIL`/`REFUSED` — это отказ сервера, он идёт в счётчик.
     ServerFailure,
+    /// Сервер не ответил за `query_timeout` — тоже отказ сервера.
+    Timeout,
+    /// Локальная ошибка (не собрать запрос, не открыть сокет, битый ответ).
+    /// Отказом сервера не считается и счётчик не трогает.
     Failed,
 }
 
@@ -241,9 +283,80 @@ enum CacheLookup {
 #[derive(Default)]
 struct HealthState {
     cooldown: HashMap<SocketAddr, Instant>,
+    /// Подряд идущие отказы каждого сервера. Ключ — сам сервер, поэтому отказ
+    /// одного сервера не влияет на счётчики остальных.
+    strikes: HashMap<SocketAddr, u32>,
     system_cooldown: Option<Instant>,
+    system_strikes: u32,
     preferred: Option<SourceId>,
     last_good: Option<(SourceId, SocketAddr)>,
+}
+
+/// Запись негативного кэша отказов: ладдер исчерпал повторы для `(host, qtype)`.
+struct FailureEntry {
+    /// Сколько раз подряд по этой паре не ответил ни один источник.
+    strikes: u32,
+    expires_at: Instant,
+    /// Текст ошибки для восстановления `anyhow` у каждого вызывающего.
+    message: String,
+}
+
+impl FailureEntry {
+    fn is_fresh(&self, now: Instant) -> bool {
+        now < self.expires_at
+    }
+}
+
+/// Общий результат прохода ладдера: клонируемый, чтобы его получили все
+/// участники singleflight, а `anyhow` каждый восстанавливает сам.
+type SharedResult = Result<QtypeResult, String>;
+
+/// Один общий проход ладдера по паре `(host, qtype)`.
+struct Flight {
+    sender: tokio::sync::watch::Sender<Option<SharedResult>>,
+}
+
+impl Default for Flight {
+    fn default() -> Self {
+        let (sender, _receiver) = tokio::sync::watch::channel(None);
+        Self { sender }
+    }
+}
+
+impl Flight {
+    /// Ждёт результат ведущего; `None` — ведущий пропал (задача снята).
+    async fn wait(&self) -> Option<SharedResult> {
+        let mut receiver = self.sender.subscribe();
+        loop {
+            if let Some(result) = (*receiver.borrow()).clone() {
+                return Some(result);
+            }
+            if receiver.changed().await.is_err() {
+                return (*receiver.borrow()).clone();
+            }
+        }
+    }
+}
+
+/// Убирает запись singleflight по завершении ведущего — в том числе если
+/// ведущий паникует: `Drop` выполняется при раскрутке стека.
+struct FlightGuard {
+    inner: Arc<Inner>,
+    key: (String, u16),
+    flight: Arc<Flight>,
+}
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        write_lock(&self.inner.flights, |flights| {
+            let same = flights
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.flight));
+            if same {
+                flights.remove(&self.key);
+            }
+        });
+    }
 }
 
 /// Результат одного прохода ладдера по одному QNAME.
@@ -284,9 +397,17 @@ impl Stage {
 }
 
 /// Результат одного QNAME внутри `lookup`.
+#[derive(Clone)]
 enum QtypeResult {
     Addresses(Vec<IpAddr>),
     NoData,
+}
+
+/// Что отдать вызывающему, если по паре уже записан недавний отказ.
+enum FailureHit {
+    /// Просроченный положительный ответ важнее отказа.
+    Addresses(Vec<IpAddr>),
+    Failure(anyhow::Error),
 }
 
 /// Результат системного резолвера.
@@ -319,16 +440,47 @@ fn qtype_label(qtype: u16) -> &'static str {
     }
 }
 
+/// TTL записи негативного кэша отказов: база × 2 за каждый подряд идущий отказ,
+/// не больше потолка, плюс разброс ±20 %.
+fn failure_ttl(base: Duration, max: Duration, strikes: u32) -> Duration {
+    let factor = 2_u32.saturating_pow(strikes.saturating_sub(1));
+    let ttl = base.saturating_mul(factor).min(max);
+    let percent = 80 + rand::random::<u32>() % 41;
+    (ttl * percent) / 100
+}
+
 fn nxdomain_error(host: &str) -> anyhow::Error {
     anyhow!("DNS: {host} не существует — NXDOMAIN подтверждён вторым источником")
 }
 
+/// Резолвер: публичная обёртка над общим состоянием.
+///
+/// Состояние лежит в `Arc`, чтобы ведущий проход singleflight жил отдельной
+/// задачей: таймаут или отмена вызывающего не должны отменять общий проход.
 pub struct DnsResolver {
+    inner: Arc<Inner>,
+}
+
+impl std::ops::Deref for DnsResolver {
+    type Target = Inner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+/// Общее состояние резолвера. `pub` только потому, что `Deref::Target` не может
+/// быть приватнее самого `DnsResolver`; снаружи модуля тип не используется.
+pub struct Inner {
     config: ResolverConfig,
     link: RwLock<Vec<SocketAddr>>,
     generation: AtomicU64,
     cancel: RwLock<CancellationToken>,
     cache: RwLock<HashMap<(String, u16), CacheEntry>>,
+    /// Негативный кэш отказов: пишется только после исчерпания повторов.
+    failures: RwLock<HashMap<(String, u16), FailureEntry>>,
+    /// Общие проходы ладдера: `(host, qtype)` -> текущий ведущий.
+    flights: RwLock<HashMap<(String, u16), Arc<Flight>>>,
     health: RwLock<HealthState>,
 }
 
@@ -345,12 +497,16 @@ impl DnsResolver {
 
     fn from_config(config: ResolverConfig, link: Vec<SocketAddr>) -> Self {
         Self {
-            config,
-            link: RwLock::new(link),
-            generation: AtomicU64::new(0),
-            cancel: RwLock::new(CancellationToken::new()),
-            cache: RwLock::new(HashMap::new()),
-            health: RwLock::new(HealthState::default()),
+            inner: Arc::new(Inner {
+                config,
+                link: RwLock::new(link),
+                generation: AtomicU64::new(0),
+                cancel: RwLock::new(CancellationToken::new()),
+                cache: RwLock::new(HashMap::new()),
+                failures: RwLock::new(HashMap::new()),
+                flights: RwLock::new(HashMap::new()),
+                health: RwLock::new(HealthState::default()),
+            }),
         }
     }
 
@@ -403,6 +559,11 @@ impl DnsResolver {
             CacheLookup::Miss => {}
         }
         if !skip_a_pass {
+            match self.failure_hit(&normalized, DNS_A_RECORD) {
+                Some(FailureHit::Addresses(addresses)) => return Ok(addresses),
+                Some(FailureHit::Failure(error)) => return Err(error),
+                None => {}
+            }
             if let QtypeResult::Addresses(addresses) =
                 self.lookup_qtype(&normalized, DNS_A_RECORD).await?
             {
@@ -430,14 +591,66 @@ impl DnsResolver {
             }
             CacheLookup::Miss => {}
         }
+        match self.failure_hit(&normalized, DNS_AAAA_RECORD) {
+            Some(FailureHit::Addresses(addresses)) => return Ok(addresses),
+            Some(FailureHit::Failure(error)) => return Err(error),
+            None => {}
+        }
         match self.lookup_qtype(&normalized, DNS_AAAA_RECORD).await? {
             QtypeResult::Addresses(addresses) => Ok(addresses),
             QtypeResult::NoData => bail!("DNS: для {normalized} нет ни A, ни AAAA"),
         }
     }
 
-    /// Один QNAME с полным водопадом, одним повтором и кэшем.
+    /// Один общий проход ладдера на пару `(host, qtype)`.
+    ///
+    /// Первый вызывающий становится ведущим: проход уезжает в отдельную задачу,
+    /// поэтому его не отменяют ни таймаут, ни отмена ожидающих. Остальные ждут
+    /// тот же результат и применяют к ожиданию собственный таймаут.
     async fn lookup_qtype(&self, host: &str, qtype: u16) -> Result<QtypeResult> {
+        let key = (host.to_owned(), qtype);
+        let (flight, leader) = write_lock(&self.flights, |flights| match flights.get(&key) {
+            Some(flight) => (Arc::clone(flight), false),
+            None => {
+                let flight = Arc::new(Flight::default());
+                flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
+            }
+        });
+        if leader {
+            let inner = Arc::clone(&self.inner);
+            let guard_key = key.clone();
+            let task_flight = Arc::clone(&flight);
+            let task_host = key.0;
+            tokio::spawn(async move {
+                let _guard = FlightGuard {
+                    inner: Arc::clone(&inner),
+                    key: guard_key,
+                    flight: Arc::clone(&task_flight),
+                };
+                let result = inner.run_lookup_qtype(&task_host, qtype).await;
+                task_flight.sender.send_replace(Some(result));
+            });
+        }
+
+        let timeout = self.config.flight_wait;
+        match tokio::time::timeout(timeout, flight.wait()).await {
+            Ok(Some(Ok(result))) => Ok(result),
+            Ok(Some(Err(message))) => Err(anyhow::Error::msg(message)),
+            Ok(None) => Err(anyhow!("DNS: общий резолв {host} прерван")),
+            Err(_) => Err(anyhow!(
+                "DNS: ожидание общего резолва {host} {label} превысило {} мс",
+                timeout.as_millis(),
+                label = qtype_label(qtype)
+            )),
+        }
+    }
+}
+
+impl Inner {
+    /// Полный проход по одному QNAME: перезапуски после смены DNS-списка,
+    /// повтор после тишины и запись кэшей. Возвращает клонируемый результат.
+    async fn run_lookup_qtype(&self, host: &str, qtype: u16) -> SharedResult {
         let started = Instant::now();
         for _ in 0..=MAX_RESTARTS {
             let generation = self.generation.load(Ordering::Acquire);
@@ -447,9 +660,13 @@ impl DnsResolver {
             {
                 continue;
             }
-            return self.finish_lookup(host, qtype, outcome, started.elapsed());
+            return self
+                .finish_lookup(host, qtype, outcome, started.elapsed())
+                .map_err(|error| error.to_string());
         }
-        bail!("DNS: резолв {host} прерван сменой DNS-списка слишком много раз")
+        Err(format!(
+            "DNS: резолв {host} прерван сменой DNS-списка слишком много раз"
+        ))
     }
 
     async fn run_with_retry(&self, host: &str, qtype: u16) -> PassOutcome {
@@ -625,20 +842,47 @@ impl DnsResolver {
     fn mark_success(&self, source: SourceId, server: SocketAddr) {
         write_lock(&self.health, |health| {
             health.cooldown.remove(&server);
+            // Любой ответ сервера (Answer/NoData/NXDOMAIN) обнуляет только его
+            // собственный счётчик: успех одного сервера не прощает остальные.
+            health.strikes.remove(&server);
             health.preferred = Some(source);
             health.last_good = Some((source, server));
         });
     }
 
+    /// Длительность кулдауна: база × 2 на каждый отказ сверх порога, не больше
+    /// потолка.
+    fn cooldown_for(&self, strikes: u32) -> Duration {
+        let exponent = strikes.saturating_sub(self.config.failure_threshold);
+        let factor = 2_u32.saturating_pow(exponent);
+        self.config
+            .cooldown_base
+            .saturating_mul(factor)
+            .min(self.config.cooldown_max)
+    }
+
     fn mark_failure(&self, server: SocketAddr) {
-        let until = Instant::now() + self.config.cooldown;
-        let first_failure = write_lock(&self.health, |health| {
-            health.cooldown.insert(server, until).is_none()
+        let now = Instant::now();
+        let threshold = self.config.failure_threshold;
+        let (strikes, started, cooldown) = write_lock(&self.health, |health| {
+            let counter = health.strikes.entry(server).or_insert(0);
+            *counter = counter.saturating_add(1);
+            let strikes = *counter;
+            if strikes < threshold {
+                return (strikes, false, Duration::ZERO);
+            }
+            let cooldown = self.cooldown_for(strikes);
+            let started = health
+                .cooldown
+                .get(&server)
+                .is_none_or(|until| *until <= now);
+            health.cooldown.insert(server, now + cooldown);
+            (strikes, started, cooldown)
         });
-        if first_failure {
+        if started {
             crate::log_error!(
-                "[DNS] Сервер {server} в кулдауне {} с: таймаут или SERVFAIL",
-                self.config.cooldown.as_secs()
+                "[DNS] Сервер {server} в кулдауне {} с после {strikes} подряд отказов: таймаут или SERVFAIL",
+                cooldown.as_secs()
             );
         }
     }
@@ -646,19 +890,29 @@ impl DnsResolver {
     fn mark_system_success(&self) {
         write_lock(&self.health, |health| {
             health.system_cooldown = None;
+            health.system_strikes = 0;
             health.preferred = Some(SourceId::System);
         });
     }
 
     fn mark_system_failure(&self) {
-        let until = Instant::now() + self.config.cooldown;
-        let first_failure = write_lock(&self.health, |health| {
-            health.system_cooldown.replace(until).is_none()
+        let now = Instant::now();
+        let threshold = self.config.failure_threshold;
+        let (strikes, started, cooldown) = write_lock(&self.health, |health| {
+            health.system_strikes = health.system_strikes.saturating_add(1);
+            let strikes = health.system_strikes;
+            if strikes < threshold {
+                return (strikes, false, Duration::ZERO);
+            }
+            let cooldown = self.cooldown_for(strikes);
+            let started = health.system_cooldown.is_none_or(|until| until <= now);
+            health.system_cooldown = Some(now + cooldown);
+            (strikes, started, cooldown)
         });
-        if first_failure {
+        if started {
             crate::log_error!(
-                "[DNS] Системный резолвер в кулдауне {} с: таймаут",
-                self.config.cooldown.as_secs()
+                "[DNS] Системный резолвер в кулдауне {} с после {strikes} подряд отказов: таймаут",
+                cooldown.as_secs()
             );
         }
     }
@@ -744,7 +998,9 @@ impl DnsResolver {
                         return TierOutcome::NxDomainFinal;
                     }
                 }
-                QueryOutcome::ServerFailure | QueryOutcome::Failed => self.mark_failure(server),
+                QueryOutcome::ServerFailure | QueryOutcome::Timeout => self.mark_failure(server),
+                // Локальная ошибка (битый запрос/ответ, сокет) — не отказ сервера.
+                QueryOutcome::Failed => {}
             }
         }
         TierOutcome::Exhausted
@@ -797,7 +1053,7 @@ impl DnsResolver {
         .await
         {
             Ok(outcome) => outcome,
-            Err(_) => QueryOutcome::Failed,
+            Err(_) => QueryOutcome::Timeout,
         }
     }
 
@@ -820,6 +1076,7 @@ impl DnsResolver {
                         expires_at: Instant::now() + ttl,
                     },
                 );
+                self.clear_failure(host, qtype);
                 crate::log_info!(
                     "[DNS] {host} {label}: источник {}, {} адрес(ов), кэш=мимо, {millis} мс",
                     self.source_name(source),
@@ -835,6 +1092,7 @@ impl DnsResolver {
                         expires_at: Instant::now() + self.config.negative_cache_ttl,
                     },
                 );
+                self.clear_failure(host, qtype);
                 // NODATA домена списка маршрутизации — рутина (53–63 за прогон),
                 // на каждый QNAME строку не пишем; итог виден вызывающему.
                 Ok(QtypeResult::NoData)
@@ -847,6 +1105,7 @@ impl DnsResolver {
                         expires_at: Instant::now() + self.config.negative_cache_ttl,
                     },
                 );
+                self.clear_failure(host, qtype);
                 crate::log_error!(
                     "[DNS] {host} {label}: NXDOMAIN подтверждён вторым источником, {millis} мс"
                 );
@@ -861,6 +1120,9 @@ impl DnsResolver {
                 ))
             }
             PassOutcome::Silence => {
+                // Повторы исчерпаны — только здесь отказ попадает в негативный кэш.
+                let message = format!("DNS: ни один источник не ответил для {host}");
+                self.record_failure(host, qtype, &message);
                 if let Some(addresses) = self.stale_positive(host, qtype) {
                     crate::log_error!(
                         "[DNS] Использован просроченный кэш для {host} {label} (все источники недоступны), {millis} мс"
@@ -868,10 +1130,79 @@ impl DnsResolver {
                     return Ok(QtypeResult::Addresses(addresses));
                 }
                 crate::log_error!("[DNS] {host} {label}: ни один источник не ответил, {millis} мс");
-                Err(anyhow!("DNS: ни один источник не ответил для {host}"))
+                Err(anyhow!(message))
             }
             PassOutcome::Cancelled => bail!("DNS: резолв {host} отменён сменой DNS-списка"),
         }
+    }
+
+    /// Свежая запись негативного кэша отказов, если она есть.
+    ///
+    /// Просроченный положительный ответ важнее недавнего отказа: тогда
+    /// возвращается он, а не ошибка.
+    fn failure_hit(&self, host: &str, qtype: u16) -> Option<FailureHit> {
+        let key = (host.to_owned(), qtype);
+        let now = Instant::now();
+        let message = read_lock(&self.failures, |failures| {
+            failures
+                .get(&key)
+                .filter(|entry| entry.is_fresh(now))
+                .map(|entry| entry.message.clone())
+        })?;
+        if let Some(addresses) = self.stale_positive(host, qtype) {
+            crate::log_error!(
+                "[DNS] Использован просроченный кэш для {host} {} (недавний отказ источников)",
+                qtype_label(qtype)
+            );
+            return Some(FailureHit::Addresses(addresses));
+        }
+        crate::log_info!(
+            "[DNS] {host} {}: недавний отказ источников, ладдер пропущен",
+            qtype_label(qtype)
+        );
+        Some(FailureHit::Failure(anyhow::Error::msg(message)))
+    }
+
+    /// Запоминает отказ после исчерпания повторов: TTL растёт вдвое за каждый
+    /// следующий подряд отказ, потолок `failure_cache_max_ttl`, разброс ±20 %.
+    fn record_failure(&self, host: &str, qtype: u16, message: &str) {
+        let key = (host.to_owned(), qtype);
+        let now = Instant::now();
+        let max_entries = self.config.cache_max_entries;
+        let base = self.config.failure_cache_base_ttl;
+        let max = self.config.failure_cache_max_ttl;
+        write_lock(&self.failures, |failures| {
+            if !failures.contains_key(&key) && failures.len() >= max_entries {
+                failures.retain(|_, entry| entry.is_fresh(now));
+                while failures.len() >= max_entries {
+                    let oldest = failures
+                        .iter()
+                        .min_by_key(|(_, entry)| entry.expires_at)
+                        .map(|(key, _)| key.clone());
+                    match oldest {
+                        Some(oldest) => {
+                            failures.remove(&oldest);
+                        }
+                        None => break,
+                    }
+                }
+            }
+            let entry = failures.entry(key).or_insert_with(|| FailureEntry {
+                strikes: 0,
+                expires_at: now,
+                message: message.to_owned(),
+            });
+            entry.strikes = entry.strikes.saturating_add(1);
+            entry.message = message.to_owned();
+            entry.expires_at = now + failure_ttl(base, max, entry.strikes);
+        });
+    }
+
+    fn clear_failure(&self, host: &str, qtype: u16) {
+        let key = (host.to_owned(), qtype);
+        write_lock(&self.failures, |failures| {
+            failures.remove(&key);
+        });
     }
 
     fn cache_lookup(&self, host: &str, qtype: u16) -> CacheLookup {
@@ -921,8 +1252,8 @@ impl DnsResolver {
         });
     }
 
-    /// Заменяет link-список, отменяет in-flight проход и сбрасывает health и
-    /// отрицательный кэш; положительный кэш сохраняется.
+    /// Заменяет link-список, отменяет in-flight проход и сбрасывает health,
+    /// отрицательный кэш и кэш отказов; положительный кэш сохраняется.
     pub fn update_link_servers(&self, csv: &str) -> (usize, usize) {
         let (servers, dropped) = parse_link_servers_with_port(csv, self.config.link_port);
         let accepted = servers.len();
@@ -940,6 +1271,7 @@ impl DnsResolver {
         write_lock(&self.cache, |cache| {
             cache.retain(|_, entry| matches!(entry, CacheEntry::Positive { .. }));
         });
+        write_lock(&self.failures, |failures| failures.clear());
         (accepted, dropped)
     }
 }
@@ -1461,9 +1793,14 @@ mod tests {
             retry_delay: Duration::from_millis(20),
             retry_attempts: 1,
             query_timeout: Duration::from_millis(80),
-            cooldown: Duration::from_secs(5),
+            failure_threshold: FAILURE_THRESHOLD,
+            cooldown_base: Duration::from_secs(5),
+            cooldown_max: Duration::from_secs(10),
             positive_cache_max_ttl: Duration::from_secs(900),
             negative_cache_ttl: Duration::from_secs(45),
+            failure_cache_base_ttl: FAILURE_CACHE_BASE_TTL,
+            failure_cache_max_ttl: FAILURE_CACHE_MAX_TTL,
+            flight_wait: Duration::from_secs(2),
             cache_max_entries: 1024,
             link_port: DNS_PORT,
             static_providers: Vec::new(),
@@ -1802,7 +2139,8 @@ mod tests {
             total_budget: Duration::from_millis(200),
             retry_delay: Duration::from_millis(10),
             query_timeout: Duration::from_millis(30),
-            cooldown: Duration::from_secs(60),
+            cooldown_base: Duration::from_secs(60),
+            cooldown_max: Duration::from_secs(60),
             static_providers: vec![provider("fake-static", statics.address, true)],
             ..base_config()
         };
@@ -2279,17 +2617,36 @@ mod tests {
             system_budget: Duration::from_millis(30),
             total_budget: Duration::from_millis(140),
             query_timeout: Duration::from_millis(25),
-            cooldown: Duration::from_secs(60),
+            cooldown_base: Duration::from_secs(60),
+            cooldown_max: Duration::from_secs(60),
             static_providers: vec![provider("fake-static", statics.address, true)],
             ..base_config()
         };
         let resolver = DnsResolver::with_config(config, vec![silent.address]);
 
+        // Первый таймаут — только счётчик, кулдауна ещё нет.
         assert_eq!(
             resolver.lookup_a("one.example").await.unwrap(),
             vec![IpAddr::V4(TEST_IP)]
         );
         assert_eq!(silent.a_count(), 1);
+        assert!(
+            !resolver
+                .health
+                .read()
+                .unwrap()
+                .cooldown
+                .contains_key(&silent.address),
+            "один таймаут не уводит сервер в кулдаун"
+        );
+
+        // Второй подряд — кулдаун.
+        resolver.health.write().unwrap().preferred = None;
+        assert_eq!(
+            resolver.lookup_a("two.example").await.unwrap(),
+            vec![IpAddr::V4(TEST_IP)]
+        );
+        assert_eq!(silent.a_count(), 2);
         assert!(
             resolver
                 .health
@@ -2309,10 +2666,10 @@ mod tests {
         // Снимаем предпочтение, чтобы проверить именно кулдаун link.
         resolver.health.write().unwrap().preferred = None;
         assert_eq!(
-            resolver.lookup_a("two.example").await.unwrap(),
+            resolver.lookup_a("three.example").await.unwrap(),
             vec![IpAddr::V4(TEST_IP)]
         );
-        assert_eq!(silent.a_count(), 1, "сервер в кулдауне не опрашивается");
+        assert_eq!(silent.a_count(), 2, "сервер в кулдауне не опрашивается");
     }
 
     #[tokio::test]
@@ -2325,7 +2682,8 @@ mod tests {
             system_budget: Duration::from_millis(30),
             total_budget: Duration::from_millis(200),
             query_timeout: Duration::from_millis(40),
-            cooldown: Duration::from_secs(60),
+            cooldown_base: Duration::from_secs(60),
+            cooldown_max: Duration::from_secs(60),
             static_providers: vec![provider("fake-static", statics.address, true)],
             ..base_config()
         };
@@ -2404,7 +2762,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_failure_is_not_an_answer_and_puts_server_in_cooldown() {
+    async fn servfail_needs_two_consecutive_failures_for_cooldown() {
         let link = FakeDns::spawn(Behavior::ServFail).await;
         let statics = FakeDns::spawn(answering(OTHER_IP)).await;
         let config = ResolverConfig {
@@ -2413,7 +2771,8 @@ mod tests {
             system_budget: Duration::from_millis(30),
             total_budget: Duration::from_millis(140),
             query_timeout: Duration::from_millis(30),
-            cooldown: Duration::from_secs(60),
+            cooldown_base: Duration::from_secs(60),
+            cooldown_max: Duration::from_secs(60),
             static_providers: vec![provider("fake-static", statics.address, true)],
             ..base_config()
         };
@@ -2424,13 +2783,344 @@ mod tests {
             vec![IpAddr::V4(OTHER_IP)]
         );
         assert_eq!(link.a_count(), 1);
+        {
+            let health = resolver.health.read().unwrap();
+            assert!(
+                !health.cooldown.contains_key(&link.address),
+                "один SERVFAIL не уводит сервер в кулдаун"
+            );
+            assert_eq!(health.strikes.get(&link.address), Some(&1));
+        }
+
+        // Снимаем предпочтение, чтобы link снова опросили первым.
+        resolver.health.write().unwrap().preferred = None;
+        assert_eq!(
+            resolver.lookup_a("servfail-2.example").await.unwrap(),
+            vec![IpAddr::V4(OTHER_IP)]
+        );
+        assert_eq!(link.a_count(), 2);
         assert!(
             resolver
                 .health
                 .read()
                 .unwrap()
                 .cooldown
-                .contains_key(&link.address)
+                .contains_key(&link.address),
+            "второй подряд SERVFAIL — кулдаун"
         );
+    }
+
+    /// Ждёт выполнения условия, опрашивая его раз в 5 мс (не дольше секунды).
+    async fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if condition() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        false
+    }
+
+    /// Состояние записи негативного кэша отказов: (strikes, остаток TTL).
+    fn failure_state(resolver: &DnsResolver, host: &str, qtype: u16) -> (u32, Duration) {
+        let failures = resolver.failures.read().unwrap();
+        let entry = failures
+            .get(&(host.to_owned(), qtype))
+            .expect("ожидалась запись негативного кэша отказов");
+        (
+            entry.strikes,
+            entry.expires_at.saturating_duration_since(Instant::now()),
+        )
+    }
+
+    #[tokio::test]
+    async fn singleflight_shares_one_ladder_pass() {
+        let link = FakeDns::spawn_delayed(answering(TEST_IP), Duration::from_millis(80)).await;
+        let config = ResolverConfig {
+            link_budget: Duration::from_millis(400),
+            total_budget: Duration::from_millis(500),
+            query_timeout: Duration::from_millis(400),
+            ..base_config()
+        };
+        let resolver = Arc::new(DnsResolver::with_config(config, vec![link.address]));
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let resolver = Arc::clone(&resolver);
+            tasks.push(tokio::spawn(async move {
+                resolver.lookup_a("burst.example").await
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap(), vec![IpAddr::V4(TEST_IP)]);
+        }
+        assert_eq!(
+            link.a_count(),
+            1,
+            "все параллельные запросы делят один проход ладдера"
+        );
+        assert!(
+            resolver.flights.read().unwrap().is_empty(),
+            "общий проход снят из карты после завершения"
+        );
+    }
+
+    #[tokio::test]
+    async fn singleflight_leader_abort_does_not_cancel_follower() {
+        let link = FakeDns::spawn_delayed(answering(TEST_IP), Duration::from_millis(150)).await;
+        let config = ResolverConfig {
+            link_budget: Duration::from_millis(400),
+            total_budget: Duration::from_millis(500),
+            query_timeout: Duration::from_millis(400),
+            ..base_config()
+        };
+        let resolver = Arc::new(DnsResolver::with_config(config, vec![link.address]));
+
+        let leader = tokio::spawn({
+            let resolver = Arc::clone(&resolver);
+            async move { resolver.lookup_a("slow.example").await }
+        });
+        assert!(
+            wait_until(|| link.a_count() > 0).await,
+            "ведущий не отправил запрос"
+        );
+        let follower = tokio::spawn({
+            let resolver = Arc::clone(&resolver);
+            async move { resolver.lookup_a("slow.example").await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            resolver.flights.read().unwrap().len(),
+            1,
+            "ведомый присоединяется к общему проходу"
+        );
+
+        leader.abort();
+        assert_eq!(
+            follower.await.unwrap().unwrap(),
+            vec![IpAddr::V4(TEST_IP)],
+            "отмена ведущего не отменяет общий проход"
+        );
+        assert_eq!(link.a_count(), 1, "проход остался один");
+        assert!(
+            resolver.flights.read().unwrap().is_empty(),
+            "запись общего прохода не залипла"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_cache_written_only_after_retry_exhaustion() {
+        let link = FakeDns::spawn(Behavior::Silent).await;
+        let config = ResolverConfig {
+            link_budget: Duration::from_millis(30),
+            static_budget: Duration::from_millis(30),
+            system_budget: Duration::from_millis(20),
+            total_budget: Duration::from_millis(100),
+            query_timeout: Duration::from_millis(20),
+            retry_delay: Duration::from_millis(300),
+            ..base_config()
+        };
+        let resolver = Arc::new(DnsResolver::with_config(config, vec![link.address]));
+
+        let lookup = tokio::spawn({
+            let resolver = Arc::clone(&resolver);
+            async move { resolver.lookup_a("flaky.example").await }
+        });
+        assert!(wait_until(|| link.a_count() >= 1).await);
+        assert!(
+            resolver.failures.read().unwrap().is_empty(),
+            "после первого прохода отказ ещё не запоминается"
+        );
+
+        let error = lookup.await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("ни один источник не ответил"),
+            "{error}"
+        );
+        assert_eq!(link.a_count(), 2, "оба прохода исчерпаны");
+        let (strikes, ttl) = failure_state(&resolver, "flaky.example", DNS_A_RECORD);
+        assert_eq!(strikes, 1);
+        assert!(
+            ttl >= Duration::from_millis(1600) && ttl <= Duration::from_millis(2400),
+            "TTL базы 2 с с разбросом ±20 %: {ttl:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_cache_backoff_and_clear() {
+        let link = FakeDns::spawn(Behavior::Silent).await;
+        let config = ResolverConfig {
+            // Кулдаун длиннее теста: сервер не должен выпадать из ладдера раньше
+            // второго отказа, иначе проход сократится.
+            cooldown_base: Duration::from_secs(60),
+            cooldown_max: Duration::from_secs(60),
+            retry_delay: Duration::from_millis(10),
+            ..base_config()
+        };
+        let resolver = DnsResolver::with_config(config, vec![link.address]);
+
+        assert!(resolver.lookup_a("down.example").await.is_err());
+        let (strikes, ttl) = failure_state(&resolver, "down.example", DNS_A_RECORD);
+        assert_eq!(strikes, 1);
+        assert!(ttl <= Duration::from_millis(2400), "{ttl:?}");
+
+        // Просрочиваем запись: следующий подряд отказ удваивает TTL.
+        {
+            let mut failures = resolver.failures.write().unwrap();
+            if let Some(entry) = failures.get_mut(&("down.example".to_owned(), DNS_A_RECORD)) {
+                entry.expires_at = Instant::now() - Duration::from_millis(1);
+            }
+        }
+        assert!(resolver.lookup_a("down.example").await.is_err());
+        let (strikes, ttl) = failure_state(&resolver, "down.example", DNS_A_RECORD);
+        assert_eq!(strikes, 2);
+        assert!(
+            ttl >= Duration::from_millis(3200) && ttl <= Duration::from_millis(4800),
+            "второй подряд отказ удваивает TTL: {ttl:?}"
+        );
+
+        // Успешный ответ стирает запись негативного кэша отказов.
+        let link = FakeDns::spawn(answering(TEST_IP)).await;
+        let resolver = DnsResolver::with_config(base_config(), vec![link.address]);
+        resolver.failures.write().unwrap().insert(
+            ("healed.example".to_owned(), DNS_A_RECORD),
+            FailureEntry {
+                strikes: 3,
+                expires_at: Instant::now() - Duration::from_secs(1),
+                message: "DNS: ни один источник не ответил для healed.example".to_owned(),
+            },
+        );
+        assert_eq!(
+            resolver.lookup_a("healed.example").await.unwrap(),
+            vec![IpAddr::V4(TEST_IP)]
+        );
+        assert!(
+            resolver.failures.read().unwrap().is_empty(),
+            "успех стирает запись отказов"
+        );
+
+        // NODATA тоже считается состоявшимся ответом и стирает запись.
+        let nodata = FakeDns::spawn(Behavior::Answer {
+            v4: Vec::new(),
+            v6: Vec::new(),
+            ttl: 60,
+        })
+        .await;
+        let resolver = DnsResolver::with_config(base_config(), vec![nodata.address]);
+        resolver.failures.write().unwrap().insert(
+            ("empty.example".to_owned(), DNS_A_RECORD),
+            FailureEntry {
+                strikes: 3,
+                expires_at: Instant::now() - Duration::from_secs(1),
+                message: "DNS: ни один источник не ответил для empty.example".to_owned(),
+            },
+        );
+        assert!(resolver.lookup_a("empty.example").await.is_err());
+        assert!(
+            resolver.failures.read().unwrap().is_empty(),
+            "NODATA стирает запись отказов"
+        );
+    }
+
+    #[test]
+    fn cooldown_needs_two_consecutive_failures() {
+        let resolver = DnsResolver::with_config(base_config(), Vec::new());
+        let server = SocketAddr::new(IpAddr::V4(TEST_IP), DNS_PORT);
+        let other = SocketAddr::new(IpAddr::V4(OTHER_IP), DNS_PORT);
+
+        resolver.mark_failure(server);
+        {
+            let health = resolver.health.read().unwrap();
+            assert!(
+                !health.cooldown.contains_key(&server),
+                "первый отказ не уводит сервер в кулдаун"
+            );
+            assert_eq!(health.strikes.get(&server), Some(&1));
+        }
+
+        resolver.mark_failure(server);
+        {
+            let health = resolver.health.read().unwrap();
+            assert_eq!(health.strikes.get(&server), Some(&2));
+            let remaining = health
+                .cooldown
+                .get(&server)
+                .copied()
+                .expect("второй подряд отказ даёт кулдаун")
+                .saturating_duration_since(Instant::now());
+            assert!(
+                remaining > Duration::from_secs(4) && remaining <= Duration::from_secs(5),
+                "первый кулдаун равен базе: {remaining:?}"
+            );
+        }
+
+        // Третий подряд отказ удваивает кулдаун, четвёртый упирается в потолок.
+        for expected_seconds in [10_u64, 10] {
+            resolver
+                .health
+                .write()
+                .unwrap()
+                .cooldown
+                .insert(server, Instant::now() - Duration::from_millis(1));
+            resolver.mark_failure(server);
+            let health = resolver.health.read().unwrap();
+            let remaining = health
+                .cooldown
+                .get(&server)
+                .copied()
+                .expect("кулдаун продлевается")
+                .saturating_duration_since(Instant::now());
+            assert!(
+                remaining > Duration::from_secs(expected_seconds - 1)
+                    && remaining <= Duration::from_secs(expected_seconds),
+                "кулдаун растёт до потолка: {remaining:?}"
+            );
+        }
+
+        // Успех сбрасывает свой счётчик и не трогает чужой.
+        resolver.mark_failure(other);
+        resolver.mark_success(SourceId::Link, server);
+        {
+            let health = resolver.health.read().unwrap();
+            assert!(!health.cooldown.contains_key(&server));
+            assert_eq!(health.strikes.get(&server), None);
+            assert_eq!(
+                health.strikes.get(&other),
+                Some(&1),
+                "успех одного сервера не сбрасывает счётчик другого"
+            );
+        }
+
+        // Системный тир живёт по тому же правилу: второй таймаут — кулдаун.
+        resolver.mark_system_failure();
+        assert!(
+            resolver.health.read().unwrap().system_cooldown.is_none(),
+            "первый таймаут системы не уводит её в кулдаун"
+        );
+        resolver.mark_system_failure();
+        assert!(resolver.health.read().unwrap().system_cooldown.is_some());
+        resolver.mark_system_success();
+        {
+            let health = resolver.health.read().unwrap();
+            assert!(health.system_cooldown.is_none());
+            assert_eq!(health.system_strikes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_failure_does_not_strike_server() {
+        let server = SocketAddr::new(IpAddr::V4(TEST_IP), DNS_PORT);
+        let resolver = DnsResolver::with_config(base_config(), vec![server]);
+
+        // Некорректное имя валит `build_query` — это локальная ошибка, а не
+        // ответ сервера.
+        assert!(resolver.lookup_a("bad..name").await.is_err());
+        let health = resolver.health.read().unwrap();
+        assert!(
+            health.strikes.is_empty(),
+            "локальная ошибка не считается отказом сервера"
+        );
+        assert!(health.cooldown.is_empty());
+        assert_eq!(health.system_strikes, 0);
     }
 }
