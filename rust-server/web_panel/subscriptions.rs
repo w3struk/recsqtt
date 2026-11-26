@@ -1,3 +1,4 @@
+use crate::App;
 use crate::model;
 use crate::web_assets::CLIENT_SUB_HTML;
 use crate::web_assets::GROUP_SUB_HTML;
@@ -23,18 +24,69 @@ pub(crate) fn html_escape(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-pub(crate) fn render_client_sub_html(client_name: &str, csqtt_link: &str) -> String {
+/// Тип capability-UUID: по нему JSON-эндпоинт выбирает страницу подписки.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubUuidKind {
+    Client,
+    Group,
+}
+
+/// Единственное определение «подписка известна»: его используют JSON-эндпоинт,
+/// стелс-фильтр plain-HTTP и ассеты страниц подписки. Одна блокировка на
+/// проверку — прежние копии брали её дважды.
+pub(crate) async fn known_sub_uuid(app: &App, uuid: &str) -> Option<SubUuidKind> {
+    let uuid = uuid.trim();
+    if uuid.is_empty() {
+        return None;
+    }
+    let db = app.db.read().await;
+    if db
+        .passwords
+        .values()
+        .any(|entry| !entry.sub_uuid.is_empty() && entry.sub_uuid == uuid)
+    {
+        return Some(SubUuidKind::Client);
+    }
+    if db
+        .groups
+        .values()
+        .any(|group| !group.sub_uuid.is_empty() && group.sub_uuid == uuid)
+    {
+        return Some(SubUuidKind::Group);
+    }
+    None
+}
+
+/// Базовый путь capability-страницы: ассеты подставляются абсолютно, потому
+/// что панель раздаёт ссылку без завершающего слэша (`/{uuid}/sub`), и
+/// относительный `../` там разрешился бы в корень.
+pub(crate) fn sub_asset_base(sub_uuid: &str) -> String {
+    html_escape(&format!("/{}", sub_uuid.trim()))
+}
+
+pub(crate) fn render_client_sub_html(
+    client_name: &str,
+    csqtt_link: &str,
+    asset_base: &str,
+) -> String {
     let name_esc = html_escape(client_name);
     let link_esc = html_escape(csqtt_link);
     CLIENT_SUB_HTML
+        .replace("__ASSET_BASE__", asset_base)
         .replace("__CLIENT_NAME__", &name_esc)
         .replace("__CSQTT_LINK__", &link_esc)
 }
 
-pub(crate) fn render_group_sub_html(group_name: &str, clients_json: &str, count: usize) -> String {
+pub(crate) fn render_group_sub_html(
+    group_name: &str,
+    clients_json: &str,
+    count: usize,
+    asset_base: &str,
+) -> String {
     let name_esc = html_escape(group_name);
     let json_esc = js_json_embed(clients_json);
     GROUP_SUB_HTML
+        .replace("__ASSET_BASE__", asset_base)
         .replace("__GROUP_NAME__", &name_esc)
         .replace("__CLIENTS_COUNT__", &count.to_string())
         .replace("__CLIENTS_JSON__", &json_esc)
@@ -93,7 +145,8 @@ pub(crate) async fn client_sub_page(
     } else {
         entry.name.clone()
     };
-    Html(render_client_sub_html(&client_name, &link)).into_response()
+    let asset_base = sub_asset_base(sub_uuid);
+    Html(render_client_sub_html(&client_name, &link, &asset_base)).into_response()
 }
 
 pub(crate) async fn client_sub_json(
@@ -218,7 +271,8 @@ pub(crate) async fn group_sub_page(
     items.sort_by(|a, b| a.name.cmp(&b.name));
     let count = items.len();
     let clients_json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
-    Html(render_group_sub_html(&group.name, &clients_json, count)).into_response()
+    let asset_base = sub_asset_base(group_sub_uuid);
+    Html(render_group_sub_html(&group.name, &clients_json, count, &asset_base)).into_response()
 }
 
 pub(crate) async fn group_sub_json(
@@ -306,28 +360,20 @@ pub(crate) async fn universal_sub_json(
         }
         return stealth_abort_response();
     }
-    let is_client = {
-        let db = state.app.db.read().await;
-        db.passwords
-            .values()
-            .any(|p| !p.sub_uuid.is_empty() && p.sub_uuid == trimmed)
-    };
-    if is_client {
-        return client_sub_json(State(state), Path(uuid), headers, token).await;
+    match known_sub_uuid(&state.app, trimmed).await {
+        Some(SubUuidKind::Client) => {
+            client_sub_json(State(state), Path(uuid), headers, token).await
+        }
+        Some(SubUuidKind::Group) => {
+            group_sub_json(State(state), Path(uuid), headers, token).await
+        }
+        None => {
+            if let Some(Extension(ctrl)) = token {
+                ctrl.abort();
+            }
+            stealth_abort_response()
+        }
     }
-    let is_group = {
-        let db = state.app.db.read().await;
-        db.groups
-            .values()
-            .any(|g| !g.sub_uuid.is_empty() && g.sub_uuid == trimmed)
-    };
-    if is_group {
-        return group_sub_json(State(state), Path(uuid), headers, token).await;
-    }
-    if let Some(Extension(ctrl)) = token {
-        ctrl.abort();
-    }
-    stealth_abort_response()
 }
 
 pub(crate) async fn client_sub_link_regenerate(

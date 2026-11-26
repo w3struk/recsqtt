@@ -1,6 +1,6 @@
 use crate::web_assets::{LOGIN_HTML, PANEL_HTML, QRCODE_JS};
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -175,4 +175,66 @@ pub(crate) async fn qrcode_js() -> Response {
         "application/javascript; charset=utf-8",
         "public, max-age=604800, immutable",
     )
+}
+
+/// Ассеты страниц подписки отдаются только под `/{uuid}/`: в корне их больше
+/// нет, а неизвестный UUID обязан вести себя как отсутствующий маршрут, иначе
+/// перебор путей снова выдаёт наличие панели. Учитываются и клиентские, и
+/// групповые capability-UUID — на них ссылаются обе страницы подписки.
+async fn sub_asset_denied(
+    state: &WebState,
+    uuid: &str,
+    token: Option<Extension<Arc<StealthAbortController>>>,
+) -> Option<Response> {
+    if known_sub_uuid(&state.app, uuid).await.is_some() {
+        return None;
+    }
+    if let Some(Extension(controller)) = token {
+        controller.abort();
+    }
+    Some(stealth_abort_response())
+}
+
+pub(crate) async fn sub_pwa_icon(
+    State(state): State<WebState>,
+    Path(uuid): Path<String>,
+    token: Option<Extension<Arc<StealthAbortController>>>,
+) -> Response {
+    if let Some(denied) = sub_asset_denied(&state, &uuid, token).await {
+        return denied;
+    }
+    pwa_icon().await
+}
+
+pub(crate) async fn sub_pwa_icon_192(
+    State(state): State<WebState>,
+    Path(uuid): Path<String>,
+    token: Option<Extension<Arc<StealthAbortController>>>,
+) -> Response {
+    if let Some(denied) = sub_asset_denied(&state, &uuid, token).await {
+        return denied;
+    }
+    pwa_icon_192().await
+}
+
+pub(crate) async fn sub_pwa_icon_512(
+    State(state): State<WebState>,
+    Path(uuid): Path<String>,
+    token: Option<Extension<Arc<StealthAbortController>>>,
+) -> Response {
+    if let Some(denied) = sub_asset_denied(&state, &uuid, token).await {
+        return denied;
+    }
+    pwa_icon_512().await
+}
+
+pub(crate) async fn sub_qrcode_js(
+    State(state): State<WebState>,
+    Path(uuid): Path<String>,
+    token: Option<Extension<Arc<StealthAbortController>>>,
+) -> Response {
+    if let Some(denied) = sub_asset_denied(&state, &uuid, token).await {
+        return denied;
+    }
+    qrcode_js().await
 }

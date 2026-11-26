@@ -455,6 +455,11 @@ Android и ждёт ответа до 60 с; ждёт при этом тольк
   принимает только `version: 2` с флагами `import_clients`/`import_settings`; занятый или чужой IP
   заменяется следующим свободным.
 - **PWA и заголовки.** `CACHE_NAME = 'csqtt-panel-shell-2.5.4-pwa6'` (версию сверяет `check_versions.sh`).
+  При заданном `CSQTT_WEB_SECRET_PATH` в корне нет ни одного PWA-ассета: корневой `manifest.webmanifest`
+  подставлял бы секрет в `id`/`start_url`/`scope`, а иконки и `qrcode.min.js` по известным путям выдавали бы
+  панель. Панель и логин ссылаются на ассеты относительно себя (под префиксом), `/{secret}` редиректит на
+  `/{secret}/`; страницы подписки берут иконки и `qrcode.min.js` из своего `/{uuid}/`, и неизвестный UUID
+  отвечает так же, как отсутствующий маршрут.
   Ответы получают `nosniff`, `X-Frame-Options: DENY`, CSP, HSTS `max-age=15552000`; HTML панели — `no-store`;
   имена и JSON в страницах подписок экранируются (`html_escape`, `js_json_embed`).
 

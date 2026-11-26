@@ -455,25 +455,7 @@ pub(crate) async fn is_valid_secret_path(raw_path: &str, app: &Arc<App>) -> bool
 
     let trimmed = normalized.trim_matches('/');
     let first_segment = trimmed.split('/').next().unwrap_or("");
-    if !first_segment.is_empty() {
-        let db = app.db.read().await;
-        if db
-            .passwords
-            .values()
-            .any(|p| !p.sub_uuid.is_empty() && p.sub_uuid == first_segment)
-        {
-            return true;
-        }
-        if db
-            .groups
-            .values()
-            .any(|g| !g.sub_uuid.is_empty() && g.sub_uuid == first_segment)
-        {
-            return true;
-        }
-    }
-
-    false
+    known_sub_uuid(app, first_segment).await.is_some()
 }
 
 impl<S> axum_server::accept::Accept<tokio::net::TcpStream, S> for DualAcceptor

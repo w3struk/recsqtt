@@ -1,12 +1,34 @@
 use crate::App;
 use crate::web_panel::*;
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::middleware;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::routing::post;
 use axum::routing::put;
 use std::sync::Arc;
+
+/// `/{secret}` → `/{secret}/`: страницы панели ссылаются на PWA-ассеты
+/// относительно себя, поэтому путь без завершающего слэша разрешал бы их в корне.
+async fn secret_root_trailing_slash(
+    State(state): State<WebState>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    let secret = state.app.web_secret_path.trim().trim_matches('/');
+    if !secret.is_empty() {
+        let path = request.uri().path();
+        if path.len() == secret.len() + 1 && path.strip_prefix('/') == Some(secret) {
+            let target = match request.uri().query() {
+                Some(query) => format!("{path}/?{query}"),
+                None => format!("{path}/"),
+            };
+            return Redirect::permanent(&target).into_response();
+        }
+    }
+    next.run(request).await
+}
 
 pub(crate) fn panel_router(app: Arc<App>) -> Router {
     let state = WebState { app: app.clone() };
@@ -115,18 +137,14 @@ pub(crate) fn panel_router(app: Arc<App>) -> Router {
     } else {
         let prefix = format!("/{}", secret);
         let trailing_prefix = format!("{}/", prefix);
+        // Ни одного PWA-ассета в корне: манифест подставлял бы секрет в
+        // `start_url`, а иконки и `qrcode.min.js` выдавали бы панель по
+        // известным путям. Панель берёт их относительно себя (под префиксом),
+        // страницы подписки — из своего `/{uuid}/`.
         router = router
             .route("/", get(root_with_secret))
             .route(&trailing_prefix, get(panel_root))
             .nest(&prefix, panel_routes);
-        router = router
-            .route("/manifest.webmanifest", get(pwa_manifest))
-            .route("/sw.js", get(pwa_service_worker))
-            .route("/pwa-icon.svg", get(pwa_icon))
-            .route("/pwa-icon-192.png", get(pwa_icon_192))
-            .route("/pwa-icon-512.png", get(pwa_icon_512))
-            .route("/qrcode.min.js", get(qrcode_js))
-            .route("/favicon.ico", get(favicon));
     }
 
     router
@@ -142,8 +160,16 @@ pub(crate) fn panel_router(app: Arc<App>) -> Router {
         .route("/{uuid}/sub-group.json", get(group_sub_json))
         .route("/api/sub-group/{uuid}", get(group_sub_json))
         .route("/api/sub-group/{uuid}/", get(group_sub_json))
+        .route("/{uuid}/pwa-icon.svg", get(sub_pwa_icon))
+        .route("/{uuid}/pwa-icon-192.png", get(sub_pwa_icon_192))
+        .route("/{uuid}/pwa-icon-512.png", get(sub_pwa_icon_512))
+        .route("/{uuid}/qrcode.min.js", get(sub_qrcode_js))
         .fallback(fallback_reject)
         .layer(DefaultBodyLimit::max(WEB_BODY_LIMIT_BYTES))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            secret_root_trailing_slash,
+        ))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
