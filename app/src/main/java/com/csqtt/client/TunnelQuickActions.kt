@@ -40,6 +40,10 @@ internal suspend fun toggleTunnelFromQuickAction(context: Context, openMain: () 
         context.startService(Intent(context, TunnelService::class.java).apply { action = QuickTunnelAction.STOP })
         return
     }
+    // Та же защёлка, что у логотипа на «Подключении»: тап по плитке сразу после
+    // остановки не поднимает сессию заново. Стоит после ветки STOP — выключение
+    // в этом окне обязано срабатывать.
+    if (TunnelManager.startCooldownActive()) return
     if (VpnService.prepare(context) != null) {
         context.showRaisedToast("Откройте reCSQTT и выдайте VPN-разрешение", Toast.LENGTH_LONG)
         openMain()

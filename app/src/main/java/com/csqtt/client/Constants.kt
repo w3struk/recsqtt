@@ -53,7 +53,8 @@ object CsqttConstants {
         const val CAPTCHA_MANUAL_TIMEOUT_MS = 60_000L
         const val CAPTCHA_WV_CREATE_TIMEOUT_MS = 3_000L
 
-        const val VPN_PERMISSION_COOLDOWN_MS = 300L
+        /** Окно после остановки, в котором повторный старт не поднимает сессию заново. */
+        const val POST_STOP_START_COOLDOWN_MS = 300L
 
         const val UPDATE_RATE_LIMIT_COOLDOWN_MS = 30L * 60L * 1000L
     }

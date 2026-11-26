@@ -95,6 +95,7 @@ class TunnelService : Service() {
     private var wakeLockExpiresAtElapsedMs = 0L
     private var wifiLock: WifiManager.WifiLock? = null
     private var updateJob: Job? = null
+    private var notificationStateJob: Job? = null
     private var startJob: Job? = null
     @Volatile
     private var startGeneration = 0L
@@ -1042,6 +1043,7 @@ class TunnelService : Service() {
                 networkLossJob?.cancel()
                 networkLossJob = null
                 TunnelManager.onPhysicalNetworkAvailable(applicationContext)
+                serviceScope.launch { updateNotification(currentNotificationText(), force = true) }
             }
             PhysicalNetworkTransition.UNAVAILABLE -> {
                 networkSwapJob?.cancel()
@@ -1064,6 +1066,7 @@ class TunnelService : Service() {
             }
             if (!physicalNetworks.hasUsableNetwork()) {
                 TunnelManager.suspendForNoNetwork(physicalNetworkPauseReason(isAirplaneModeOn()))
+                updateNotification(currentNotificationText(), force = true)
             }
         }.also { job ->
             job.invokeOnCompletion {
@@ -1078,6 +1081,7 @@ class TunnelService : Service() {
                 if (intent.action != Intent.ACTION_AIRPLANE_MODE_CHANGED) return
                 if (isAirplaneModeOn() && !physicalNetworks.hasUsableNetwork()) {
                     TunnelManager.suspendForNoNetwork(physicalNetworkPauseReason(true))
+                    updateNotification(currentNotificationText(), force = true)
                 }
             }
         }
@@ -1639,6 +1643,20 @@ class TunnelService : Service() {
                 delay(2000)
             }
         }
+        startNotificationStateUpdates()
+    }
+
+    /**
+     * Соединение меняет текст уведомления, но не приходит через `statistics`:
+     * обновляем шторку сразу, не дожидаясь такта с включённым экраном.
+     */
+    private fun startNotificationStateUpdates() {
+        notificationStateJob?.cancel()
+        notificationStateJob = serviceScope.launch(Dispatchers.Main) {
+            TunnelManager.connectionUiState.collect {
+                updateNotification(currentNotificationText(), force = true)
+            }
+        }
     }
 
     private fun currentNotificationText(): String {
@@ -1649,6 +1667,16 @@ class TunnelService : Service() {
         runCatching { (getSystemService(POWER_SERVICE) as PowerManager).isInteractive }.getOrDefault(true)
 
     private fun buildTunnelNotificationText(): String {
+        // Ожидание важнее счётчиков: запоздавшее событие STATS не должно
+        // возвращать в шторку старые цифры, пока сеть ещё не вернулась.
+        // Порядок пауз — как в панели: Wi-Fi перекрывает потерю сети.
+        if (TunnelManager.autoPausedForWifi.value) return "Ожидание. Автопауза при Wi-Fi"
+        TunnelManager.networkPauseReason.value?.let { reason ->
+            return networkPauseStatusText(reason)
+        }
+        if (!TunnelManager.connected.value) {
+            return if (TunnelManager.connectionStalled.value) "Нет соединения" else "Подключение..."
+        }
         val statsText = TunnelManager.stats.value.trim()
         return when {
             statsText.isEmpty() -> "Туннель активен"
@@ -1728,10 +1756,11 @@ class TunnelService : Service() {
         foregroundStarted = true
     }
 
-    private fun updateNotification(text: String) {
+    private fun updateNotification(text: String, force: Boolean = false) {
         if (lastNotificationText == text && isNotificationVisible()) return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (lastNotificationText != null &&
+        if (!force &&
+            lastNotificationText != null &&
             now - lastNotificationPostElapsedMs < NOTIFICATION_MIN_REBUILD_INTERVAL_MS
         ) {
             return
@@ -1763,6 +1792,9 @@ class TunnelService : Service() {
         autoPauseSettingsJob = null
         stopWifiAutoPauseWatch()
         updateJob?.cancel()
+        updateJob = null
+        notificationStateJob?.cancel()
+        notificationStateJob = null
         networkSwapJob?.cancel()
         networkSwapJob = null
         networkLossJob?.cancel()

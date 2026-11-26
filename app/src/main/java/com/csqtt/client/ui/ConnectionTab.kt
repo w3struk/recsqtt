@@ -9,6 +9,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -37,6 +39,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -46,17 +49,22 @@ import com.csqtt.client.ConnectionSource
 import com.csqtt.client.ConnectionStartBlocker
 import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
+import com.csqtt.client.PhysicalNetworkPauseReason
 import com.csqtt.client.R
 import com.csqtt.client.ProfileSettingsStore
 import com.csqtt.client.ProfileSummary
 import com.csqtt.client.SettingsStore
 import com.csqtt.client.TunnelAuthSnapshot
+import com.csqtt.client.TunnelConnectionStatus
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelService
 import com.csqtt.client.VkHashValidationCodec
 import com.csqtt.client.newTunnelSessionId
 import com.csqtt.client.resolveConnectionSource
 import com.csqtt.client.showRaisedToast
+import com.csqtt.client.showsSessionTimer
+import com.csqtt.client.tunnelConnectionStatus
+import com.csqtt.client.tunnelConnectionStatusText
 import com.csqtt.client.ui.components.CsqttScreen
 import com.csqtt.client.ui.design.CsqttShapes
 import com.csqtt.client.ui.design.CsqttTheme
@@ -86,7 +94,9 @@ internal fun ConnectionTab(
     val tunnelStarting by TunnelManager.starting.collectAsStateWithLifecycle()
     val tunnelStopping by TunnelManager.stopping.collectAsStateWithLifecycle()
     val autoPausedForWifi by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
-    val cooldownActive by TunnelManager.cooldownActive.collectAsStateWithLifecycle()
+    val networkPauseReason by TunnelManager.networkPauseReason.collectAsStateWithLifecycle()
+    val tunnelConnected by TunnelManager.connected.collectAsStateWithLifecycle()
+    val tunnelStalled by TunnelManager.connectionStalled.collectAsStateWithLifecycle()
 
     val hasActiveProfile = activeProfile >= 0 && profiles.any { it.id == activeProfile }
     val emptyProfiles = profiles.isEmpty() || !hasActiveProfile
@@ -214,6 +224,11 @@ internal fun ConnectionTab(
             context.startService(Intent(context, TunnelService::class.java).apply { action = "STOP" })
             return
         }
+        // Защёлка после остановки: окно, в которое повторный тап не поднимает
+        // сессию заново. Это защита от двойного тапа, а не состояние интерфейса —
+        // статус и вид логотипа в это время уже «Отключено», без «Ожидания».
+        // Стоит после ветки остановки: «стоп» в этом окне обязан срабатывать.
+        if (TunnelManager.startCooldownActive()) return
         if (!isValid) {
             val blocker = requireNotNull(startBlocker)
             TunnelManager.updateLog(
@@ -249,8 +264,9 @@ internal fun ConnectionTab(
                 tunnelStarting = tunnelStarting,
                 tunnelStopping = tunnelStopping,
                 autoPausedForWifi = autoPausedForWifi,
-                cooldownActive = cooldownActive,
-                configurationValid = isValid,
+                networkPauseReason = networkPauseReason,
+                tunnelConnected = tunnelConnected,
+                tunnelStalled = tunnelStalled,
                 linkMissing = csqttLink.isBlank(),
                 emptyProfiles = emptyProfiles,
                 onToggleTunnel = { toggleTunnel() },
@@ -276,33 +292,49 @@ private fun TunnelConnectionPanel(
     tunnelStarting: Boolean,
     tunnelStopping: Boolean,
     autoPausedForWifi: Boolean,
-    cooldownActive: Boolean,
-    configurationValid: Boolean,
+    networkPauseReason: PhysicalNetworkPauseReason?,
+    tunnelConnected: Boolean,
+    tunnelStalled: Boolean,
     linkMissing: Boolean,
     emptyProfiles: Boolean,
     onToggleTunnel: () -> Unit,
 ) {
     val isStarting = tunnelStarting && !tunnelRunning && !tunnelStopping
-    val canToggle = !emptyProfiles && !tunnelStopping && (tunnelRunning || isStarting || autoPausedForWifi || !cooldownActive || !configurationValid)
-    val activeVisual = !emptyProfiles && (tunnelRunning || isStarting || autoPausedForWifi || tunnelStopping)
+    // Кликабельность — только «есть профиль» и «не идёт остановка». Защёлка после
+    // остановки сюда не входит: она гасит только повторный старт внутри 300 мс
+    // в `toggleTunnel`, иначе кнопка становилась бы недоступной в «Отключено».
+    val canToggle = !emptyProfiles && !tunnelStopping
+    val uptimeSeconds by TunnelManager.uptimeSeconds.collectAsStateWithLifecycle()
+    val status = tunnelConnectionStatus(
+        emptyProfiles = emptyProfiles,
+        stopping = tunnelStopping,
+        wifiPaused = autoPausedForWifi,
+        networkPauseReason = networkPauseReason,
+        connected = tunnelConnected,
+        stalled = tunnelStalled,
+        starting = isStarting,
+        running = tunnelRunning,
+    )
+    val waiting = status == TunnelConnectionStatus.WAITING_WIFI ||
+        status == TunnelConnectionStatus.WAITING_NETWORK
+    val activeVisual = !emptyProfiles && (tunnelRunning || isStarting || waiting || tunnelStopping)
     val logoScale = if (activeVisual) 1.06f else 0.96f
-    val statusColor = when {
-        emptyProfiles -> MaterialTheme.colorScheme.onSurfaceVariant
-        autoPausedForWifi -> MaterialTheme.colorScheme.tertiary
-        tunnelStopping -> MaterialTheme.colorScheme.tertiary
-        tunnelRunning -> CsqttTheme.extendedColors.terminalSuccess
-        isStarting -> MaterialTheme.colorScheme.primary
-        cooldownActive -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    val statusColor = when (status) {
+        TunnelConnectionStatus.OFF -> MaterialTheme.colorScheme.onSurfaceVariant
+        TunnelConnectionStatus.STOPPING,
+        TunnelConnectionStatus.WAITING_WIFI,
+        TunnelConnectionStatus.WAITING_NETWORK,
+        -> MaterialTheme.colorScheme.tertiary
+        TunnelConnectionStatus.CONNECTED -> CsqttTheme.extendedColors.terminalSuccess
+        TunnelConnectionStatus.NO_CONNECTION -> CsqttTheme.extendedColors.terminalError
+        TunnelConnectionStatus.CONNECTING -> MaterialTheme.colorScheme.primary
     }
-    val statusText = when {
-        emptyProfiles -> "Отключено"
-        tunnelStopping -> "Остановка"
-        autoPausedForWifi -> "Ожидание. Автопауза при Wi-Fi"
-        tunnelRunning -> "Подключено"
-        isStarting -> "Подключение"
-        cooldownActive -> "Ожидание"
-        else -> "Отключено"
+    val statusText = tunnelConnectionStatusText(status, networkPauseReason)
+    // Таймер — длительность соединения: до первого READY его нет, а в ожидании
+    // и на остановке остаётся замороженное значение, если сессия успела начаться.
+    val showUptime = !emptyProfiles && showsSessionTimer(status, uptimeSeconds)
+    val timerSlotHeight = with(LocalDensity.current) {
+        maxOf(MaterialTheme.typography.labelLarge.lineHeight.toDp(), TimerIconSize)
     }
 
     AppSectionCard(
@@ -314,12 +346,23 @@ private fun TunnelConnectionPanel(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(timerSlotHeight),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (showUptime) {
+                    TunnelUptimeRow(active = status == TunnelConnectionStatus.CONNECTED)
+                }
+            }
+
             Image(
                 painter = painterResource(id = R.drawable.ic_c_logo),
                 contentDescription = when {
                     emptyProfiles -> "VPN отключён: нет профиля"
                     tunnelStopping -> "Ожидание отключения VPN"
-                    tunnelRunning || autoPausedForWifi -> "Остановить VPN"
+                    tunnelRunning || waiting -> "Остановить VPN"
                     else -> "Включить VPN"
                 },
                 modifier = Modifier
@@ -335,11 +378,14 @@ private fun TunnelConnectionPanel(
                 } else {
                     ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
                 },
+                // Три достижимых вида: активный (1f), пустые профили (0.60f) и
+                // доступный простой (0.66f). Четвёртая ветка 0.34f была недостижима:
+                // `canToggle=false` без пустых профилей бывает только при `stopping`,
+                // а он уже активен.
                 alpha = when {
                     activeVisual -> 1f
-                    canToggle -> 0.66f
                     emptyProfiles -> 0.60f
-                    else -> 0.34f
+                    else -> 0.66f
                 },
             )
 
@@ -358,35 +404,58 @@ private fun TunnelConnectionPanel(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                 )
-            } else {
-                if (linkMissing) {
-                    Text(
-                        text = "Вставьте ссылку csqtt:// из панели",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-
-                TunnelUptimeText(tunnelRunning = tunnelRunning)
+            } else if (linkMissing) {
+                Text(
+                    text = "Вставьте ссылку csqtt:// из панели",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            } else if (status == TunnelConnectionStatus.NO_CONNECTION) {
+                Text(
+                    text = "Проверьте подключение к сети",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
             }
         }
     }
 }
 
+private val TimerIconSize = 16.dp
+private val TimerIconGap = 6.dp
+
 @Composable
-private fun TunnelUptimeText(tunnelRunning: Boolean) {
+private fun TunnelUptimeRow(
+    active: Boolean,
+    modifier: Modifier = Modifier,
+) {
     val uptimeSeconds by TunnelManager.uptimeSeconds.collectAsStateWithLifecycle()
-    Text(
-        text = formatTunnelUptime(uptimeSeconds),
-        style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.SemiBold,
-        color = if (tunnelRunning) {
-            CsqttTheme.extendedColors.terminalSuccess
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
-        },
-    )
+    val timerColor = if (active) {
+        CsqttTheme.extendedColors.terminalSuccess
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.70f)
+    }
+
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(TimerIconGap),
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Schedule,
+            contentDescription = null,
+            modifier = Modifier.size(TimerIconSize),
+            tint = timerColor,
+        )
+        Text(
+            text = formatTunnelUptime(uptimeSeconds),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = timerColor,
+        )
+    }
 }
 
 private fun formatTunnelUptime(seconds: Long?): String {

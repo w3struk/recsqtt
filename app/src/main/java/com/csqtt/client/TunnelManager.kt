@@ -14,6 +14,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.SupervisorJob
@@ -226,6 +230,50 @@ object TunnelManager {
     val stats = MutableStateFlow("Ожидание данных...")
     val activeWorkers = MutableStateFlow(0)
     val autoPausedForWifi = MutableStateFlow(false)
+    /** Причина текущего ожидания из-за отсутствия физической сети; `null` — паузы нет. */
+    internal val networkPauseReason = MutableStateFlow<PhysicalNetworkPauseReason?>(null)
+    /** В текущем процессе пришёл хотя бы один READY — данные реально могут идти. */
+    internal val connected = MutableStateFlow(false)
+    /** Порог медленного старта пройден, а READY так и не пришёл. */
+    internal val connectionStalled = MutableStateFlow(false)
+
+    /**
+     * Единый снимок для плитки и виджета. Собирается здесь, чтобы все поверхности
+     * показывали одно и то же: питание отдельно, соединение — только по READY.
+     */
+    internal val connectionUiState: StateFlow<TunnelConnectionUiState> = run {
+        val process = combine(running, starting, stopping) { running, starting, stopping ->
+            Triple(running, starting, stopping)
+        }
+        val pauses = combine(autoPausedForWifi, networkPauseReason) { wifi, reason ->
+            wifi to reason
+        }
+        val link = combine(connected, connectionStalled) { connected, stalled ->
+            connected to stalled
+        }
+        combine(process, pauses, link) { (running, starting, stopping), (wifi, reason), (connected, stalled) ->
+            TunnelConnectionUiState(
+                powerOn = tunnelPowerIsOn(running, starting, wifi),
+                status = tunnelConnectionStatus(
+                    emptyProfiles = false,
+                    stopping = stopping,
+                    wifiPaused = wifi,
+                    networkPauseReason = reason,
+                    connected = connected,
+                    stalled = stalled,
+                    starting = starting,
+                    running = running,
+                ),
+            )
+        }.stateIn(
+            scope = scope,
+            started = SharingStarted.Eagerly,
+            initialValue = TunnelConnectionUiState(
+                powerOn = false,
+                status = TunnelConnectionStatus.OFF,
+            ),
+        )
+    }
     val vpnReady = MutableStateFlow(false)
     val serverRoutingActive = MutableStateFlow(false)
     val activeServerRoutingRule = MutableStateFlow<ServerRoutingRule?>(null)
@@ -233,22 +281,56 @@ object TunnelManager {
     val lastTunnelDiagnostic = MutableStateFlow("")
     val uptimeSeconds = MutableStateFlow<Long?>(null)
     private var uptimeJob: Job? = null
+    /** Старт сессии: ставится первым READY, а не стартом процесса. */
+    @Volatile
+    private var sessionStartedAtMs = 0L
+    /** Сериализует накопители пауз таймера: их пишут и цикл отсчёта, и смена сети. */
+    private val uptimePauseLock = Any()
+    private var uptimePausedAtMs: Long? = null
+    private var uptimePausedTotalMs = 0L
     
     private val pausedForNoNetwork = NetworkPauseGate()
 
-    val cooldownActive = MutableStateFlow(false)
-    private var cooldownJob: Job? = null
+    /**
+     * Момент последней завершённой остановки (`SystemClock.elapsedRealtime`); 0 — остановок не было.
+     *
+     * Защёлка не показывается пользователю, поэтому живёт здесь, а не в Compose:
+     * плитка в шторке и ярлык должны накрываться даже с закрытым экраном приложения.
+     */
+    @Volatile
+    private var lastStopElapsedMs = 0L
+
+    /**
+     * Защёлка после остановки: короткое окно, в котором повторный старт не поднимает сессию
+     * заново. Общая для всех входов в старт — логотипа на «Подключении» и плитки в шторке.
+     */
+    fun startCooldownActive(): Boolean =
+        StartCooldownPolicy.active(
+            lastStopElapsedMs = lastStopElapsedMs,
+            nowElapsedMs = SystemClock.elapsedRealtime(),
+        )
 
     private fun startUptimeTimer() {
-        processStartedAtMs = SystemClock.elapsedRealtime()
+        if (sessionStartedAtMs > 0L) return
+        sessionStartedAtMs = SystemClock.elapsedRealtime()
+        resetUptimePauses()
+        // Сеть могла пропасть раньше первого READY: гейт уже закрыт, и сессия
+        // должна начаться замороженной, а не отсчитывать время без данных.
+        if (pausedForNoNetwork.isPaused()) pauseUptimeForNetworkLoss(sessionStartedAtMs)
         uptimeSeconds.value = 0L
         uptimeJob?.cancel()
         uptimeJob = scope.launch(Dispatchers.Default) {
             while (isActive) {
-                val start = processStartedAtMs
+                val start = sessionStartedAtMs
                 val isProcessActive = running.value || process != null
                 if (start > 0L && isProcessActive) {
-                    uptimeSeconds.value = (SystemClock.elapsedRealtime() - start) / 1000L
+                    val (pausedAt, pausedTotal) = uptimePauses()
+                    uptimeSeconds.value = elapsedSessionSeconds(
+                        startedAtMs = start,
+                        nowMs = SystemClock.elapsedRealtime(),
+                        pausedTotalMs = pausedTotal,
+                        pausedAtMs = pausedAt,
+                    )
                 } else if (!isProcessActive && !starting.value) {
                     break
                 }
@@ -257,15 +339,73 @@ object TunnelManager {
         }
     }
 
-    private fun stopUptimeTimer() {
+    /** Останавливает сессионный отсчёт, сохраняя финальное значение; процесс не трогает. */
+    private fun stopSessionTimer() {
         uptimeJob?.cancel()
         uptimeJob = null
-        val start = processStartedAtMs
+        val start = sessionStartedAtMs
         if (start > 0L) {
-            uptimeSeconds.value = (SystemClock.elapsedRealtime() - start) / 1000L
-            processStartedAtMs = 0L
+            val (pausedAt, pausedTotal) = uptimePauses()
+            uptimeSeconds.value = elapsedSessionSeconds(
+                startedAtMs = start,
+                nowMs = SystemClock.elapsedRealtime(),
+                pausedTotalMs = pausedTotal,
+                pausedAtMs = pausedAt,
+            )
         } else {
             uptimeSeconds.value = null
+        }
+        sessionStartedAtMs = 0L
+        resetUptimePauses()
+    }
+
+    private fun stopUptimeTimer() {
+        stopSessionTimer()
+        processStartedAtMs = 0L
+    }
+
+    private fun resetSessionTimerForNewProcess() {
+        uptimeJob?.cancel()
+        uptimeJob = null
+        sessionStartedAtMs = 0L
+        uptimeSeconds.value = null
+        resetUptimePauses()
+    }
+
+    private fun markConnected(identity: ProcessIdentity) {
+        if (!isCurrent(identity) || connected.value) return
+        connected.value = true
+        connectionStalled.value = false
+        startUptimeTimer()
+    }
+
+    private fun resetConnectionState() {
+        connected.value = false
+        connectionStalled.value = false
+    }
+
+    private fun uptimePauses(): Pair<Long?, Long> = synchronized(uptimePauseLock) {
+        uptimePausedAtMs to uptimePausedTotalMs
+    }
+
+    private fun resetUptimePauses() {
+        synchronized(uptimePauseLock) {
+            uptimePausedAtMs = null
+            uptimePausedTotalMs = 0L
+        }
+    }
+
+    private fun pauseUptimeForNetworkLoss(nowMs: Long = SystemClock.elapsedRealtime()) {
+        synchronized(uptimePauseLock) {
+            if (uptimePausedAtMs == null) uptimePausedAtMs = nowMs
+        }
+    }
+
+    private fun resumeUptimeAfterNetworkLoss(nowMs: Long = SystemClock.elapsedRealtime()) {
+        synchronized(uptimePauseLock) {
+            val pausedAt = uptimePausedAtMs ?: return
+            uptimePausedTotalMs += (nowMs - pausedAt).coerceAtLeast(0L)
+            uptimePausedAtMs = null
         }
     }
 
@@ -332,11 +472,13 @@ object TunnelManager {
 
     fun onPhysicalNetworkAvailable(context: Context) {
         if (!running.value) return
-        if (pausedForNoNetwork.resume()) {
-            val identity = processIdentity ?: return
-            activeScope.launch {
-                writeProcessCommand(identity, "RESUME", "network_resume_command_error")
-            }
+        if (!pausedForNoNetwork.resume()) return
+        networkPauseReason.value = null
+        resumeUptimeAfterNetworkLoss()
+        stats.value = "Ожидание данных..."
+        val identity = processIdentity ?: return
+        activeScope.launch {
+            writeProcessCommand(identity, "RESUME", "network_resume_command_error")
         }
     }
 
@@ -528,11 +670,23 @@ object TunnelManager {
     }
 
     internal fun suspendForNoNetwork(reason: PhysicalNetworkPauseReason) {
-        if (!running.value || !pausedForNoNetwork.pause()) return
+        if (!running.value) return
+        if (!pausedForNoNetwork.pause()) {
+            // Пауза уже идёт: авиарежим мог включиться поверх оффлайна — уточняем
+            // причину для панели и шторки, но не дублируем паузу и запись в журнал.
+            if (networkPauseReason.value != null && networkPauseReason.value != reason) {
+                networkPauseReason.value = reason
+                stats.value = networkPauseStatusText(reason)
+            }
+            return
+        }
+        networkPauseReason.value = reason
+        pauseUptimeForNetworkLoss()
         val message = when (reason) {
             PhysicalNetworkPauseReason.AIRPLANE_MODE -> "[NET] Режим полёта · ожидание"
             PhysicalNetworkPauseReason.OFFLINE -> "[NET] Сеть отключена · ожидание"
         }
+        stats.value = networkPauseStatusText(reason)
         updateLog("network_pause", message, 2, false, LogLevel.NET)
         val identity = processIdentity ?: return
         activeScope.launch {
@@ -613,6 +767,7 @@ object TunnelManager {
                 if (event.worker == 0 || identity.readyWorkers.add(event.worker)) {
                     updateProcessLog(identity, "ready", "[ВОРКЕР] Поток готов ✓", 20, false, LogLevel.OK)
                 }
+                markConnected(identity)
             }
             is TunnelEventParser.Event.Dtls -> {
                 if (isCurrent(identity)) {
@@ -1060,7 +1215,7 @@ object TunnelManager {
         observersInitialized = true
         val appContext = context.applicationContext
         scope.launch {
-            running.collect { running ->
+            connectionUiState.collect {
                 try {
                     VpnWidgetProvider.updateAllWidgets(appContext)
                     android.service.quicksettings.TileService.requestListeningState(
@@ -1286,7 +1441,10 @@ object TunnelManager {
         autoPausedForWifi.value = false
         stopping.value = false
         
-        if (!isSwitching) pausedForNoNetwork.reset()
+        if (!isSwitching) {
+            pausedForNoNetwork.reset()
+            networkPauseReason.value = null
+        }
         
         activeScope.launch {
             startStopMutex.withLock {
@@ -1351,6 +1509,7 @@ object TunnelManager {
             vpnReady.value = false
         }
         stopUptimeTimer()
+        resetConnectionState()
         running.value = false
         stopping.value = false
         starting.value = false
@@ -1496,8 +1655,16 @@ object TunnelManager {
         val identity = attachProcessIdentity(startedProcess, ticket)
         callRecoveryPending.set(false)
         nativeProcessPid = processIdOf(startedProcess)
+        processStartedAtMs = SystemClock.elapsedRealtime()
+        resetConnectionState()
+        resetSessionTimerForNewProcess()
         running.value = true
-        startUptimeTimer()
+        // Пауза по потере сети переживает пересоздание процесса (свитч профиля,
+        // восстановление VK, перезапуск транспорта): новый Rust-клиент обязан
+        // получить PAUSE, иначе гейт, причина ожидания и процесс разойдутся.
+        if (pausedForNoNetwork.isPaused()) {
+            writeProcessCommand(identity, "PAUSE", "network_pause_command_error")
+        }
         wrapAuthTimeoutCount = 0
         lastReportedDroppedProtocol = 0L
         activeWorkers.value = 0
@@ -1526,7 +1693,10 @@ object TunnelManager {
         activeScope.launch {
             delay(StartupDiagnosticPolicy.NOTICE_AFTER_MS)
             if (!isCurrent(identity)) return@launch
-            // processStartedAtMs выставлен startUptimeTimer() перед запуском этой
+            // Та же граница, что у текста в журнале: панель и шторка перестают
+            // обещать подключение, пока клиент продолжает попытки.
+            if (!connected.value) connectionStalled.value = true
+            // processStartedAtMs выставлен startProcessLocked() перед запуском этой
             // корутины; если он вдруг сброшен, считаем, что ждали ровно порог.
             val startedAt = processStartedAtMs
             val waitedMs = if (startedAt > 0L) {
@@ -1580,6 +1750,10 @@ object TunnelManager {
                         }
                         activeWorkers.value = 0
                         resetWorkerRecoveryState()
+                        // Процесс закончился: соединения больше нет. `processStartedAtMs`
+                        // не трогаем — по нему ниже считается backoff перезапуска.
+                        stopSessionTimer()
+                        resetConnectionState()
                         if (readerJob === coroutineContext[Job]) readerJob = null
                         val initialExitCode = runCatching {
                             if (targetProcess.waitFor(250, java.util.concurrent.TimeUnit.MILLISECONDS)) {
@@ -2064,6 +2238,7 @@ object TunnelManager {
         val targetProcess = identity?.process ?: process
         if (targetProcess == null) {
             detachProcessIdentity()
+            resetConnectionState()
             activeWorkers.value = 0
             return
         }
@@ -2073,6 +2248,7 @@ object TunnelManager {
         if (attached || process === targetProcess) {
             detachProcessIdentity()
             stopUptimeTimer()
+            resetConnectionState()
             resetWorkerRecoveryState()
         }
         identity?.let { lifecycleState.releaseReservation(it.ticket) }
@@ -2175,6 +2351,8 @@ object TunnelManager {
         }
         if (!preserveWifiAutoPause) autoPausedForWifi.value = false
         pausedForNoNetwork.reset()
+        networkPauseReason.value = null
+        resetConnectionState()
         restartJob?.cancel()
         restartJob = null
         panelRestartJob?.cancel()
@@ -2197,6 +2375,9 @@ object TunnelManager {
         }
         terminateProcessLocked(identity, finishVkCalls)
         running.value = false
+        // Автопауза — не остановка по требованию: её окно не должно блокировать
+        // обратное включение (и раньше оно его не блокировало).
+        if (!preserveWifiAutoPause) lastStopElapsedMs = SystemClock.elapsedRealtime()
         stopping.value = false
         activeWorkers.value = 0
         nativeProcessPid = null
@@ -2691,15 +2872,6 @@ object TunnelManager {
         }
         if (!running.value) {
             activeWorkers.value = 0
-        }
-    }
-
-    fun startCooldown(millis: Long) {
-        cooldownJob?.cancel()
-        cooldownActive.value = true
-        cooldownJob = scope.launch(Dispatchers.Main) {
-            delay(millis)
-            cooldownActive.value = false
         }
     }
 

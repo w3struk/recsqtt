@@ -311,7 +311,6 @@ internal fun MainScreen(
 ) {
     val unreadErrors by TunnelManager.unreadErrorCount.collectAsStateWithLifecycle()
     val tunnelRunning by TunnelManager.running.collectAsStateWithLifecycle()
-    val tunnelAutoPausedForWifi by TunnelManager.autoPausedForWifi.collectAsStateWithLifecycle()
     val serverAssignedWorkers by TunnelManager.serverAssignedWorkers.collectAsStateWithLifecycle()
     val effectiveActiveWorkers = serverAssignedWorkers.takeIf { tunnelRunning && it in 3..100 }
     val view = LocalView.current
@@ -347,7 +346,6 @@ internal fun MainScreen(
     var openEditorId by rememberSaveable { mutableStateOf<Int?>(null) }
     val dragTargetIndex = remember { mutableIntStateOf(-1) }
     val dragProgress = remember { mutableFloatStateOf(0f) }
-    var wasRunning by remember { mutableStateOf(tunnelRunning) }
     val updateCheckIntervalHours by settingsStore.updateCheckIntervalHours.collectAsStateWithLifecycle(
         initialValue = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     )
@@ -369,13 +367,6 @@ internal fun MainScreen(
     val tabStateHolder = rememberSaveableStateHolder()
     LaunchedEffect(activeNavItems) {
         selectedTab = resolveSelectedTab(selectedTab, activeNavItems.map { it.id })
-    }
-
-    LaunchedEffect(tunnelRunning, tunnelAutoPausedForWifi) {
-        if (wasRunning && !tunnelRunning && !tunnelAutoPausedForWifi) {
-            TunnelManager.startCooldown(CsqttConstants.Timeouts.VPN_PERMISSION_COOLDOWN_MS)
-        }
-        wasRunning = tunnelRunning
     }
 
     LaunchedEffect(selectedTab) {
