@@ -46,7 +46,10 @@ class SettingsStore(context: Context) {
         // значений активного профиля в глобальные ключи (см. migrateGlobalAppSettings).
         private val APP_SETTINGS_GLOBAL_MIGRATED = booleanPreferencesKey("app_settings_global_migrated")
         private val AUTO_JS_RISK_ACKNOWLEDGED = booleanPreferencesKey("auto_js_risk_acknowledged")
-        private val TCP_TRANSPORT_RISK_ACKNOWLEDGED = booleanPreferencesKey("tcp_transport_risk_acknowledged")
+        // Живёт только для разовой уборки на обновлённых установках: ключ остался
+        // от удалённого предупреждения TCP, ни читать, ни писать его больше нельзя.
+        private val RETIRED_TCP_TRANSPORT_RISK_ACKNOWLEDGED =
+            booleanPreferencesKey("tcp_transport_risk_acknowledged")
         private val BATTERY_OPTIMIZATION_PROMPT_HANDLED =
             booleanPreferencesKey("battery_optimization_prompt_handled")
         private val AUTO_PAUSE_ON_WIFI = booleanPreferencesKey("auto_pause_on_wifi")
@@ -151,9 +154,6 @@ class SettingsStore(context: Context) {
     val autoJsRiskAcknowledged: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[AUTO_JS_RISK_ACKNOWLEDGED] ?: false
     }
-    val tcpTransportRiskAcknowledged: Flow<Boolean> = dataStore.data.map { prefs ->
-        prefs[TCP_TRANSPORT_RISK_ACKNOWLEDGED] ?: false
-    }
     val autoPauseOnWifi: Flow<Boolean> = dataStore.data.map { prefs ->
         prefs[AUTO_PAUSE_ON_WIFI] ?: false
     }
@@ -184,6 +184,7 @@ class SettingsStore(context: Context) {
         if (migrationsStarted.compareAndSet(false, true)) {
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                 migrateGlobalAppSettings()
+                clearRetiredSettings()
             }
         }
         if (uiCacheStarted.compareAndSet(false, true)) {
@@ -343,12 +344,6 @@ class SettingsStore(context: Context) {
         }
     }
 
-    suspend fun saveTcpTransportRiskAcknowledged(acknowledged: Boolean) {
-        dataStore.edit { prefs ->
-            prefs[TCP_TRANSPORT_RISK_ACKNOWLEDGED] = acknowledged
-        }
-    }
-
     suspend fun saveAutoPauseOnWifi(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[AUTO_PAUSE_ON_WIFI] = enabled
@@ -397,6 +392,19 @@ class SettingsStore(context: Context) {
             }
 
             prefs[APP_SETTINGS_GLOBAL_MIGRATED] = true
+        }
+    }
+
+    /**
+     * Разовая уборка ключей, которые больше никто не читает и не пишет.
+     *
+     * `tcp_transport_risk_acknowledged` остался от удалённого предупреждения TCP. Читаем
+     * перед записью, чтобы на установках без него не трогать DataStore на каждом старте.
+     */
+    private suspend fun clearRetiredSettings() {
+        if (dataStore.data.first()[RETIRED_TCP_TRANSPORT_RISK_ACKNOWLEDGED] == null) return
+        dataStore.edit { prefs ->
+            prefs.remove(RETIRED_TCP_TRANSPORT_RISK_ACKNOWLEDGED)
         }
     }
 }

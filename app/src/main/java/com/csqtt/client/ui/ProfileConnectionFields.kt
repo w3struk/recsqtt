@@ -84,7 +84,6 @@ import com.csqtt.client.VkLinkImportPolicy
 import com.csqtt.client.R
 import com.csqtt.client.normalizeVkModeSelection
 import com.csqtt.client.shouldConfirmAutoJsMode
-import com.csqtt.client.shouldConfirmTcpTransport
 import com.csqtt.client.ui.design.CsqttShapes
 import com.csqtt.client.ui.design.CsqttSizes
 import com.csqtt.client.ui.dialogs.HashesDialog
@@ -131,7 +130,6 @@ internal fun ProfileConnectionFields(
     val effectiveServerWorkers = serverWorkers.takeIf { tunnelRunning && it in 3..100 }
 
     val autoJsRiskAcknowledged by settingsStore.autoJsRiskAcknowledged.collectAsStateWithLifecycle(initialValue = false)
-    val tcpTransportRiskAcknowledged by settingsStore.tcpTransportRiskAcknowledged.collectAsStateWithLifecycle(initialValue = false)
 
     val showCredentialUi = VkCredentialUiPolicy.statusVisible(BuildConfig.DEBUG)
     val showForgetTokenAction = VkCredentialUiPolicy.forgetTokenVisible(BuildConfig.DEBUG)
@@ -144,16 +142,13 @@ internal fun ProfileConnectionFields(
     var showWorkModeGeneralDialog by rememberSaveable { mutableStateOf(false) }
     var showWorkModeDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
     var showWorkersInfoDialog by rememberSaveable { mutableStateOf(false) }
-    var showTurnTransportGeneralDialog by rememberSaveable { mutableStateOf(false) }
-    var showTurnTransportDetailDialog by rememberSaveable { mutableStateOf<String?>(null) }
+    var showTurnTransportInfoDialog by rememberSaveable { mutableStateOf(false) }
     var showTurnSubnetsDialog by rememberSaveable { mutableStateOf(false) }
     var showForgetTokenDialog by rememberSaveable { mutableStateOf(false) }
     var showCloseVkCallsDialog by rememberSaveable { mutableStateOf(false) }
     var vkModeBlockedMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var showAutoJsRiskDialog by remember { mutableStateOf(false) }
     var pendingAutoJsSelection by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var showTcpTransportRiskDialog by remember { mutableStateOf(false) }
-    var pendingTcpTransportSelection by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -243,15 +238,6 @@ internal fun ProfileConnectionFields(
 
     fun applyTurnTransport(transport: String) {
         onDraftChange(draft.copy(turnTransport = transport))
-    }
-
-    fun requestTurnTransport(transport: String) {
-        if (shouldConfirmTcpTransport(draft.turnTransport, transport, tcpTransportRiskAcknowledged)) {
-            pendingTcpTransportSelection = { applyTurnTransport(transport) }
-            showTcpTransportRiskDialog = true
-        } else {
-            applyTurnTransport(transport)
-        }
     }
 
     fun importScanned(raw: String) {
@@ -602,9 +588,8 @@ internal fun ProfileConnectionFields(
                         else -> null
                     }
                 },
-                onTitleInfo = { showTurnTransportGeneralDialog = true },
-                onInfo = { transport -> showTurnTransportDetailDialog = transport },
-                onSelected = ::requestTurnTransport,
+                onTitleInfo = { showTurnTransportInfoDialog = true },
+                onSelected = ::applyTurnTransport,
             )
 
             CompactDropdownSetting(
@@ -729,7 +714,6 @@ internal fun ProfileConnectionFields(
     }
     if (showAutoJsRiskDialog) {
         AutoVkRiskDialog(
-            requireAcknowledgement = true,
             onAcknowledge = {
                 showAutoJsRiskDialog = false
                 pendingAutoJsSelection?.invoke()
@@ -746,26 +730,8 @@ internal fun ProfileConnectionFields(
     if (showWorkersInfoDialog) {
         WorkersInfoDialog(onDismiss = { showWorkersInfoDialog = false })
     }
-    if (showTurnTransportGeneralDialog) {
-        TurnTransportInfoDialog(mode = null, onDismiss = { showTurnTransportGeneralDialog = false })
-    }
-    showTurnTransportDetailDialog?.let { transport ->
-        TurnTransportInfoDialog(mode = transport, onDismiss = { showTurnTransportDetailDialog = null })
-    }
-    if (showTcpTransportRiskDialog) {
-        TcpTransportRiskDialog(
-            onAcknowledge = {
-                showTcpTransportRiskDialog = false
-                pendingTcpTransportSelection?.invoke()
-                pendingTcpTransportSelection = null
-            },
-            onDoNotRemind = {
-                scope.launch { settingsStore.saveTcpTransportRiskAcknowledged(true) }
-                showTcpTransportRiskDialog = false
-                pendingTcpTransportSelection?.invoke()
-                pendingTcpTransportSelection = null
-            },
-        )
+    if (showTurnTransportInfoDialog) {
+        TurnTransportInfoDialog(onDismiss = { showTurnTransportInfoDialog = false })
     }
     if (showTurnSubnetsDialog) {
         TurnSubnetsDialog(

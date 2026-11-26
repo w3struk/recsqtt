@@ -33,9 +33,8 @@ import kotlinx.coroutines.delay
 
 @Composable
 internal fun AutoVkRiskDialog(
-    requireAcknowledgement: Boolean,
     onAcknowledge: () -> Unit,
-    onDoNotRemind: (() -> Unit)? = null,
+    onDoNotRemind: () -> Unit,
 ) {
     TimedWarningDialog(
         title = "Внимание!",
@@ -43,46 +42,26 @@ internal fun AutoVkRiskDialog(
             "«Авто ВК» использует неофициальные браузерные методы VK API для создания звонка и получения TURN credentials без анонимных звонков. Сетевой стек PRIMP маскирует HTTP/TLS-профиль под обычный браузер.",
             "Разработчик не может исключить блокировку VK-аккаунта и честно оценить её вероятность. Используйте режим на свой риск; если важен основной аккаунт, выбирайте второстепенный. Рекомендуется включать «Авто ВК», когда «Авто» и «Авто API» не работают.",
         ),
-        requireAcknowledgement = requireAcknowledgement,
         onAcknowledge = onAcknowledge,
         onDoNotRemind = onDoNotRemind,
     )
 }
 
-@Composable
-internal fun TcpTransportRiskDialog(
-    onAcknowledge: () -> Unit,
-    onDoNotRemind: () -> Unit,
-) {
-    TimedWarningDialog(
-        title = "Внимание!",
-        paragraphs = listOf(
-            "TCP — экспериментальный режим для сетей, в которых провайдер ограничивает UDP-трафик. TCP используется только между вашим устройством и серверами VK TURN; между VK TURN и вашим VPS трафик всегда идёт по UDP.",
-            "Если UDP работает без ограничений, используйте его: UDP стабильнее, быстрее и по своей природе ближе к настоящим звонкам.",
-        ),
-        requireAcknowledgement = true,
-        onAcknowledge = onAcknowledge,
-        onDoNotRemind = onDoNotRemind,
-    )
-}
+/** Пауза перед тем, как кнопки диалога станут доступны: человек успевает прочитать риск. */
+private const val ACKNOWLEDGE_DELAY_SECONDS = 8
 
 @Composable
 private fun TimedWarningDialog(
     title: String,
     paragraphs: List<String>,
-    requireAcknowledgement: Boolean,
     onAcknowledge: () -> Unit,
-    onDoNotRemind: (() -> Unit)?,
+    onDoNotRemind: () -> Unit,
 ) {
-    var secondsLeft by rememberSaveable(requireAcknowledgement) {
-        mutableIntStateOf(if (requireAcknowledgement) 8 else 0)
-    }
-    if (requireAcknowledgement) {
-        LaunchedEffect(Unit) {
-            while (secondsLeft > 0) {
-                delay(1_000)
-                secondsLeft -= 1
-            }
+    var secondsLeft by rememberSaveable { mutableIntStateOf(ACKNOWLEDGE_DELAY_SECONDS) }
+    LaunchedEffect(Unit) {
+        while (secondsLeft > 0) {
+            delay(1_000)
+            secondsLeft -= 1
         }
     }
     val actionsEnabled = secondsLeft == 0
@@ -130,15 +109,13 @@ private fun TimedWarningDialog(
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (onDoNotRemind != null) {
-                        OutlinedButton(
-                            onClick = onDoNotRemind,
-                            enabled = actionsEnabled,
-                            modifier = Modifier.fillMaxWidth().height(CsqttSizes.ControlHeight),
-                            shape = CsqttShapes.Pill,
-                        ) {
-                            Text("Не напоминать", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                        }
+                    OutlinedButton(
+                        onClick = onDoNotRemind,
+                        enabled = actionsEnabled,
+                        modifier = Modifier.fillMaxWidth().height(CsqttSizes.ControlHeight),
+                        shape = CsqttShapes.Pill,
+                    ) {
+                        Text("Не напоминать", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                     }
                     Button(
                         onClick = onAcknowledge,
