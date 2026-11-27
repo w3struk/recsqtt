@@ -2172,6 +2172,16 @@ mod tests {
                 (LEARNED_B.to_owned(), vec!["1.1.1.1".parse().unwrap()]),
             ]));
         fixture.update(LEARNED_A).await;
+        // Ответ, пришедший до смены конфигурации, несёт новый адрес: только так
+        // видно, что публикация отклонена, а не совпала с уже выученной парой.
+        let stale_ip: Ipv4Addr = "203.0.113.9".parse().unwrap();
+        fixture
+            .relay
+            .learned_test_hooks
+            .set_resolutions(HashMap::from([(
+                LEARNED_A.to_owned(),
+                vec![IpAddr::V4(stale_ip)],
+            )]));
         let query = learned_dns_wire(LEARNED_A, None);
         let raw = build_udp_packet(
             "10.66.67.2:53000".parse().unwrap(),
@@ -2210,12 +2220,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             crate::sni::parse_ip_packet_dns(reply.as_slice()).unwrap(),
-            (LEARNED_A.to_owned(), true, vec![IpAddr::V4(answer_ip)])
+            (LEARNED_A.to_owned(), true, vec![IpAddr::V4(stale_ip)])
         );
-        fixture.assert_udp_tunnels(IpAddr::V4(answer_ip)).await;
-        assert!(!fixture.relay.is_direct_ip(&IpAddr::V4(answer_ip)));
+        fixture.assert_udp_tunnels(IpAddr::V4(stale_ip)).await;
+        assert!(!fixture.relay.is_direct_ip(&IpAddr::V4(stale_ip)));
         assert_eq!(
-            fixture.relay.dns_domain_map.get(&IpAddr::V4(answer_ip)),
+            fixture.relay.dns_domain_map.get(&IpAddr::V4(stale_ip)),
             None
         );
 
@@ -2714,6 +2724,68 @@ mod tests {
 
         assert!(relay.active_tcp.read().unwrap().is_empty());
         assert_eq!(relay.udp_verdicts.read().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn template_update_keeps_learned_domain_pairs() {
+        let fixture = learned_fixture().await;
+        fixture.update(LEARNED_A).await;
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(fixture.relay.is_direct_ip(&ip));
+
+        let (sha, blob) = template_blob("10.0.0.0/8\n");
+        fixture
+            .dispatcher
+            .update_template_ip_rules(&sha, Some(&blob))
+            .unwrap();
+
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&ip).as_deref(),
+            Some(LEARNED_A),
+            "смена IP-шаблона не делает выученную пару неверной"
+        );
+        assert!(
+            fixture.relay.is_direct_ip(&ip),
+            "direct_ips не должен очищаться на IP-обновлении"
+        );
+    }
+
+    #[tokio::test]
+    async fn template_update_does_not_preresolve_in_whitelist_mode() {
+        let fixture = learned_fixture().await;
+        let first: IpAddr = "93.184.216.34".parse().unwrap();
+        fixture
+            .dispatcher
+            .update_domain_routing(&format!("enabled=1;whitelist=1;domains={LEARNED_A}"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && fixture.relay.dns_domain_map.get(&first).is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&first).as_deref(),
+            Some(LEARNED_A)
+        );
+
+        let second: IpAddr = "203.0.113.7".parse().unwrap();
+        fixture
+            .relay
+            .learned_test_hooks
+            .set_resolutions(HashMap::from([(LEARNED_A.to_owned(), vec![second])]));
+        let (sha, blob) = template_blob("10.0.0.0/8\n");
+        fixture
+            .dispatcher
+            .update_template_ip_rules(&sha, Some(&blob))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            fixture.relay.dns_domain_map.get(&second).is_none(),
+            "IP-обновление не должно перезапускать предрезолв доменов"
+        );
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&first).as_deref(),
+            Some(LEARNED_A)
+        );
     }
 
     #[tokio::test]

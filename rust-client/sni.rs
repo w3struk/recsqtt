@@ -483,8 +483,11 @@ pub fn evaluate_route(
 pub(crate) struct RoutingLearningOrigin {
     pub(crate) config: Arc<crate::dispatcher::DomainRoutingConfig>,
     generation: u64,
-    /// `false`, когда `update_routing_config` получил семантически то же
-    /// правило: epoch не менялся, кеши и соединения не сбрасывались.
+    /// `true`, когда сменились доменные правила (`enabled`, `is_whitelist`,
+    /// `direct_domains`) и выученные пары сброшены: только тогда имеет смысл
+    /// перезапускать предрезолв. `false` — либо правило то же самое, либо
+    /// сменились только IP-правила: epoch уже поднят, но пары и `direct_ips`
+    /// переживают обновление.
     pub(crate) changed: bool,
 }
 
@@ -577,17 +580,26 @@ impl DnsDomainMap {
                 changed: false,
             };
         }
+        // Смена только IP-правил (`UPDATE_IPS`, шаблон адресов) не делает
+        // выученные пары домен→IP неверными: они описывают DNS, а не вердикт.
+        // Поэтому эпоха растёт (in-flight публикации всё равно отсекаются), но
+        // карта и direct_ips не чистятся и предрезолв не перезапускается.
+        let domain_rules_changed = current.enabled != updated.enabled
+            || current.is_whitelist != updated.is_whitelist
+            || current.direct_domains != updated.direct_domains;
         *epoch = epoch.wrapping_add(1);
         // Revoke both kinds of facts before exposing the new config. In-flight
         // publishers cannot pass their origin check until this update completes.
-        direct_ips.store(Arc::new(HashSet::new()));
-        self.clear();
+        if domain_rules_changed {
+            direct_ips.store(Arc::new(HashSet::new()));
+            self.clear();
+        }
         invalidate(&updated);
         routing.store(updated.clone());
         RoutingLearningOrigin {
             config: updated,
             generation: *epoch,
-            changed: true,
+            changed: domain_rules_changed,
         }
     }
 
