@@ -904,14 +904,24 @@ fn start_parent_monitor(cancel: CancellationToken) -> tokio::task::JoinHandle<()
         #[cfg(unix)]
         {
             let parent = unsafe { libc::getppid() };
+            if parent <= 1 {
+                // Родителя нет с самого старта: процесс осиротел до запуска.
+                std::process::exit(EXIT_FATAL);
+            }
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
                 if unsafe { libc::getppid() } != parent {
+                    // Приложение исчезло (force-stop, крах). Мягкая отмена может
+                    // тянуться минутами на refresh аллокаций, а локальный порт и
+                    // UDS нужны следующему запуску: даём полсекунды на логи и
+                    // выходим, не дожидаясь очистки.
+                    crate::log_error!("[КЛИЕНТ] родитель исчез, завершаюсь");
                     cancel.cancel();
-                    return;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    std::process::exit(EXIT_FATAL);
                 }
             }
         }

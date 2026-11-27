@@ -32,11 +32,22 @@
 //! | кулдаун — со второго подряд отказа, счётчик свой у каждого     | `cooldown_needs_two_consecutive_failures`         |
 //! | `SERVFAIL` не уводит в кулдаун с первого раза                  | `servfail_needs_two_consecutive_failures_for_cooldown` |
 //! | локальная ошибка не считается отказом сервера                  | `local_failure_does_not_strike_server`           |
+//! | UDP молчит, TCP/53 отвечает — тир отвечает по TCP              | `tcp_fallback_answers_when_udp_is_silent`        |
+//! | NXDOMAIN по TCP идёт по тем же правилам soft/final             | `tcp_fallback_nxdomain_uses_the_udp_rules`       |
+//! | UDP- и TCP-тишина вместе — один страйк                         | `udp_and_tcp_silence_is_one_strike`              |
+//! | TCP-отказ страйкает и на втором проходе даёт кулдаун           | `tcp_failures_strike_and_cool_down_on_the_second_pass` |
+//! | медленный UDP не съедает TCP-хвост бюджета тира                | `slow_udp_leaves_room_for_tcp`                   |
+//! | `TC=1` по UDP уводит в TCP, по TCP принимается                 | `truncated_udp_answer_falls_through_to_tcp`      |
 //! | таймаут сервера уводит его в кулдаун                          | `health_skips_timed_out_server`                  |
 //! | успешный источник пробуется первым в следующем lookup         | `health_preferred_source_first`                  |
 //!
 //! Bootstrap — только IPv4: DNS-серверы, адрес пира и статический список. AAAA
 //! запрашивается лишь после `NODATA` для A, а `lookup_a` (пир) AAAA не делает вовсе.
+//!
+//! Тиры `link` и `static` двухфазные: UDP/53 до `дедлайн − tcp_reserve`, затем,
+//! если ответа нет, TCP/53 тем же серверам остатком бюджета тира. Оператор может
+//! молчать по UDP и отвечать по TCP; `system` остаётся однопроходным, потому что
+//! у `getaddrinfo` нет такой ручки.
 //!
 //! Отказы живут в трёх независимых плоскостях: singleflight (`flights`) делят
 //! один проход между одинаковыми запросами, `failures` помнят исчерпанный отказ
@@ -56,21 +67,31 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::net::UdpSocket;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
+};
 use tokio_util::sync::CancellationToken;
 
 /// Порт DNS-серверов из `LinkProperties` и статического списка.
 const DNS_PORT: u16 = 53;
 /// Максимум адресов, принятых из `-dns-servers`/`UPDATE_DNS`.
 const MAX_LINK_SERVERS: usize = 2;
-/// Таймаут одного UDP-запроса к серверу (меньше бюджета тира, чтобы сервер
-/// успевал уйти в кулдаун до конца тира).
-const DNS_TIMEOUT: Duration = Duration::from_millis(900);
+/// Таймаут одного UDP-запроса к серверу. Обязан вписываться в UDP-фазу тира
+/// (бюджет минус `TCP_RESERVE`), чтобы сервер успел уйти в кулдаун до её конца.
+const DNS_TIMEOUT: Duration = Duration::from_millis(450);
 const LINK_BUDGET: Duration = Duration::from_millis(1200);
 const STATIC_BUDGET: Duration = Duration::from_millis(1500);
 const SYSTEM_BUDGET: Duration = Duration::from_millis(2500);
 /// Общий бюджет на один QNAME: `LINK_BUDGET + STATIC_BUDGET + SYSTEM_BUDGET`.
 const TOTAL_BUDGET: Duration = Duration::from_millis(5200);
+/// Хвост бюджета тира link/static, зарезервированный под TCP/53: операторский
+/// резолвер может отвечать только по TCP.
+const TCP_RESERVE: Duration = Duration::from_millis(600);
+/// Минимальный остаток бюджета, при котором TCP-фаза вообще имеет смысл.
+const TCP_MIN_WINDOW: Duration = Duration::from_millis(250);
+/// Предел DNS-сообщения по TCP: 2-байтовый префикс длины, до 64 КиБ (EDNS).
+const TCP_MAX_MESSAGE: usize = u16::MAX as usize;
 /// Пауза перед единственным повтором после полной тишины.
 const RETRY_DELAY: Duration = Duration::from_millis(1000);
 /// Повторов после полной тишины: ровно один, двойного прохода нет.
@@ -173,6 +194,10 @@ struct ResolverConfig {
     failure_cache_max_ttl: Duration,
     /// Таймаут ведомого участника общего резолва.
     flight_wait: Duration,
+    /// Хвост бюджета тира link/static под TCP/53 и минимальный остаток, при
+    /// котором TCP-фаза запускается.
+    tcp_reserve: Duration,
+    tcp_min_window: Duration,
     cache_max_entries: usize,
     /// Порт, который получают адреса из `-dns-servers`/`UPDATE_DNS` (в тестах — эфемерный).
     link_port: u16,
@@ -197,6 +222,8 @@ impl ResolverConfig {
             failure_cache_base_ttl: FAILURE_CACHE_BASE_TTL,
             failure_cache_max_ttl: FAILURE_CACHE_MAX_TTL,
             flight_wait: FLIGHT_WAIT,
+            tcp_reserve: TCP_RESERVE,
+            tcp_min_window: TCP_MIN_WINDOW,
             cache_max_entries: CACHE_MAX_ENTRIES,
             link_port: DNS_PORT,
             static_providers: STATIC_PROVIDERS.to_vec(),
@@ -375,6 +402,17 @@ enum TierOutcome {
     NoData,
     NxDomainFinal,
     Exhausted,
+}
+
+/// Итог UDP-фазы одного тира.
+enum UdpPhase {
+    /// Тир закрыл вопрос; второй элемент — серверы, уже отказавшие по UDP.
+    Done(TierOutcome, Vec<(SourceId, SocketAddr)>),
+    /// Ответа нет: кандидаты в TCP-фазу и серверы с UDP-отказом.
+    Exhausted {
+        candidates: Vec<(SourceId, SocketAddr)>,
+        failed: Vec<(SourceId, SocketAddr)>,
+    },
 }
 
 /// Тир ладдера. Оба статических провайдера опрашиваются параллельно внутри
@@ -958,10 +996,16 @@ impl Inner {
         }
     }
 
-    /// Опрос всех серверов тира параллельно, до бюджета тира.
+    /// Опрос серверов тира: UDP-фаза до дедлайна, затем TCP/53 остатком бюджета.
     ///
-    /// `NXDOMAIN` пишется в `PassRecord` с идентификатором провайдера, поэтому
-    /// подтвердить его может только Яндекс (`Static(0)`), а НСДИ — нет.
+    /// Бюджет тира не меняется: из его хвоста вырезается `tcp_reserve`, и только
+    /// если UDP не дал ответа, остаток уходит на TCP к тем же серверам.
+    /// Операторский резолвер может молчать по UDP/53 и отвечать по TCP — так
+    /// ведёт себя, например, Ростелеком.
+    ///
+    /// `NXDOMAIN` пишется в `nxdomain_sources` с идентификатором провайдера,
+    /// поэтому подтвердить его может только Яндекс (`Static(0)`), а НСДИ — нет.
+    /// Страйк сервер получает один за проход, а не за каждую фазу.
     async fn run_udp_stage(
         &self,
         stage: Stage,
@@ -975,50 +1019,221 @@ impl Inner {
         if servers.is_empty() {
             return TierOutcome::Exhausted;
         }
+        let started = Instant::now();
+        let deadline = started + budget;
+        // TCP получает хвост бюджета; UDP не вправе занять его целиком.
+        let reserve = self.config.tcp_reserve.min(budget / 2);
+        let udp_deadline = started + budget.saturating_sub(reserve);
+        match self
+            .run_udp_phase(&servers, host, qtype, udp_deadline, nxdomain_sources)
+            .await
+        {
+            UdpPhase::Done(outcome, failed) => {
+                // Тир уже закрыл вопрос: отказавшим в UDP серверам страйк, TCP им
+                // больше не нужен.
+                for (_, server) in failed {
+                    self.mark_failure(server);
+                }
+                outcome
+            }
+            UdpPhase::Exhausted { candidates, failed } => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if candidates.is_empty() || left < self.config.tcp_min_window {
+                    // TCP-окна нет — UDP-отказ остаётся отказом.
+                    for (_, server) in failed {
+                        self.mark_failure(server);
+                    }
+                    return TierOutcome::Exhausted;
+                }
+                crate::log_info!(
+                    "[DNS] {host} {}: UDP-фаза без ответа, TCP/53 к {} сервер(ам), осталось {} мс",
+                    qtype_label(qtype),
+                    candidates.len(),
+                    left.as_millis()
+                );
+                self.run_tcp_phase(candidates, host, qtype, deadline, nxdomain_sources, failed)
+                    .await
+            }
+        }
+    }
+
+    /// UDP-фаза тира: параллельный опрос до `deadline`, без страйков.
+    ///
+    /// Отказы копятся в `failed` и превращаются в страйк только здесь или в
+    /// TCP-фазе — чтобы проход давал серверу один страйк, а не два.
+    async fn run_udp_phase(
+        &self,
+        servers: &[(SourceId, SocketAddr)],
+        host: &str,
+        qtype: u16,
+        deadline: Instant,
+        nxdomain_sources: &mut Vec<SourceId>,
+    ) -> UdpPhase {
+        let Some(query_timeout) = self.udp_query_timeout(deadline) else {
+            return UdpPhase::Exhausted {
+                candidates: servers.to_vec(),
+                failed: Vec::new(),
+            };
+        };
         let mut remaining = servers.len();
         let mut pending = FuturesUnordered::new();
-        for (source, server) in servers {
+        for (source, server) in servers.iter().copied() {
             pending.push(async move {
                 (
                     (source, server),
-                    self.query_server(server, host, qtype).await,
+                    self.query_server(server, host, qtype, query_timeout).await,
                 )
             });
         }
-        let deadline = Instant::now() + budget;
+        // Серверы, ответившие валидно (NXDOMAIN): переспрашивать их по TCP незачем.
+        let mut responded: Vec<SocketAddr> = Vec::new();
+        let mut failed: Vec<(SourceId, SocketAddr)> = Vec::new();
         while remaining > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return TierOutcome::Exhausted;
+                break;
             }
             let next = match tokio::time::timeout(left, pending.next()).await {
                 Ok(Some(next)) => next,
-                Ok(None) | Err(_) => return TierOutcome::Exhausted,
+                Ok(None) | Err(_) => break,
             };
             remaining -= 1;
             let ((source, server), outcome) = next;
             match outcome {
                 QueryOutcome::Answer(answer) => {
                     self.mark_success(source, server);
-                    return TierOutcome::Answer(answer, source);
+                    return UdpPhase::Done(TierOutcome::Answer(answer, source), failed);
                 }
                 QueryOutcome::NoData => {
                     self.mark_success(source, server);
-                    return TierOutcome::NoData;
+                    return UdpPhase::Done(TierOutcome::NoData, failed);
                 }
                 QueryOutcome::NxDomain => {
                     self.mark_success(source, server);
+                    responded.push(server);
                     if !nxdomain_sources.contains(&source) {
                         nxdomain_sources.push(source);
                     }
                     if self.nxdomain_confirmed(nxdomain_sources) {
+                        return UdpPhase::Done(TierOutcome::NxDomainFinal, failed);
+                    }
+                }
+                QueryOutcome::ServerFailure | QueryOutcome::Timeout => {
+                    failed.push((source, server))
+                }
+                // Локальная ошибка (битый запрос/ответ, сокет) — не отказ сервера.
+                // По TCP такого сервера всё равно стоит переспросить.
+                QueryOutcome::Failed => {}
+            }
+        }
+        let candidates = servers
+            .iter()
+            .copied()
+            .filter(|(_, server)| !responded.contains(server))
+            .collect();
+        UdpPhase::Exhausted { candidates, failed }
+    }
+
+    /// TCP/53-фаза тира: тот же QNAME по остатку бюджета тира.
+    ///
+    /// Ответ по TCP обрабатывается ровно как UDP-ответ: `Answer`/`NoData`/
+    /// `NXDOMAIN` подтверждаются теми же правилами. Всё, что ответа не дало,
+    /// даёт серверу ровно один страйк за проход — вместе с его UDP-отказом.
+    async fn run_tcp_phase(
+        &self,
+        candidates: Vec<(SourceId, SocketAddr)>,
+        host: &str,
+        qtype: u16,
+        deadline: Instant,
+        nxdomain_sources: &mut Vec<SourceId>,
+        udp_failed: Vec<(SourceId, SocketAddr)>,
+    ) -> TierOutcome {
+        let mut pending = FuturesUnordered::new();
+        for (source, server) in candidates {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            pending.push(async move {
+                (
+                    (source, server),
+                    self.query_server_tcp(server, host, qtype, left).await,
+                )
+            });
+        }
+        let mut tcp_failed: Vec<SocketAddr> = Vec::new();
+        let mut responded: Vec<SocketAddr> = Vec::new();
+        // Ранний ответ по TCP не должен оставлять молчавшие UDP-серверы без
+        // страйка: иначе мёртвый сосед никогда не уйдёт в кулдаун, пока другой
+        // сервер тира отвечает по TCP.
+        let strike_losers = |udp_failed: &[(SourceId, SocketAddr)],
+                             tcp_failed: &[SocketAddr],
+                             skip: &[SocketAddr]| {
+            for (_, server) in udp_failed {
+                if !skip.contains(server) {
+                    self.mark_failure(*server);
+                }
+            }
+            for server in tcp_failed {
+                if !skip.contains(server) && !udp_failed.iter().any(|(_, known)| known == server) {
+                    self.mark_failure(*server);
+                }
+            }
+        };
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let next = match tokio::time::timeout(left, pending.next()).await {
+                Ok(Some(next)) => next,
+                Ok(None) | Err(_) => break,
+            };
+            let ((source, server), outcome) = next;
+            match outcome {
+                QueryOutcome::Answer(answer) => {
+                    self.mark_success(source, server);
+                    strike_losers(&udp_failed, &tcp_failed, &[server]);
+                    return TierOutcome::Answer(answer, source);
+                }
+                QueryOutcome::NoData => {
+                    self.mark_success(source, server);
+                    strike_losers(&udp_failed, &tcp_failed, &[server]);
+                    return TierOutcome::NoData;
+                }
+                QueryOutcome::NxDomain => {
+                    self.mark_success(source, server);
+                    responded.push(server);
+                    if !nxdomain_sources.contains(&source) {
+                        nxdomain_sources.push(source);
+                    }
+                    if self.nxdomain_confirmed(nxdomain_sources) {
+                        let mut skip = responded.clone();
+                        skip.push(server);
+                        strike_losers(&udp_failed, &tcp_failed, &skip);
                         return TierOutcome::NxDomainFinal;
                     }
                 }
-                QueryOutcome::ServerFailure | QueryOutcome::Timeout => self.mark_failure(server),
-                // Локальная ошибка (битый запрос/ответ, сокет) — не отказ сервера.
+                // По TCP всё, кроме локальной сборки запроса, приходит от сервера:
+                // обрыв соединения, пустое чтение и битый ответ — отказ сервера.
+                QueryOutcome::ServerFailure | QueryOutcome::Timeout => tcp_failed.push(server),
                 QueryOutcome::Failed => {}
             }
+        }
+        // Один страйк на сервер за проход: UDP- и TCP-отказ не складываются, а
+        // ответивший по TCP сервер не получает страйк за молчание в UDP.
+        let mut struck: Vec<SocketAddr> = udp_failed
+            .iter()
+            .map(|(_, server)| *server)
+            .filter(|server| !responded.contains(server))
+            .collect();
+        for server in tcp_failed {
+            if !struck.contains(&server) {
+                struck.push(server);
+            }
+        }
+        for server in struck {
+            self.mark_failure(server);
         }
         TierOutcome::Exhausted
     }
@@ -1054,18 +1269,46 @@ impl Inner {
         }
     }
 
-    async fn query_server(&self, server: SocketAddr, host: &str, qtype: u16) -> QueryOutcome {
-        let query_id = rand::random::<u16>();
-        let query = match build_query(host, query_id, qtype) {
-            Ok(query) => query,
-            Err(error) => {
-                crate::log_error!("[DNS] Некорректный запрос {host}: {error}");
-                return QueryOutcome::Failed;
-            }
+    /// Таймаут UDP-запроса, вписанный в остаток UDP-фазы тира.
+    fn udp_query_timeout(&self, deadline: Instant) -> Option<Duration> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        Some(self.config.query_timeout.min(left))
+    }
+
+    async fn query_server(
+        &self,
+        server: SocketAddr,
+        host: &str,
+        qtype: u16,
+        timeout: Duration,
+    ) -> QueryOutcome {
+        let Some((query_id, query)) = build_query_or_log(host, qtype) else {
+            return QueryOutcome::Failed;
+        };
+        match tokio::time::timeout(timeout, query_dns_server(server, query, query_id, qtype)).await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => QueryOutcome::Timeout,
+        }
+    }
+
+    /// Один запрос по TCP/53 с таймаутом на connect+write+read целиком.
+    async fn query_server_tcp(
+        &self,
+        server: SocketAddr,
+        host: &str,
+        qtype: u16,
+        timeout: Duration,
+    ) -> QueryOutcome {
+        let Some((query_id, query)) = build_query_or_log(host, qtype) else {
+            return QueryOutcome::Failed;
         };
         match tokio::time::timeout(
-            self.config.query_timeout,
-            query_dns_server(server, query, query_id, qtype),
+            timeout,
+            query_dns_server_tcp(server, query, query_id, qtype),
         )
         .await
         {
@@ -1394,13 +1637,77 @@ async fn query_dns_server(
         if source != server || length < 2 || response[0..2] != query_id.to_be_bytes() {
             continue;
         }
-        return match parse_response(&response[..length], qtype) {
+        return match parse_response(&response[..length], qtype, false) {
             Ok(outcome) => outcome,
             Err(error) => {
                 crate::log_error!("[DNS] Битый ответ от {server}: {error}");
                 QueryOutcome::Failed
             }
         };
+    }
+}
+
+/// Один DNS-запрос по TCP/53: `len` (2 байта BE) + сообщение, ответ —
+/// `read_exact(2)` + `read_exact(len)`. Соединение живёт ровно один запрос.
+///
+/// Любая сетевая неудача (connect/write/read, обрыв, пустой ответ) — это
+/// `Timeout`, то есть отказ сервера: страйк. `Failed` остаётся только за
+/// локальной сборкой запроса, которую делает вызывающий.
+async fn query_dns_server_tcp(
+    server: SocketAddr,
+    query: Vec<u8>,
+    query_id: u16,
+    qtype: u16,
+) -> QueryOutcome {
+    let Ok(framed_len) = u16::try_from(query.len()) else {
+        crate::log_error!("[DNS] Слишком длинный TCP-запрос к {server}");
+        return QueryOutcome::Failed;
+    };
+    let mut stream = match TcpStream::connect(server).await {
+        Ok(stream) => stream,
+        Err(_) => return QueryOutcome::Timeout,
+    };
+    let mut framed = Vec::with_capacity(query.len() + 2);
+    framed.extend_from_slice(&framed_len.to_be_bytes());
+    framed.extend_from_slice(&query);
+    if stream.write_all(&framed).await.is_err() {
+        return QueryOutcome::Timeout;
+    }
+    let mut length = [0_u8; 2];
+    if stream.read_exact(&mut length).await.is_err() {
+        return QueryOutcome::Timeout;
+    }
+    let length = u16::from_be_bytes(length) as usize;
+    if !(12..=TCP_MAX_MESSAGE).contains(&length) {
+        crate::log_error!("[DNS] Некорректная длина TCP-ответа от {server}: {length}");
+        return QueryOutcome::Timeout;
+    }
+    let mut response = vec![0_u8; length];
+    if stream.read_exact(&mut response).await.is_err() {
+        return QueryOutcome::Timeout;
+    }
+    if response[0..2] != query_id.to_be_bytes() {
+        crate::log_error!("[DNS] TCP-ответ от {server} с чужим ID");
+        return QueryOutcome::Timeout;
+    }
+    match parse_response(&response, qtype, true) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            crate::log_error!("[DNS] Битый TCP-ответ от {server}: {error}");
+            QueryOutcome::Timeout
+        }
+    }
+}
+
+/// Запрос с новым ID; `None` — имя некорректно (локальная ошибка, не страйк).
+fn build_query_or_log(host: &str, qtype: u16) -> Option<(u16, Vec<u8>)> {
+    let query_id = rand::random::<u16>();
+    match build_query(host, query_id, qtype) {
+        Ok(query) => Some((query_id, query)),
+        Err(error) => {
+            crate::log_error!("[DNS] Некорректный запрос {host}: {error}");
+            None
+        }
     }
 }
 
@@ -1430,7 +1737,12 @@ fn build_query(host: &str, query_id: u16, record_type: u16) -> Result<Vec<u8>> {
     Ok(query)
 }
 
-fn parse_response(response: &[u8], qtype: u16) -> Result<QueryOutcome> {
+/// Разбирает ответ сервера.
+///
+/// `is_tcp` снимает запрет на флаг `TC`: по TCP сообщение уже полное, и `TC`
+/// (сервер выставил его по UDP) значит только то, что UDP-ответ был обрезан.
+/// Для UDP `TC=1` остаётся ошибкой — она уводит запрос в TCP-фазу тира.
+fn parse_response(response: &[u8], qtype: u16, is_tcp: bool) -> Result<QueryOutcome> {
     if response.len() < 12 {
         bail!("слишком короткий DNS-ответ");
     }
@@ -1438,7 +1750,7 @@ fn parse_response(response: &[u8], qtype: u16) -> Result<QueryOutcome> {
     if flags & 0x8000 == 0 {
         bail!("DNS-ответ без флага response");
     }
-    if flags & 0x0200 != 0 {
+    if !is_tcp && flags & 0x0200 != 0 {
         bail!("DNS-ответ требует TCP-повторения");
     }
     match Rcode::from_flags(flags) {
@@ -1609,6 +1921,7 @@ async fn resolve_socket_with(resolver: &DnsResolver, address: &str) -> Result<So
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use tokio::net::TcpListener;
 
     const TEST_IP: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 7);
     const OTHER_IP: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 9);
@@ -1624,6 +1937,81 @@ mod tests {
         NxDomain,
         ServFail,
         Silent,
+        /// UDP-ответ с выставленным `TC=1`: клиент обязан повторить по TCP.
+        Truncated,
+    }
+
+    /// Как TCP/53-сервер ведёт себя: оператор может отвечать только здесь.
+    #[derive(Clone, Debug)]
+    enum TcpBehavior {
+        Answer {
+            v4: Vec<Ipv4Addr>,
+            ttl: u32,
+            /// Ответ помечен `TC=1`: по TCP сообщение всё равно полное.
+            truncated: bool,
+        },
+        NxDomain,
+        ServFail,
+        /// Обещанная длина больше, чем пришло: клиент ловит короткое чтение.
+        ShortRead,
+        /// Соединение закрывается без ответа.
+        Close,
+    }
+
+    /// UDP- и TCP-сервер на одном `SocketAddr` — так отвечает оператор.
+    struct FakeTier {
+        address: SocketAddr,
+        udp_a_queries: Arc<AtomicUsize>,
+        tcp_queries: Arc<AtomicUsize>,
+        udp_task: tokio::task::JoinHandle<()>,
+        tcp_task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for FakeTier {
+        fn drop(&mut self) {
+            self.udp_task.abort();
+            self.tcp_task.abort();
+        }
+    }
+
+    impl FakeTier {
+        async fn spawn(udp: Behavior, tcp: TcpBehavior) -> Self {
+            Self::spawn_delayed(udp, Duration::ZERO, tcp).await
+        }
+
+        /// UDP-ответ приходит не раньше `delay`; TCP отвечает сразу.
+        async fn spawn_delayed(udp: Behavior, delay: Duration, tcp: TcpBehavior) -> Self {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            // TCP и UDP — разные пространства портов, один адрес им обоим годится.
+            let socket = UdpSocket::bind(address).await.unwrap();
+            let udp_a_queries = Arc::new(AtomicUsize::new(0));
+            let udp_aaaa_queries = Arc::new(AtomicUsize::new(0));
+            let udp_task = tokio::spawn(serve(
+                socket,
+                udp,
+                delay,
+                udp_a_queries.clone(),
+                udp_aaaa_queries,
+            ));
+            let tcp_queries = Arc::new(AtomicUsize::new(0));
+            let tcp_task = tokio::spawn(serve_tcp(listener, tcp, tcp_queries.clone()));
+            Self {
+                address,
+                udp_a_queries,
+                tcp_queries,
+                udp_task,
+                tcp_task,
+            }
+        }
+
+        fn udp_a_count(&self) -> usize {
+            self.udp_a_queries.load(Ordering::SeqCst)
+        }
+
+        fn tcp_count(&self) -> usize {
+            self.tcp_queries.load(Ordering::SeqCst)
+        }
     }
 
     struct FakeDns {
@@ -1703,6 +2091,11 @@ mod tests {
                 Behavior::Silent => continue,
                 Behavior::NxDomain => build_response(request, query_id, 3, question_end, &[]),
                 Behavior::ServFail => build_response(request, query_id, 2, question_end, &[]),
+                Behavior::Truncated => {
+                    let mut packet = build_response(request, query_id, 0, question_end, &[]);
+                    packet[2] |= 0x02;
+                    packet
+                }
                 Behavior::Answer { v4, v6, ttl } => {
                     let records: Vec<Vec<u8>> = match qtype {
                         DNS_A_RECORD => v4.iter().map(|address| a_record(*address, *ttl)).collect(),
@@ -1720,6 +2113,70 @@ mod tests {
             }
             let _ = socket.send_to(&packet, peer).await;
         }
+    }
+
+    async fn serve_tcp(listener: TcpListener, behavior: TcpBehavior, queries: Arc<AtomicUsize>) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let behavior = behavior.clone();
+            let queries = queries.clone();
+            // Каждое соединение живёт один запрос; параллельные клиенты не мешают.
+            tokio::spawn(async move {
+                let mut prefix = [0_u8; 2];
+                if stream.read_exact(&mut prefix).await.is_err() {
+                    return;
+                }
+                let length = u16::from_be_bytes(prefix) as usize;
+                let mut request = vec![0_u8; length];
+                if stream.read_exact(&mut request).await.is_err() {
+                    return;
+                }
+                queries.fetch_add(1, Ordering::SeqCst);
+                let Some((query_id, qtype, question_end)) = parse_request(&request) else {
+                    return;
+                };
+                match behavior {
+                    TcpBehavior::Close => {}
+                    TcpBehavior::ShortRead => {
+                        // Обещаем 40 байт, отдаём 4 и закрываем соединение.
+                        let _ = stream.write_all(&40_u16.to_be_bytes()).await;
+                        let _ = stream.write_all(&[0_u8; 4]).await;
+                    }
+                    TcpBehavior::ServFail => {
+                        let packet = build_response(&request, query_id, 2, question_end, &[]);
+                        write_tcp_message(&mut stream, &packet).await;
+                    }
+                    TcpBehavior::NxDomain => {
+                        let packet = build_response(&request, query_id, 3, question_end, &[]);
+                        write_tcp_message(&mut stream, &packet).await;
+                    }
+                    TcpBehavior::Answer { v4, ttl, truncated } => {
+                        let records: Vec<Vec<u8>> = match qtype {
+                            DNS_A_RECORD => {
+                                v4.iter().map(|address| a_record(*address, ttl)).collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                        let mut packet =
+                            build_response(&request, query_id, 0, question_end, &records);
+                        if truncated {
+                            packet[2] |= 0x02;
+                        }
+                        write_tcp_message(&mut stream, &packet).await;
+                    }
+                }
+                let _ = stream.shutdown().await;
+            });
+        }
+    }
+
+    async fn write_tcp_message(stream: &mut TcpStream, packet: &[u8]) {
+        let mut framed = Vec::with_capacity(packet.len() + 2);
+        framed.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+        framed.extend_from_slice(packet);
+        let _ = stream.write_all(&framed).await;
     }
 
     fn parse_request(request: &[u8]) -> Option<(u16, u16, usize)> {
@@ -1818,9 +2275,28 @@ mod tests {
             failure_cache_base_ttl: FAILURE_CACHE_BASE_TTL,
             failure_cache_max_ttl: FAILURE_CACHE_MAX_TTL,
             flight_wait: Duration::from_secs(2),
+            // Старые тесты не должны ни тратить бюджет на TCP, ни ходить в него:
+            // окно 250 мс их бюджеты не оставляют.
+            tcp_reserve: Duration::ZERO,
+            tcp_min_window: TCP_MIN_WINDOW,
             cache_max_entries: 1024,
             link_port: DNS_PORT,
             static_providers: Vec::new(),
+        }
+    }
+
+    /// Конфиг для TCP-тестов: UDP-фаза короткая, TCP-хвост заметный, повтора нет.
+    fn tcp_config() -> ResolverConfig {
+        ResolverConfig {
+            link_budget: Duration::from_millis(400),
+            static_budget: Duration::from_millis(120),
+            system_budget: Duration::from_millis(20),
+            total_budget: Duration::from_millis(600),
+            query_timeout: Duration::from_millis(150),
+            retry_attempts: 0,
+            tcp_reserve: Duration::from_millis(200),
+            tcp_min_window: Duration::from_millis(50),
+            ..base_config()
         }
     }
 
@@ -1842,7 +2318,7 @@ mod tests {
 
     #[test]
     fn parses_compressed_ipv4_answer_with_its_ttl() {
-        let outcome = parse_response(&answer_packet(0x1234), DNS_A_RECORD).unwrap();
+        let outcome = parse_response(&answer_packet(0x1234), DNS_A_RECORD, false).unwrap();
         match outcome {
             QueryOutcome::Answer(answer) => {
                 assert_eq!(
@@ -1858,26 +2334,35 @@ mod tests {
     #[test]
     fn parse_response_distinguishes_rcodes() {
         assert!(matches!(
-            parse_response(&header(1, 3, 0, false), DNS_A_RECORD).unwrap(),
+            parse_response(&header(1, 3, 0, false), DNS_A_RECORD, false).unwrap(),
             QueryOutcome::NxDomain
         ));
         assert!(matches!(
-            parse_response(&header(1, 0, 0, false), DNS_A_RECORD).unwrap(),
+            parse_response(&header(1, 0, 0, false), DNS_A_RECORD, false).unwrap(),
             QueryOutcome::NoData
         ));
         assert!(matches!(
-            parse_response(&header(1, 2, 0, false), DNS_A_RECORD).unwrap(),
+            parse_response(&header(1, 2, 0, false), DNS_A_RECORD, false).unwrap(),
             QueryOutcome::ServerFailure
         ));
         assert!(matches!(
-            parse_response(&header(1, 5, 0, false), DNS_A_RECORD).unwrap(),
+            parse_response(&header(1, 5, 0, false), DNS_A_RECORD, false).unwrap(),
             QueryOutcome::ServerFailure
         ));
     }
 
     #[test]
     fn parse_response_rejects_truncated_answers() {
-        assert!(parse_response(&header(1, 0, 0, true), DNS_A_RECORD).is_err());
+        assert!(parse_response(&header(1, 0, 0, true), DNS_A_RECORD, false).is_err());
+    }
+
+    #[test]
+    fn parse_response_accepts_truncated_flag_over_tcp() {
+        // По TCP сообщение полное: `TC` значит лишь, что UDP-ответ был обрезан.
+        assert!(matches!(
+            parse_response(&header(1, 0, 0, true), DNS_A_RECORD, true).unwrap(),
+            QueryOutcome::NoData
+        ));
     }
 
     #[test]
@@ -1886,13 +2371,13 @@ mod tests {
         packet.extend_from_slice(&a_record(Ipv4Addr::new(203, 0, 113, 7), 30));
         packet.extend_from_slice(&aaaa_record(TEST_V6, 30));
 
-        match parse_response(&packet, DNS_A_RECORD).unwrap() {
+        match parse_response(&packet, DNS_A_RECORD, false).unwrap() {
             QueryOutcome::Answer(answer) => {
                 assert_eq!(answer.addresses, vec![IpAddr::V4(TEST_IP)]);
             }
             _ => panic!("ожидался A-ответ"),
         }
-        match parse_response(&packet, DNS_AAAA_RECORD).unwrap() {
+        match parse_response(&packet, DNS_AAAA_RECORD, false).unwrap() {
             QueryOutcome::Answer(answer) => {
                 assert_eq!(answer.addresses, vec![IpAddr::V6(TEST_V6)]);
             }
@@ -3139,5 +3624,248 @@ mod tests {
         );
         assert!(health.cooldown.is_empty());
         assert_eq!(health.system_strikes, 0);
+    }
+
+    #[tokio::test]
+    async fn tcp_answer_strikes_the_silent_udp_sibling() {
+        let answering = FakeTier::spawn(
+            Behavior::Silent,
+            TcpBehavior::Answer {
+                v4: vec!["93.184.216.34".parse().unwrap()],
+                ttl: 60,
+                truncated: false,
+            },
+        )
+        .await;
+        let silent = FakeTier::spawn(Behavior::Silent, TcpBehavior::Close).await;
+        let resolver =
+            DnsResolver::with_config(tcp_config(), vec![silent.address, answering.address]);
+
+        let addresses = resolver.lookup_a("peer.example").await.unwrap();
+        assert_eq!(addresses, vec!["93.184.216.34".parse::<IpAddr>().unwrap()]);
+
+        let health = resolver.health.read().unwrap();
+        assert_eq!(
+            health.strikes.get(&silent.address).copied().unwrap_or(0),
+            1,
+            "молчавший UDP-сервер обязан получить страйк, даже если тир ответил по TCP"
+        );
+        assert_eq!(
+            health.strikes.get(&answering.address).copied().unwrap_or(0),
+            0,
+            "ответивший по TCP сервер не получает страйк за UDP-молчание"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_fallback_answers_when_udp_is_silent() {
+        let tier = FakeTier::spawn(
+            Behavior::Silent,
+            TcpBehavior::Answer {
+                v4: vec![TEST_IP],
+                ttl: 60,
+                truncated: false,
+            },
+        )
+        .await;
+        let resolver = DnsResolver::with_config(tcp_config(), vec![tier.address]);
+
+        assert_eq!(
+            resolver.lookup_a("operator.example").await.unwrap(),
+            vec![IpAddr::V4(TEST_IP)]
+        );
+        assert_eq!(tier.udp_a_count(), 1, "UDP-фаза опросила сервер");
+        assert_eq!(tier.tcp_count(), 1, "ответ пришёл по TCP");
+        let health = resolver.health.read().unwrap();
+        assert!(
+            !health.cooldown.contains_key(&tier.address),
+            "ответ по TCP не уводит сервер в кулдаун"
+        );
+        assert_eq!(
+            health.strikes.get(&tier.address),
+            None,
+            "ответ по TCP снимает счётчик отказов"
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_fallback_nxdomain_uses_the_udp_rules() {
+        let link = FakeTier::spawn(Behavior::Silent, TcpBehavior::NxDomain).await;
+        let yandex = FakeTier::spawn(Behavior::NxDomain, TcpBehavior::NxDomain).await;
+        let config = ResolverConfig {
+            static_providers: vec![provider("fake-yandex", yandex.address, true)],
+            ..tcp_config()
+        };
+        let resolver = DnsResolver::with_config(config, vec![link.address]);
+
+        // NXDOMAIN по TCP подтверждается вторым источником ровно как UDP.
+        let error = resolver.lookup_a("nx.example").await.unwrap_err();
+        assert!(error.to_string().contains("NXDOMAIN"), "{error}");
+        assert_eq!(link.tcp_count(), 1, "NXDOMAIN пришёл по TCP");
+        assert!(matches!(
+            resolver.cache_lookup("nx.example", DNS_A_RECORD),
+            CacheLookup::Negative(NegativeKind::NxDomain)
+        ));
+        assert_eq!(
+            resolver.health.read().unwrap().strikes.get(&link.address),
+            None,
+            "ответивший по TCP сервер не получает страйк за UDP-тишину"
+        );
+
+        // Без второго подтверждающего источника NXDOMAIN остаётся мягким.
+        let lonely = FakeTier::spawn(Behavior::Silent, TcpBehavior::NxDomain).await;
+        let resolver = DnsResolver::with_config(tcp_config(), vec![lonely.address]);
+        let error = resolver.lookup_a("soft-tcp.example").await.unwrap_err();
+        assert!(
+            !error.to_string().contains("NXDOMAIN"),
+            "мягкий NXDOMAIN остаётся мягким: {error}"
+        );
+        assert!(!matches!(
+            resolver.cache_lookup("soft-tcp.example", DNS_A_RECORD),
+            CacheLookup::Negative(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn udp_and_tcp_silence_is_one_strike() {
+        let tier = FakeTier::spawn(Behavior::Silent, TcpBehavior::Close).await;
+        let resolver = DnsResolver::with_config(tcp_config(), vec![tier.address]);
+
+        assert!(resolver.lookup_a("both-silent.example").await.is_err());
+        assert_eq!(tier.udp_a_count(), 1);
+        assert_eq!(tier.tcp_count(), 1);
+        let health = resolver.health.read().unwrap();
+        assert_eq!(
+            health.strikes.get(&tier.address),
+            Some(&1),
+            "UDP-тишина + TCP-тишина — один страйк, а не два"
+        );
+        assert!(!health.cooldown.contains_key(&tier.address));
+    }
+
+    #[tokio::test]
+    async fn tcp_failures_strike_and_cool_down_on_the_second_pass() {
+        for (index, tcp) in [
+            TcpBehavior::ServFail,
+            TcpBehavior::ShortRead,
+            TcpBehavior::Close,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tier = FakeTier::spawn(Behavior::Silent, tcp.clone()).await;
+            let resolver = DnsResolver::with_config(tcp_config(), vec![tier.address]);
+
+            // Разные имена: иначе второй проход вернётся из кэша отказов.
+            let first = format!("tcp-down-{index}-a.example");
+            assert!(resolver.lookup_a(&first).await.is_err());
+            {
+                let health = resolver.health.read().unwrap();
+                assert_eq!(
+                    health.strikes.get(&tier.address),
+                    Some(&1),
+                    "{tcp:?}: один страйк за проход"
+                );
+                assert!(
+                    !health.cooldown.contains_key(&tier.address),
+                    "{tcp:?}: с первого отказа кулдауна нет"
+                );
+            }
+
+            let second = format!("tcp-down-{index}-b.example");
+            assert!(resolver.lookup_a(&second).await.is_err());
+            assert!(
+                resolver
+                    .health
+                    .read()
+                    .unwrap()
+                    .cooldown
+                    .contains_key(&tier.address),
+                "{tcp:?}: второй подряд отказ уводит сервер в кулдаун"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_udp_leaves_room_for_tcp() {
+        // UDP отвечает позже дедлайна UDP-фазы: тир обязан успеть по TCP.
+        let tier = FakeTier::spawn_delayed(
+            answering(TEST_IP),
+            Duration::from_millis(300),
+            TcpBehavior::Answer {
+                v4: vec![OTHER_IP],
+                ttl: 60,
+                truncated: false,
+            },
+        )
+        .await;
+        let config = ResolverConfig {
+            query_timeout: Duration::from_millis(400),
+            ..tcp_config()
+        };
+        let resolver = DnsResolver::with_config(config, vec![tier.address]);
+
+        let started = Instant::now();
+        let result = resolver.lookup_a("slow-udp.example").await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(result, vec![IpAddr::V4(OTHER_IP)], "ответ дал TCP");
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "тир уложился в свой бюджет: {elapsed:?}"
+        );
+        assert_eq!(tier.udp_a_count(), 1);
+        assert_eq!(tier.tcp_count(), 1);
+        assert!(
+            resolver.health.read().unwrap().cooldown.is_empty(),
+            "медленный UDP при живом TCP — не повод для кулдауна"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_udp_answer_falls_through_to_tcp() {
+        let tier = FakeTier::spawn(
+            Behavior::Truncated,
+            TcpBehavior::Answer {
+                v4: vec![TEST_IP],
+                ttl: 60,
+                truncated: false,
+            },
+        )
+        .await;
+        let resolver = DnsResolver::with_config(tcp_config(), vec![tier.address]);
+
+        assert_eq!(
+            resolver.lookup_a("truncated.example").await.unwrap(),
+            vec![IpAddr::V4(TEST_IP)]
+        );
+        assert_eq!(tier.udp_a_count(), 1);
+        assert_eq!(tier.tcp_count(), 1, "TC=1 по UDP уводит запрос в TCP");
+        let health = resolver.health.read().unwrap();
+        assert!(
+            health.strikes.is_empty(),
+            "обрезанный UDP-ответ — не отказ сервера"
+        );
+        assert!(health.cooldown.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tc_bit_over_tcp_is_accepted() {
+        let tier = FakeTier::spawn(
+            Behavior::Silent,
+            TcpBehavior::Answer {
+                v4: vec![TEST_IP],
+                ttl: 60,
+                truncated: true,
+            },
+        )
+        .await;
+        let resolver = DnsResolver::with_config(tcp_config(), vec![tier.address]);
+
+        assert_eq!(
+            resolver.lookup_a("tc-over-tcp.example").await.unwrap(),
+            vec![IpAddr::V4(TEST_IP)],
+            "по TCP флаг TC не мешает"
+        );
+        assert_eq!(tier.tcp_count(), 1);
     }
 }
