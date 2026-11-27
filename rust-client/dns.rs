@@ -525,6 +525,23 @@ impl DnsResolver {
         self.resolve(host, true).await
     }
 
+    /// Резолв только AAAA: перехваченный DNS-запрос типа AAAA не должен
+    /// получать A-адреса, иначе клиент не отличит семейство.
+    pub async fn lookup_aaaa(&self, host: &str) -> Result<Vec<IpAddr>> {
+        let host = host.trim();
+        if let Ok(address) = host.parse::<IpAddr>() {
+            return Ok(vec![address]);
+        }
+        let normalized = host.to_ascii_lowercase();
+        if normalized.is_empty() {
+            bail!("пустое DNS-имя");
+        }
+        match self.lookup_qtype(&normalized, DNS_AAAA_RECORD).await? {
+            QtypeResult::Addresses(addresses) => Ok(addresses),
+            QtypeResult::NoData => bail!("DNS: для {normalized} нет AAAA-записи (NODATA)"),
+        }
+    }
+
     async fn resolve(&self, host: &str, a_only: bool) -> Result<Vec<IpAddr>> {
         let host = host.trim();
         if let Ok(address) = host.parse::<IpAddr>() {

@@ -211,6 +211,97 @@ pub fn extract_dns_info(payload: &[u8]) -> Option<(String, bool, Vec<IpAddr>)> {
     }
 }
 
+/// Разбирает вопрос DNS-запроса: тип, класс и смещение сразу после `qclass`.
+///
+/// В вопросе сжатия не бывает, поэтому достаточно пройти метки до нуля.
+fn dns_question(payload: &[u8]) -> Option<(u16, u16, usize)> {
+    if payload.len() < 12 {
+        return None;
+    }
+    let qdcount = u16::from_be_bytes([payload[4], payload[5]]);
+    if qdcount != 1 {
+        return None;
+    }
+    let mut cursor = 12;
+    loop {
+        let len = *payload.get(cursor)? as usize;
+        if len == 0 {
+            cursor += 1;
+            break;
+        }
+        if len & 0xc0 != 0 {
+            return None;
+        }
+        cursor += 1 + len;
+        if cursor >= payload.len() {
+            return None;
+        }
+    }
+    let qtype = u16::from_be_bytes([*payload.get(cursor)?, *payload.get(cursor + 1)?]);
+    let qclass = u16::from_be_bytes([*payload.get(cursor + 2)?, *payload.get(cursor + 3)?]);
+    Some((qtype, qclass, cursor + 4))
+}
+
+/// Тип вопроса в DNS-запросе; `None` для повреждённого или не-запроса.
+pub fn dns_query_type(payload: &[u8]) -> Option<u16> {
+    dns_question(payload).map(|(qtype, _, _)| qtype)
+}
+
+/// Собирает DNS-ответ из уже полученных адресов.
+///
+/// Вопрос повторяется байт в байт, ответы — A или AAAA с TTL 60 и указателем
+/// на имя вопроса. Тип, которого нет среди адресов, даёт `NOERROR` без
+/// ответов: клиент сам решит, спрашивать ли другое семейство. Больше восьми
+/// записей не отдаём, чтобы не выходить за обычный размер UDP-ответа.
+pub fn build_dns_response(query: &[u8], addresses: &[IpAddr]) -> Option<Vec<u8>> {
+    if query.len() < 12 {
+        return None;
+    }
+    let flags = u16::from_be_bytes([query[2], query[3]]);
+    if flags & 0x8000 != 0 {
+        return None;
+    }
+    let (qtype, qclass, question_end) = dns_question(query)?;
+    if qclass != 1 {
+        return None;
+    }
+    let answers: Vec<&IpAddr> = addresses
+        .iter()
+        .filter(|address| match qtype {
+            1 => address.is_ipv4(),
+            28 => address.is_ipv6(),
+            _ => false,
+        })
+        .take(8)
+        .collect();
+
+    let mut response = Vec::with_capacity(question_end + answers.len() * 28 + 16);
+    response.extend_from_slice(&u16::from_be_bytes([query[0], query[1]]).to_be_bytes());
+    response.extend_from_slice(&0x8180u16.to_be_bytes());
+    response.extend_from_slice(&1u16.to_be_bytes());
+    response.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&query[12..question_end]);
+    for address in answers {
+        response.extend_from_slice(&[0xc0, 0x0c]);
+        response.extend_from_slice(&qtype.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&60u32.to_be_bytes());
+        match address {
+            IpAddr::V4(v4) => {
+                response.extend_from_slice(&4u16.to_be_bytes());
+                response.extend_from_slice(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                response.extend_from_slice(&16u16.to_be_bytes());
+                response.extend_from_slice(&v6.octets());
+            }
+        }
+    }
+    Some(response)
+}
+
 pub fn is_domain_in_list(sni: &str, direct_domains: &[String]) -> bool {
     let sni_trimmed = sni.trim_end_matches('.');
     let sni_bytes = sni_trimmed.as_bytes();
@@ -1529,5 +1620,91 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dns_response_tests {
+    use super::*;
+
+    fn query(domain: &str, qtype: u16) -> Vec<u8> {
+        let mut wire = vec![0x13, 0x37, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in domain.split('.') {
+            wire.push(label.len() as u8);
+            wire.extend_from_slice(label.as_bytes());
+        }
+        wire.push(0);
+        wire.extend_from_slice(&qtype.to_be_bytes());
+        wire.extend_from_slice(&[0, 1]);
+        wire
+    }
+
+    #[test]
+    fn answers_an_a_query_with_a_records() {
+        let addresses = vec![
+            "93.184.216.34".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+            "1.1.1.1".parse().unwrap(),
+        ];
+        let response = build_dns_response(&query("example.com", 1), &addresses).unwrap();
+        let (domain, is_response, ips) = extract_dns_info(&response).unwrap();
+        assert_eq!(domain, "example.com");
+        assert!(is_response);
+        assert_eq!(
+            ips,
+            vec![
+                "93.184.216.34".parse::<IpAddr>().unwrap(),
+                "1.1.1.1".parse::<IpAddr>().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_aaaa_in_its_own_family() {
+        let addresses = vec![
+            "93.184.216.34".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+        ];
+        let response = build_dns_response(&query("example.com", 28), &addresses).unwrap();
+        let (_, _, ips) = extract_dns_info(&response).unwrap();
+        assert_eq!(ips, vec!["2001:db8::1".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn unsupported_type_gets_nodata() {
+        let response = build_dns_response(
+            &query("example.com", 65),
+            &["93.184.216.34".parse().unwrap()],
+        )
+        .unwrap();
+        let (domain, is_response, ips) = extract_dns_info(&response).unwrap();
+        assert_eq!(domain, "example.com");
+        assert!(is_response);
+        assert!(ips.is_empty());
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0);
+    }
+
+    #[test]
+    fn answer_count_is_capped() {
+        let addresses: Vec<IpAddr> = (1..=20)
+            .map(|octet| IpAddr::V4(Ipv4Addr::new(203, 0, 113, octet)))
+            .collect();
+        let response = build_dns_response(&query("example.com", 1), &addresses).unwrap();
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 8);
+    }
+
+    #[test]
+    fn malformed_query_is_rejected() {
+        assert!(build_dns_response(&[], &[]).is_none());
+        assert!(build_dns_response(&[0u8; 11], &[]).is_none());
+        let truncated = query("example.com", 1)[..18].to_vec();
+        assert!(build_dns_response(&truncated, &[]).is_none());
+    }
+
+    #[test]
+    fn response_is_not_answered_again() {
+        let mut response = query("example.com", 1);
+        response[2] |= 0x80;
+        assert!(build_dns_response(&response, &[]).is_none());
     }
 }

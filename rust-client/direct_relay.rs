@@ -44,6 +44,24 @@ async fn resolve_direct_domain(domain: &str) -> Vec<IpAddr> {
         .unwrap_or_default()
 }
 
+/// Резолвит перехваченный DNS-запрос через общий ладдер.
+///
+/// Тип вопроса решает, какое семейство спрашивать: A — только A, AAAA — только
+/// AAAA. Всё остальное получает пустой `NOERROR`; клиент сам спросит A.
+async fn resolve_dns_question(domain: &str, query: &[u8]) -> Vec<IpAddr> {
+    match crate::sni::dns_query_type(query) {
+        Some(1) => crate::dns::global()
+            .lookup_a(domain)
+            .await
+            .unwrap_or_default(),
+        Some(28) => crate::dns::global()
+            .lookup_aaaa(domain)
+            .await
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 fn backfill_jitter() -> Duration {
     let span = BACKFILL_JITTER_MAX.saturating_sub(BACKFILL_JITTER_MIN);
     let nanos = std::time::SystemTime::now()
@@ -1392,51 +1410,25 @@ impl DirectRelay {
 
         tokio::spawn(async move {
             let _permit = permit;
-            let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let upstreams = [
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(77, 88, 8, 8)), 53),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(77, 88, 8, 1)), 53),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
-            ];
             #[cfg(test)]
-            let upstreams = test_hooks
-                .upstreams
-                .lock()
-                .ok()
-                .and_then(|upstreams| upstreams.clone())
-                .unwrap_or_else(|| upstreams.to_vec());
-            let mut resp_buf = [0u8; 4096];
-            let mut resp_len = 0;
+            let injected = test_hooks.resolutions.lock().ok().and_then(|values| {
+                values
+                    .as_ref()
+                    .and_then(|map| map.get(&domain_name).cloned())
+            });
+            #[cfg(test)]
+            let ips = match injected {
+                Some(ips) => ips,
+                None => resolve_dns_question(&domain_name, &query_payload).await,
+            };
+            #[cfg(not(test))]
+            let ips = resolve_dns_question(&domain_name, &query_payload).await;
 
-            for &upstream in &upstreams {
-                if socket.send_to(&query_payload, upstream).await.is_ok()
-                    && let Ok(Ok((n, _))) = tokio::time::timeout(
-                        Duration::from_millis(600),
-                        socket.recv_from(&mut resp_buf),
-                    )
-                    .await
-                {
-                    resp_len = n;
-                    break;
-                }
-            }
-
-            if resp_len == 0 {
-                return;
-            }
-
-            let resp_slice = &resp_buf[..resp_len];
             #[cfg(test)]
             let _test_completion = test_hooks
                 .pause(LearnedCheckpointStage::DnsReplyBeforeCommit, &domain_name)
                 .await;
-            if let Some((_, _, ips)) = crate::sni::extract_dns_info(resp_slice)
-                && !ips.is_empty()
-            {
+            if !ips.is_empty() {
                 dns_domain_map.publish_routing_learning(
                     &domain_routing,
                     &direct_ips,
@@ -1447,14 +1439,17 @@ impl DirectRelay {
                 );
             }
 
-            let udp_len = 8 + resp_len;
+            let Some(response) = crate::sni::build_dns_response(&query_payload, &ips) else {
+                return;
+            };
+            let udp_len = 8 + response.len();
             let ip_header_len = if dst_addr.is_ipv6() { 40 } else { 20 };
             let total_len = ip_header_len + udp_len;
             let Some(mut pkt) = pool.try_acquire() else {
                 return;
             };
             if let Ok(dest_slice) = pkt.extend_tail(total_len)
-                && craft_udp_packet_into(dst_addr, src_addr, resp_slice, dest_slice)
+                && craft_udp_packet_into(dst_addr, src_addr, &response, dest_slice)
             {
                 let _ = inbound_tx.send(pkt).await;
             }
@@ -2346,14 +2341,15 @@ mod tests {
 
     async fn assert_intercepted_dns_reply_rejected(template_update: bool) {
         let mut fixture = learned_fixture().await;
+        let answer_ip: Ipv4Addr = "93.184.216.34".parse().unwrap();
         fixture
             .relay
             .learned_test_hooks
-            .set_resolutions(HashMap::new());
+            .set_resolutions(HashMap::from([
+                (LEARNED_A.to_owned(), vec![IpAddr::V4(answer_ip)]),
+                (LEARNED_B.to_owned(), vec!["1.1.1.1".parse().unwrap()]),
+            ]));
         fixture.update(LEARNED_A).await;
-        let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        *fixture.relay.learned_test_hooks.upstreams.lock().unwrap() =
-            Some(vec![upstream.local_addr().unwrap()]);
         let query = learned_dns_wire(LEARNED_A, None);
         let raw = build_udp_packet(
             "198.51.100.12:53000".parse().unwrap(),
@@ -2371,18 +2367,6 @@ mod tests {
                 .try_handle(&learned_packet(&fixture.pool, &raw))
                 .await
         );
-        let mut received = [0u8; 512];
-        let (len, client) =
-            tokio::time::timeout(Duration::from_secs(2), upstream.recv_from(&mut received))
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(&received[..len], query);
-        let answer_ip: Ipv4Addr = "93.184.216.34".parse().unwrap();
-        upstream
-            .send_to(&learned_dns_wire(LEARNED_A, Some(answer_ip)), client)
-            .await
-            .unwrap();
         learned_notification(&reached).await;
         if template_update {
             // Настоящая смена шаблона (пусто -> 10.0.0.0/8): очистка уже
@@ -2419,6 +2403,14 @@ mod tests {
         } else {
             LEARNED_B
         };
+        let current_ip: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        fixture
+            .relay
+            .learned_test_hooks
+            .set_resolutions(HashMap::from([(
+                current_domain.to_owned(),
+                vec![IpAddr::V4(current_ip)],
+            )]));
         let query = learned_dns_wire(current_domain, None);
         let raw = build_udp_packet(
             "198.51.100.12:53001".parse().unwrap(),
@@ -2432,16 +2424,6 @@ mod tests {
                 .try_handle(&learned_packet(&fixture.pool, &raw))
                 .await
         );
-        let (_, client) =
-            tokio::time::timeout(Duration::from_secs(2), upstream.recv_from(&mut received))
-                .await
-                .unwrap()
-                .unwrap();
-        let current_ip: Ipv4Addr = "1.1.1.1".parse().unwrap();
-        upstream
-            .send_to(&learned_dns_wire(current_domain, Some(current_ip)), client)
-            .await
-            .unwrap();
         let reply = tokio::time::timeout(Duration::from_secs(2), fixture.inbound.recv())
             .await
             .unwrap()
