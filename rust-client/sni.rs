@@ -482,7 +482,7 @@ pub fn evaluate_route(
 #[derive(Clone)]
 pub(crate) struct RoutingLearningOrigin {
     pub(crate) config: Arc<crate::dispatcher::DomainRoutingConfig>,
-    pub(crate) generation: u64,
+    generation: u64,
     /// `false`, когда `update_routing_config` получил семантически то же
     /// правило: epoch не менялся, кеши и соединения не сбрасывались.
     pub(crate) changed: bool,
@@ -649,18 +649,6 @@ impl DnsDomainMap {
                 map.insert(ip, (d.clone(), now));
             }
         }
-    }
-
-    /// Знает ли карта хоть один адрес этого домена.
-    ///
-    /// Используется фоновым добором, чтобы не резолвить повторно то, что уже
-    /// выучено из DNS-ответа или SNI. Скан по записям дешевле отдельного
-    /// множества доменов: записей не больше `max_entries`, а вызовов мало.
-    pub fn knows_domain(&self, domain: &str) -> bool {
-        self.entries.read().is_ok_and(|map| {
-            map.values()
-                .any(|(known, _)| known.eq_ignore_ascii_case(domain))
-        })
     }
 
     pub fn get(&self, ip: &IpAddr) -> Option<String> {

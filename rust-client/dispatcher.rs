@@ -1466,16 +1466,6 @@ impl Dispatcher {
                     crate::log_error!("[DNS-РОУТИНГ] Прямой домен: {domain} -> {ip}");
                 }
             }
-            // Запрос без ответа (или ответ, который приложение получит не через
-            // TUN) не даёт пары домен→IP. Ставим домен в приоритет добора,
-            // чтобы не ждать конца очереди.
-            if published
-                && direct
-                && ips.is_empty()
-                && let Some(relay) = &self.direct_relay
-            {
-                relay.request_backfill(&domain);
-            }
         }
         if let Some((sni, _port)) = crate::sni::parse_ip_packet_sni(slice)
             && let Some(dst) = crate::sni::extract_dst_addr(slice)

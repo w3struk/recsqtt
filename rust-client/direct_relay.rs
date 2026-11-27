@@ -1,26 +1,15 @@
 use crate::packet::{PacketBuf, PacketPool};
 use arc_swap::ArcSwap;
 use socket2::SockRef;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, mpsc};
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 const MAX_CONCURRENT_DNS_QUERIES: usize = 256;
 const MAX_UDP_SESSIONS: usize = 4096;
-/// Сколько доменов добора резолвится одновременно в режиме ЧС.
-///
-/// ЧС отказывает безопасно: пакет к неизвестному адресу уходит в туннель,
-/// поэтому список можно добирать медленно. В БС наоборот — неизвестный адрес
-/// уходит напрямую, и SYN успевает утечь до SNI, поэтому там предрезолв
-/// остаётся обязательным и идёт своим прежним путём.
-const BACKFILL_CONCURRENCY: usize = 2;
-const BACKFILL_JITTER_MIN: Duration = Duration::from_millis(50);
-const BACKFILL_JITTER_MAX: Duration = Duration::from_millis(150);
-const BACKFILL_QUEUE_CAPACITY: usize = 1024;
 
 /// Bounded capacity of the direct-relay → TUN inbound hand-off. Keeps a slow
 /// TUN writer from letting smoltcp/DNS egress grow without limit and starve the
@@ -60,115 +49,6 @@ async fn resolve_dns_question(domain: &str, query: &[u8]) -> Vec<IpAddr> {
             .unwrap_or_default(),
         _ => Vec::new(),
     }
-}
-
-fn backfill_jitter() -> Duration {
-    let span = BACKFILL_JITTER_MAX.saturating_sub(BACKFILL_JITTER_MIN);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let width = span.as_millis() as u64 + 1;
-    BACKFILL_JITTER_MIN + Duration::from_millis(nanos % width.max(1))
-}
-
-/// Резолвит один домен и публикует результат под тем же origin, что был снят
-/// при взятии из очереди. `publish_routing_learning` сам проверяет epoch, так
-/// что устаревшая задача ничего не воскресит.
-async fn backfill_one(
-    domain: &str,
-    origin: &crate::sni::RoutingLearningOrigin,
-    direct_ips: &Arc<ArcSwap<HashSet<IpAddr>>>,
-    dns_domain_map: &crate::sni::DnsDomainMap,
-    domain_routing: &Arc<ArcSwap<crate::dispatcher::DomainRoutingConfig>>,
-    #[cfg(test)] test_hooks: &LearnedTestHooks,
-) {
-    #[cfg(test)]
-    let injected = test_hooks
-        .resolutions
-        .lock()
-        .ok()
-        .and_then(|values| values.as_ref().and_then(|map| map.get(domain).cloned()));
-    #[cfg(test)]
-    let ips = match injected {
-        Some(ips) => ips,
-        None => resolve_direct_domain(domain).await,
-    };
-    #[cfg(not(test))]
-    let ips = resolve_direct_domain(domain).await;
-    if ips.is_empty() {
-        return;
-    }
-    let direct = crate::sni::is_direct_domain_mode(
-        domain,
-        origin.config.is_whitelist,
-        &origin.config.direct_domains,
-    );
-    dns_domain_map.publish_routing_learning(
-        domain_routing,
-        direct_ips,
-        origin,
-        domain,
-        &ips,
-        direct,
-    );
-}
-
-/// Фоновый добор списка доменов для режима ЧС.
-///
-/// В отличие от прежнего предрезолва не запускает сотни запросов разом:
-/// две задачи в полёте, джиттер между постановками, пропуск уже выученных
-/// доменов и дедуп в пределах поколения конфигурации. Приоритетная очередь
-/// нужна доменам, которые уже замечены в трафике.
-async fn run_backfill_worker(
-    mut priority_rx: mpsc::Receiver<String>,
-    mut queue_rx: mpsc::Receiver<String>,
-    direct_ips: Arc<ArcSwap<HashSet<IpAddr>>>,
-    dns_domain_map: Arc<crate::sni::DnsDomainMap>,
-    domain_routing: Arc<ArcSwap<crate::dispatcher::DomainRoutingConfig>>,
-    #[cfg(test)] test_hooks: Arc<LearnedTestHooks>,
-) {
-    let mut inflight: JoinSet<()> = JoinSet::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut generation = u64::MAX;
-    loop {
-        while inflight.len() >= BACKFILL_CONCURRENCY {
-            if inflight.join_next().await.is_none() {
-                break;
-            }
-        }
-        let domain = tokio::select! {
-            biased;
-            Some(domain) = priority_rx.recv() => domain,
-            Some(domain) = queue_rx.recv() => domain,
-            else => break,
-        };
-        let origin = dns_domain_map.routing_origin(&domain_routing);
-        if origin.generation != generation {
-            generation = origin.generation;
-            seen.clear();
-        }
-        if !seen.insert(domain.clone()) || dns_domain_map.knows_domain(&domain) {
-            continue;
-        }
-        tokio::time::sleep(backfill_jitter()).await;
-        let ips = direct_ips.clone();
-        let map = dns_domain_map.clone();
-        let routing = domain_routing.clone();
-        #[cfg(test)]
-        let test_hooks = test_hooks.clone();
-        inflight.spawn(async move {
-            #[cfg(test)]
-            {
-                backfill_one(&domain, &origin, &ips, &map, &routing, &test_hooks).await;
-            }
-            #[cfg(not(test))]
-            {
-                backfill_one(&domain, &origin, &ips, &map, &routing).await;
-            }
-        });
-    }
-    while inflight.join_next().await.is_some() {}
 }
 
 async fn run_full_preresolve_task(
@@ -489,7 +369,6 @@ pub struct DirectRelay {
     udp_verdicts: Arc<RwLock<VerdictCache>>,
     udp_sessions: Arc<RwLock<HashMap<SocketAddr, Arc<tokio::net::UdpSocket>>>>,
     shutdown: CancellationToken,
-    backfill: OnceLock<(mpsc::Sender<String>, mpsc::Sender<String>)>,
     #[cfg(test)]
     udp_route_checkpoint: std::sync::Mutex<Option<UdpRouteCheckpoint>>,
     #[cfg(test)]
@@ -715,7 +594,6 @@ impl DirectRelay {
             udp_verdicts,
             udp_sessions: Arc::new(RwLock::new(HashMap::new())),
             shutdown,
-            backfill: OnceLock::new(),
             #[cfg(test)]
             udp_route_checkpoint: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -779,71 +657,14 @@ impl DirectRelay {
             },
         );
         let config = (*origin.config).clone();
-        if origin.changed && config.enabled {
-            if config.is_whitelist {
-                // БС: без предрезолва неизвестный адрес уходит напрямую, и
-                // первый SYN успевает утечь до SNI. Оставляем полный проход.
-                self.spawn_preresolve(origin, config.direct_domains.to_vec());
-            } else {
-                // ЧС: неизвестный адрес уходит в туннель, поэтому список
-                // можно добирать фоновой очередью вместо залпа.
-                self.enqueue_backfill(config.direct_domains.to_vec());
-            }
+        // ЧС резолвит домен только по запросу: перехваченный DNS и SNI дают
+        // пару домен→IP раньше, чем приложение откроет соединение. В БС так
+        // нельзя: неизвестный адрес уходит напрямую, и первый SYN успевает
+        // утечь до SNI, поэтому там список резолвится целиком.
+        if origin.changed && config.enabled && config.is_whitelist {
+            self.spawn_preresolve(origin, config.direct_domains.to_vec());
         }
         config
-    }
-
-    /// Ставит домены в фоновый добор (режим ЧС).
-    fn enqueue_backfill(&self, domains: Vec<String>) {
-        let Some((_, queue_tx)) = self.backfill_senders() else {
-            return;
-        };
-        for domain in domains {
-            let domain = domain.trim().to_lowercase();
-            if domain.is_empty() {
-                continue;
-            }
-            if queue_tx.try_send(domain).is_err() {
-                break;
-            }
-        }
-    }
-
-    /// Приоритетный добор для домена, который уже замечен в трафике.
-    pub fn request_backfill(&self, domain: &str) {
-        let domain = domain.trim().to_lowercase();
-        if domain.is_empty() {
-            return;
-        }
-        if let Some((priority_tx, _)) = self.backfill_senders() {
-            let _ = priority_tx.try_send(domain);
-        }
-    }
-
-    fn backfill_senders(&self) -> Option<&(mpsc::Sender<String>, mpsc::Sender<String>)> {
-        if let Some(senders) = self.backfill.get() {
-            return Some(senders);
-        }
-        let handle = tokio::runtime::Handle::try_current().ok()?;
-        let (priority_tx, priority_rx) = mpsc::channel(BACKFILL_QUEUE_CAPACITY);
-        let (queue_tx, queue_rx) = mpsc::channel(BACKFILL_QUEUE_CAPACITY);
-        let ips = self.direct_ips.clone();
-        let map = self.dns_domain_map.clone();
-        let routing = self.domain_routing.clone();
-        #[cfg(test)]
-        let test_hooks = self.learned_test_hooks.clone();
-        handle.spawn(run_backfill_worker(
-            priority_rx,
-            queue_rx,
-            ips,
-            map,
-            routing,
-            #[cfg(test)]
-            test_hooks,
-        ));
-        // Если гонка проиграна, наш воркер останется без отправителей и выйдет.
-        let _ = self.backfill.set((priority_tx, queue_tx));
-        self.backfill.get()
     }
 
     fn spawn_preresolve(&self, origin: crate::sni::RoutingLearningOrigin, domains: Vec<String>) {
@@ -898,12 +719,13 @@ impl DirectRelay {
         if let Some((domain, is_resp, _)) = crate::sni::parse_ip_packet_dns(slice)
             && !is_resp
         {
+            // Локальным считаем только запрос к локальному резолверу (роутер,
+            // 192.168/10.x). Источник в TUN всегда приватный (10.66.67.x),
+            // поэтому проверять его нельзя: иначе перехват не срабатывает
+            // никогда и DNS для прямых доменов уходит в туннель.
             let is_local_dns = crate::sni::extract_dst_addr(slice)
                 .map(|a| is_local_or_private_ip(&a.ip()))
-                .unwrap_or(false)
-                || crate::sni::extract_src_addr(slice)
-                    .map(|a| is_local_or_private_ip(&a.ip()))
-                    .unwrap_or(false);
+                .unwrap_or(false);
             if !is_local_dns {
                 if config.enabled {
                     let is_direct = crate::sni::is_direct_domain_mode(
@@ -2352,7 +2174,7 @@ mod tests {
         fixture.update(LEARNED_A).await;
         let query = learned_dns_wire(LEARNED_A, None);
         let raw = build_udp_packet(
-            "198.51.100.12:53000".parse().unwrap(),
+            "10.66.67.2:53000".parse().unwrap(),
             "8.8.8.8:53".parse().unwrap(),
             &query,
         )
@@ -2895,6 +2717,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chs_config_apply_does_not_preresolve_the_list() {
+        let fixture = learned_fixture().await;
+        fixture
+            .dispatcher
+            .update_domain_routing(&format!("enabled=1;domains={LEARNED_A}"));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(
+            fixture.relay.direct_ips.load().is_empty(),
+            "ЧС не резолвит список на применении конфигурации"
+        );
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&ip),
+            None,
+            "без трафика домен остаётся невыученным"
+        );
+    }
+
+    #[tokio::test]
+    async fn bs_config_apply_still_preresolves_the_list() {
+        let fixture = learned_fixture().await;
+        fixture
+            .dispatcher
+            .update_domain_routing(&format!("enabled=1;whitelist=1;domains={LEARNED_A}"));
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && fixture.relay.dns_domain_map.get(&ip).is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&ip).as_deref(),
+            Some(LEARNED_A),
+            "БС обязан предрезолвить список: иначе первый SYN уйдёт напрямую"
+        );
+        assert!(
+            fixture.relay.direct_ips.load().is_empty(),
+            "в БС домены списка уходят в туннель, а не в direct"
+        );
+    }
+
+    #[tokio::test]
     async fn preresolve_uses_only_server_supplied_domains() {
         let supplied = vec![" 127.0.0.1 ".to_owned(), "127.0.0.1".to_owned()];
         let domain_routing = Arc::new(ArcSwap::from_pointee(
@@ -2977,72 +2841,5 @@ mod tests {
 
         let loaded = direct_ips.load();
         assert!(loaded.contains(&dynamic_ip));
-    }
-
-    fn chs_config(domains: &[&str]) -> crate::dispatcher::DomainRoutingConfig {
-        crate::dispatcher::DomainRoutingConfig {
-            enabled: true,
-            is_whitelist: false,
-            direct_domains: domains
-                .iter()
-                .map(|d| (*d).to_owned())
-                .collect::<Vec<_>>()
-                .into(),
-            ..Default::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn backfill_skips_a_domain_learned_from_observation() {
-        let (relay, _pool) = test_relay_with_config(chs_config(&[LEARNED_A]));
-        let ip: IpAddr = "93.184.216.34".parse().unwrap();
-        relay.dns_domain_map.insert(ip, LEARNED_A.to_owned());
-
-        relay.enqueue_backfill(vec![LEARNED_A.to_owned(), "   ".to_owned()]);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        assert!(
-            relay.direct_ips.load().is_empty(),
-            "выученный домен не должен резолвиться повторно"
-        );
-        assert_eq!(relay.dns_domain_map.get(&ip).as_deref(), Some(LEARNED_A));
-    }
-
-    #[tokio::test]
-    async fn backfill_publishes_a_domain_resolved_by_the_ladder() {
-        let (relay, _pool) = test_relay_with_config(chs_config(&[LEARNED_B]));
-        let ip: IpAddr = "1.1.1.1".parse().unwrap();
-        relay
-            .learned_test_hooks
-            .set_resolutions(HashMap::from([(LEARNED_B.to_owned(), vec![ip])]));
-
-        relay.enqueue_backfill(vec![LEARNED_B.to_owned()]);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline && !relay.direct_ips.load().contains(&ip) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        assert!(
-            relay.direct_ips.load().contains(&ip),
-            "добор обязан опубликовать прямой IP"
-        );
-        assert_eq!(relay.dns_domain_map.get(&ip).as_deref(), Some(LEARNED_B));
-    }
-
-    #[tokio::test]
-    async fn priority_backfill_serves_a_domain_seen_in_traffic() {
-        let (relay, _pool) = test_relay_with_config(chs_config(&[LEARNED_A]));
-        let ip: IpAddr = "93.184.216.34".parse().unwrap();
-        relay
-            .learned_test_hooks
-            .set_resolutions(HashMap::from([(LEARNED_A.to_owned(), vec![ip])]));
-
-        relay.request_backfill(LEARNED_A);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline && !relay.direct_ips.load().contains(&ip) {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        assert!(relay.direct_ips.load().contains(&ip));
     }
 }
