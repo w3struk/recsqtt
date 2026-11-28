@@ -2727,6 +2727,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reordered_domain_list_keeps_learned_pairs() {
+        let fixture = learned_fixture().await;
+        fixture.dispatcher.update_domain_routing(&format!(
+            "enabled=1;whitelist=1;domains={LEARNED_A},{LEARNED_B}"
+        ));
+        let ip_a: IpAddr = "93.184.216.34".parse().unwrap();
+        let ip_b: IpAddr = "1.1.1.1".parse().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && fixture.relay.dns_domain_map.get(&ip_a).is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&ip_a).as_deref(),
+            Some(LEARNED_A)
+        );
+
+        // Тот же список в другом порядке — не смена правила.
+        fixture.dispatcher.update_domain_routing(&format!(
+            "enabled=1;whitelist=1;domains={LEARNED_B},{LEARNED_A}"
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&ip_a).as_deref(),
+            Some(LEARNED_A),
+            "перестановка списка не должна стирать выученные пары"
+        );
+        assert_eq!(
+            fixture.relay.dns_domain_map.get(&ip_b).as_deref(),
+            Some(LEARNED_B)
+        );
+    }
+
+    #[tokio::test]
     async fn template_update_keeps_learned_domain_pairs() {
         let fixture = learned_fixture().await;
         fixture.update(LEARNED_A).await;

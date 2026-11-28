@@ -487,6 +487,23 @@ pub struct DomainRoutingConfig {
     pub template_ip_rules: Arc<crate::sni::IpRuleSet>,
 }
 
+/// Равенство доменных списков без учёта порядка.
+///
+/// Сервер вправе переставить тот же список, а `Vec` в `DomainRoutingConfig`
+/// хранится в порядке прихода. Сравнение по порядку считало бы такую
+/// перестановку сменой правила: сбрасывались бы выученные пары и в БС
+/// заново запускался предрезолв.
+pub(crate) fn domains_match(left: &[String], right: &[String]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left: Vec<&str> = left.iter().map(String::as_str).collect();
+    let mut right: Vec<&str> = right.iter().map(String::as_str).collect();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
+}
+
 impl DomainRoutingConfig {
     /// Семантическое равенство: периодический GETCONF присылает то же правило,
     /// и совпадение не должно менять routing epoch и сбрасывать живые прямые
@@ -495,7 +512,7 @@ impl DomainRoutingConfig {
         self.enabled == other.enabled
             && self.is_whitelist == other.is_whitelist
             && self.ip_is_whitelist == other.ip_is_whitelist
-            && self.direct_domains == other.direct_domains
+            && domains_match(&self.direct_domains, &other.direct_domains)
             && self.ip_rules == other.ip_rules
             && self.template_ip_rules == other.template_ip_rules
     }
@@ -1994,6 +2011,39 @@ mod tests {
         packet[20..22].copy_from_slice(&sport.to_be_bytes());
         packet[22..24].copy_from_slice(&dport.to_be_bytes());
         packet
+    }
+
+    #[test]
+    fn same_effective_ignores_domain_order_and_duplicates() {
+        let base = DomainRoutingConfig {
+            enabled: true,
+            direct_domains: vec!["a.example".to_owned(), "b.example".to_owned()].into(),
+            ..Default::default()
+        };
+        let reordered = DomainRoutingConfig {
+            direct_domains: vec!["b.example".to_owned(), "a.example".to_owned()].into(),
+            ..base.clone()
+        };
+        assert!(base.same_effective(&reordered));
+        assert!(domains_match(
+            &["a.example".to_owned(), "b.example".to_owned()],
+            &["b.example".to_owned(), "a.example".to_owned()]
+        ));
+        assert!(!domains_match(
+            &["a.example".to_owned()],
+            &["a.example".to_owned(), "b.example".to_owned()]
+        ));
+        // Дубликаты считаются: парсер их схлопывает, но сравнение остаётся
+        // строгим и не прячет отличие набора.
+        assert!(!domains_match(
+            &["a.example".to_owned(), "a.example".to_owned()],
+            &["a.example".to_owned()]
+        ));
+        let changed = DomainRoutingConfig {
+            direct_domains: vec!["a.example".to_owned(), "c.example".to_owned()].into(),
+            ..base.clone()
+        };
+        assert!(!base.same_effective(&changed));
     }
 
     #[test]

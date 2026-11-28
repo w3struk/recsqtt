@@ -586,7 +586,7 @@ impl DnsDomainMap {
         // карта и direct_ips не чистятся и предрезолв не перезапускается.
         let domain_rules_changed = current.enabled != updated.enabled
             || current.is_whitelist != updated.is_whitelist
-            || current.direct_domains != updated.direct_domains;
+            || !crate::dispatcher::domains_match(&current.direct_domains, &updated.direct_domains);
         *epoch = epoch.wrapping_add(1);
         // Revoke both kinds of facts before exposing the new config. In-flight
         // publishers cannot pass their origin check until this update completes.
